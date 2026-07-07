@@ -1,0 +1,23 @@
+{
+  "name": "whisper-cli",
+  "version": "1.0.0",
+  "description": "Multi-platform IM -> AI CLI forwarding service (Feishu/WeCom -> CodeBuddy/Cursor)",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["chatops", "feishu", "wecom", "codebuddy", "cursor", "ai-agent"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.67.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
