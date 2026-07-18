@@ -33,6 +33,13 @@ async function main(): Promise<void> {
   const env = parseEnvFile(envPath);
   const globalConfig = loadGlobalConfig(env);
 
+  // State directory for session persistence
+  const stateDir = resolve(ROOT, "state");
+  { // ensure state dir exists
+    const { mkdirSync, existsSync } = await import("node:fs");
+    if (!existsSync(stateDir)) mkdirSync(stateDir);
+  }
+
   // Create and start all agent runners
   const runners: AgentRunner[] = [];
   for (const agent of agents) {
@@ -41,6 +48,8 @@ async function main(): Promise<void> {
       globalConfig.workdir,
       globalConfig.codebuddyBin,
       globalConfig.cursorAgentBin,
+      globalConfig.codexBin,
+      stateDir,
     );
     runners.push(runner);
 

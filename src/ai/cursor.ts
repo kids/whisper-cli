@@ -66,6 +66,7 @@ interface StreamEvent {
   text?: string;
   result?: string;
   error?: string;
+  model?: string;
   usage?: Record<string, unknown>;
   message?: { content: Array<{ type: string; text?: string }> };
 }
@@ -122,6 +123,7 @@ export interface RunCursorOptions {
   agentBin?: string;
   model?: string;
   onActivity?: (label: string) => void;
+  onStreamUpdate?: (text: string) => void;
 }
 
 export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
@@ -130,6 +132,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
   const model = opts.model || "auto";
   const sessionId = sessions.get(chatId);
 
+  const onStreamUpdate = opts.onStreamUpdate;
   const lockKey = sessionId ? `session:${sessionId}` : `chat:${chatId}`;
 
   return withLock(lockKey, () => {
@@ -157,6 +160,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       let stderr = "";
       let resultText = "";
       let outSessionId: string | undefined;
+      let outModel: string | undefined;
       let lastSegment = "";
       let lineBuf = "";
       let usage: AiResult["usage"];
@@ -171,7 +175,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
         settled = true;
         clearInterval(watchdog);
         clearRun();
-        resolve({ ...result, sessionId: result.sessionId || outSessionId });
+        resolve({ ...result, model: result.model || outModel, sessionId: result.sessionId || outSessionId });
       };
 
       const watchdog = setInterval(() => {
@@ -196,6 +200,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
         try { ev = JSON.parse(trimmed); } catch { return; }
 
         if (ev.session_id && !outSessionId) outSessionId = ev.session_id;
+        if (ev.model && !outModel) outModel = ev.model;
 
         if (ev.type === "assistant" && ev.message?.content) {
           for (const c of ev.message.content) {
@@ -203,6 +208,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
               lastSegment += c.text;
               const snippet = stripAnsi(c.text).replace(/\s+/g, " ").trim().slice(-80);
               if (snippet) onActivity?.(`💭 ${snippet}`);
+              if (lastSegment) onStreamUpdate?.(stripAnsi(lastSegment));
             }
           }
         }
@@ -241,6 +247,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
 
         finish({
           text: output,
+          model: outModel,
           sessionId: outSessionId,
           usage,
         });

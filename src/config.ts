@@ -68,8 +68,8 @@ function validatePlatform(p: string): Platform {
 }
 
 function validateAiCli(c: string): AiCli {
-  if (c === "codebuddy" || c === "cursor") return c;
-  throw new Error(`Unsupported AI CLI: "${c}". Supported: codebuddy, cursor`);
+  if (c === "codebuddy" || c === "cursor" || c === "codex") return c;
+  throw new Error(`Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex`);
 }
 
 function parseGroup(raw: RawGroup): AgentConfig | null {
@@ -142,6 +142,10 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     }
     config.cursor = { apiKey };
   }
+  if (aiCli === "codex") {
+    // Codex uses persistent auth via `codex login` — no API key needed.
+    config.codex = {};
+  }
 
   return config;
 }
@@ -206,6 +210,7 @@ export interface GlobalConfig {
   workdir: string;
   codebuddyBin: string;
   cursorAgentBin: string;
+  codexBin: string;
   logLevel: string;
 }
 
@@ -225,6 +230,11 @@ export function loadGlobalConfig(env: Record<string, string>): GlobalConfig {
       resolve(home, ".local/bin/agent"),
       "/opt/homebrew/bin/agent",
       "/usr/local/bin/agent",
+    ]),
+    codexBin: env.CODEX_BIN || findBinary("codex", [
+      resolve(home, ".local/bin/codex"),
+      "/opt/homebrew/bin/codex",
+      "/usr/local/bin/codex",
     ]),
     logLevel: env.LOG_LEVEL || "info",
   };

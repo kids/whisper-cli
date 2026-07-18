@@ -211,6 +211,97 @@ export class FeishuClient {
   }
 
   // -----------------------------------------------------------------------
+  // Interactive card (schema 2.0) — for real-time streaming patches
+  // -----------------------------------------------------------------------
+
+  /** Build a Feishu interactive card (schema 2.0) with markdown body */
+  static buildMarkdownCard(content: string): string {
+    return JSON.stringify({
+      schema: "2.0",
+      config: { width_mode: "fill", update_multi: true },
+      body: { elements: [{ tag: "markdown", content }] },
+    });
+  }
+
+  /** Send a streaming card and return its message_id for subsequent patches */
+  async sendCardAndGetId(chatId: string, text: string): Promise<string | undefined> {
+    const content = FeishuClient.buildMarkdownCard(text);
+    try {
+      const resp = await this.client.im.v1.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: chatId, msg_type: "interactive", content },
+      });
+      return resp.code === 0 ? resp.data?.message_id : undefined;
+    } catch { return undefined; }
+  }
+
+  /** Patch (update in-place) an existing interactive card message */
+  async updateCardMessage(messageId: string, text: string): Promise<void> {
+    const content = FeishuClient.buildMarkdownCard(text);
+    try {
+      const resp = await this.client.im.v1.message.patch({
+        path: { message_id: messageId },
+        data: { content },
+      });
+      if (resp.code !== 0) console.error(`[feishu] updateCard FAIL code=${resp.code} msg=${resp.msg}`);
+    } catch (e) {
+      console.error("[feishu] updateCard exception:", e);
+    }
+  }
+
+  /**
+   * Send with card-first fallback: try interactive card, fall back to text.
+   * Also splits long messages.
+   */
+  async sendMarkdown(chatId: string, text: string): Promise<void> {
+    const chunks = text.length
+      ? Array.from({ length: Math.ceil(text.length / 4000) }, (_, i) => text.slice(i * 4000, i * 4000 + 4000))
+      : [""];
+    for (const chunk of chunks) {
+      if (!chunk) { await this.sendText(chatId, ""); continue; }
+      try {
+        const content = FeishuClient.buildMarkdownCard(chunk);
+        const resp = await this.client.im.v1.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: chatId, msg_type: "interactive", content },
+        });
+        if (resp.code !== 0) {
+          console.error(`[feishu] card error code=${resp.code}, falling back to text`);
+          await this.sendText(chatId, chunk);
+        }
+      } catch {
+        await this.sendText(chatId, chunk);
+      }
+    }
+  }
+
+  /** Create a Feishu group with a fresh session */
+  async createSessionChat(name: string, ownerOpenId: string): Promise<{ chatId: string | null; message: string }> {
+    try {
+      const resp = await this.client.im.v1.chat.create({
+        params: { user_id_type: "open_id" },
+        data: { name, chat_mode: "group", chat_type: "private", user_id_list: [ownerOpenId] },
+      });
+      if (resp.code !== 0) return { chatId: null, message: `⚠️ Failed: code=${resp.code} msg=${resp.msg}` };
+      return { chatId: resp.data?.chat_id ?? null, message: `✅ Created「${name}」` };
+    } catch (e) {
+      return { chatId: null, message: `⚠️ Failed: ${String(e)}` };
+    }
+  }
+
+  /** Send a plain text message */
+  async sendText(chatId: string, chunk: string): Promise<void> {
+    try {
+      await this.client.im.v1.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: chunk }) },
+      });
+    } catch (e) {
+      console.error("[feishu] sendText exception:", e);
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // Helpers
   // -----------------------------------------------------------------------
 
