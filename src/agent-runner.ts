@@ -24,6 +24,7 @@ import {
   stopCodexRun,
   clearCodexSession,
   setCodexSession,
+  getCodexDefaultModel,
 } from "./ai/codex";
 
 // ---------------------------------------------------------------------------
@@ -287,7 +288,7 @@ export class AgentRunner {
     }
 
     if (text === "/status") {
-      const model = models.get(chatId) || "default";
+      const model = this.getEffectiveModel(chatId);
       await feishu.sendMarkdown(chatId, [
         `**${this.config.name}**`,
         `平台: \`${this.config.platform}\``,
@@ -316,12 +317,13 @@ export class AgentRunner {
     const current = models.get(chatId) || "default";
 
     if (!arg) {
+      const effective = this.getEffectiveModel(chatId);
       // Show current model
       if (aiCli === "codebuddy") {
         const bin = this.codebuddyBin || "codebuddy";
         const supported = queryCodebuddyModels(bin);
         await feishu.sendMarkdown(chatId, [
-          `当前模型: \`${current}\``,
+          `当前模型: \`${effective}\``,
           `用法: /model <id>  （/model default 恢复默认）`,
           "",
           `**可用模型:**`,
@@ -329,7 +331,7 @@ export class AgentRunner {
         ].join("\n"));
       } else {
         await feishu.sendMarkdown(chatId, [
-          `当前模型: \`${current}\``,
+          `当前模型: \`${effective}\``,
           `用法: /model <id>  （/model default 恢复默认）`,
           "",
           `可用模型请参考 CLI 文档（如 \`codex --help\`）。`,
@@ -436,7 +438,8 @@ export class AgentRunner {
 
     let body = result.text || "(empty)";
     if (usage) {
-      body += formatUsageFooter(chatId, result.model || null, usage);
+      const displayModel = result.model || this.getDefaultModelName() || null;
+      body += formatUsageFooter(chatId, displayModel, usage);
     }
 
     if (cardId) {
@@ -506,6 +509,22 @@ export class AgentRunner {
     }
 
     throw new Error(`Cannot dispatch: no config for "${aiCli}"`);
+  }
+
+  // -----------------------------------------------------------------------
+  // Model helpers
+  // -----------------------------------------------------------------------
+
+  private getEffectiveModel(chatId: string): string {
+    const override = models.get(chatId);
+    if (override) return override;
+    return this.getDefaultModelName() || "default";
+  }
+
+  private getDefaultModelName(): string | undefined {
+    if (this.config.aiCli === "codex") return getCodexDefaultModel();
+    if (this.config.aiCli === "codebuddy") return this.codebuddyBin; // no single default for CB, model overrides work per-chat
+    return undefined;
   }
 
   // -----------------------------------------------------------------------

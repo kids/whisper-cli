@@ -10,6 +10,8 @@
 //   {"type":"turn.completed","usage":{"input_tokens":...,"output_tokens":...}}
 // =============================================================================
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { AiResult, CodexConfig } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -75,6 +77,27 @@ interface CodexEvent {
     output_tokens?: number;
     reasoning_output_tokens?: number;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Config.toml — read default model
+// ---------------------------------------------------------------------------
+
+let _cachedCodexModel: string | undefined;
+
+/** Read the default model from ~/.codex/config.toml (e.g. `model = "gpt-5.6-sol"`) */
+export function getCodexDefaultModel(): string | undefined {
+  if (_cachedCodexModel !== undefined) return _cachedCodexModel;
+  const configPath = resolve(process.env.HOME || "/root", ".codex/config.toml");
+  try {
+    if (!existsSync(configPath)) return undefined;
+    const content = readFileSync(configPath, "utf8");
+    const m = content.match(/^model\s*=\s*"([^"]+)"/m);
+    _cachedCodexModel = m?.[1] || undefined;
+  } catch {
+    _cachedCodexModel = undefined;
+  }
+  return _cachedCodexModel;
 }
 
 // ---------------------------------------------------------------------------
