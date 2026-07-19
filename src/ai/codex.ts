@@ -102,7 +102,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
     if (tid) {
       // Resume existing thread with new prompt
       args = [
-        "exec", "resume", tid, "--last",
+        "exec", "resume", tid,
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",
         "--dangerously-bypass-hook-trust",
@@ -129,7 +129,9 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
         const child = spawn(codexBin, args, {
           env: { ...process.env },
           cwd: workdir,
+          stdio: ["pipe", "pipe", "pipe"],
         });
+        child.stdin?.end(); // codex reads stdin even with positional prompt — must close immediately
 
         const activeRun: ActiveRun = { child, cancelled: false };
         activeRuns.set(chatId, activeRun);
