@@ -7,7 +7,8 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "capture-chat-id": "tsx scripts/capture-chat-id.ts"
   },
   "keywords": ["chatops", "feishu", "wecom", "codebuddy", "cursor", "ai-agent"],
   "author": "",

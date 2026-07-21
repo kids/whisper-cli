@@ -32,11 +32,38 @@ export interface AgentConfig {
   codex?: CodexConfig;
   /** Allowed user open_ids (optional) */
   allowlist: Set<string>;
+  /**
+   * Admin console mode (from feishu-cursor):
+   * p2p chat = management (/新任务 /列表 /归档), work groups = AI sessions.
+   * When true, only registered (non-archived) groups run AI.
+   */
+  adminMode?: boolean;
+  /** Configured admin p2p chat_id (optional; auto-recorded on first p2p) */
+  adminChatId?: string;
 }
 
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
+}
+
+/** Incoming Feishu image/file attachment */
+export interface IncomingAttachment {
+  type: "file" | "image";
+  fileKey: string;
+  fileName?: string;
+}
+
+/** Agent-produced image to send back to chat */
+export interface AgentImage {
+  filePath?: string;
+  imageData?: string;
+}
+
+/** Agent-produced file to send back to chat */
+export interface AgentFile {
+  filePath: string;
+  fileName?: string;
 }
 
 export interface WeComConfig {
@@ -69,6 +96,10 @@ export interface AiResult {
   usage?: TokenUsage;
   /** Session ID for continuation */
   sessionId?: string;
+  /** Images produced by the agent (Cursor generateImage / path mentions) */
+  images?: AgentImage[];
+  /** Files produced / mentioned by the agent */
+  files?: AgentFile[];
 }
 
 export interface TokenUsage {

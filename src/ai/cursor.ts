@@ -2,7 +2,9 @@
 // Cursor Agent CLI runner — spawns `agent` with session management
 // =============================================================================
 import { spawn } from "node:child_process";
-import type { AiResult, CursorConfig } from "../types";
+import { existsSync, statSync } from "node:fs";
+import { basename } from "node:path";
+import type { AgentFile, AgentImage, AiResult, CursorConfig } from "../types";
 import { findBinary } from "../config";
 
 // ---------------------------------------------------------------------------
@@ -14,8 +16,8 @@ const DEFAULT_BIN = findBinary("agent", [
   "/opt/homebrew/bin/agent",
   "/usr/local/bin/agent",
 ]);
-const STALL_TIMEOUT_MS = 45 * 60 * 1000; // 45 min no-output
-const HARD_TIMEOUT_MS = 0;               // 0 = no limit
+const STALL_TIMEOUT_MS = Number(process.env.AGENT_STALL_MS || 45 * 60 * 1000);
+const HARD_TIMEOUT_MS = Number(process.env.AGENT_MAX_MS || 0);
 
 // ---------------------------------------------------------------------------
 // Session store (chat_id -> session_id)
@@ -69,6 +71,7 @@ interface StreamEvent {
   model?: string;
   usage?: Record<string, unknown>;
   message?: { content: Array<{ type: string; text?: string }> };
+  tool_call?: Record<string, unknown>;
 }
 
 function stripAnsi(s: string): string {
@@ -94,6 +97,53 @@ function normalizeUsage(u: Record<string, unknown> | undefined): AiResult["usage
   const cacheWrite = num("cacheWriteTokens", "cache_write_tokens", "cache_creation_input_tokens");
   if (input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) return undefined;
   return { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, totalTokens: input + output };
+}
+
+const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+const IMG_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.(?:png|jpe?g|gif|webp|bmp))(?:[\s`'")]|$)/gi;
+const FILE_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.[\w.-]+)(?:[\s`'")]|$)/gi;
+
+function isRegularFile(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function extractGenerateImage(ev: StreamEvent): AgentImage | undefined {
+  if (ev.type !== "tool_call" || ev.subtype !== "completed" || !ev.tool_call) return undefined;
+  const gen = ev.tool_call.generateImageToolCall as Record<string, unknown> | undefined;
+  const success = (gen?.result as Record<string, unknown> | undefined)?.success as
+    | Record<string, unknown>
+    | undefined;
+  if (!success) return undefined;
+  const img: AgentImage = {};
+  if (typeof success.filePath === "string") img.filePath = success.filePath;
+  if (typeof success.imageData === "string") img.imageData = success.imageData;
+  return img.filePath || img.imageData ? img : undefined;
+}
+
+function collectImagesFromText(text: string, seenPaths: Set<string>): AgentImage[] {
+  const out: AgentImage[] = [];
+  for (const m of text.matchAll(IMG_PATH_RE)) {
+    const p = m[1];
+    if (seenPaths.has(p) || !isRegularFile(p)) continue;
+    seenPaths.add(p);
+    out.push({ filePath: p });
+  }
+  return out;
+}
+
+function collectFilesFromText(text: string, seenPaths: Set<string>): AgentFile[] {
+  const out: AgentFile[] = [];
+  for (const m of text.matchAll(FILE_PATH_RE)) {
+    const p = m[1];
+    if (seenPaths.has(p) || IMG_EXT.test(p) || !isRegularFile(p)) continue;
+    seenPaths.add(p);
+    out.push({ filePath: p, fileName: basename(p) });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,17 +215,34 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       let lineBuf = "";
       let usage: AiResult["usage"];
       let settled = false;
+      const images: AgentImage[] = [];
+      const files: AgentFile[] = [];
+      const seenPaths = new Set<string>();
       const startedAt = Date.now();
       let lastOutputAt = startedAt;
 
       const touch = () => { lastOutputAt = Date.now(); };
+
+      const pushImage = (img: AgentImage) => {
+        if (img.filePath) {
+          if (seenPaths.has(img.filePath)) return;
+          seenPaths.add(img.filePath);
+        }
+        images.push(img);
+      };
 
       const finish = (result: AiResult) => {
         if (settled) return;
         settled = true;
         clearInterval(watchdog);
         clearRun();
-        resolve({ ...result, model: result.model || outModel, sessionId: result.sessionId || outSessionId });
+        resolve({
+          ...result,
+          model: result.model || outModel,
+          sessionId: result.sessionId || outSessionId,
+          images: result.images ?? images,
+          files: result.files ?? files,
+        });
       };
 
       const watchdog = setInterval(() => {
@@ -215,6 +282,9 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
         if (ev.type === "result" && ev.result != null) resultText = ev.result;
         if (ev.type === "result" && ev.subtype === "error" && ev.error) resultText = ev.error;
         if (ev.type === "result" && ev.usage) usage = normalizeUsage(ev.usage) ?? usage;
+
+        const genImg = extractGenerateImage(ev);
+        if (genImg) pushImage(genImg);
       };
 
       child.stdout!.on("data", (chunk: Buffer) => {
@@ -245,11 +315,16 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
           return;
         }
 
+        for (const img of collectImagesFromText(output, seenPaths)) pushImage(img);
+        for (const f of collectFilesFromText(output, seenPaths)) files.push(f);
+
         finish({
           text: output,
           model: outModel,
           sessionId: outSessionId,
           usage,
+          images,
+          files,
         });
       });
 

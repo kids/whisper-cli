@@ -90,6 +90,14 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     return null;
   }
 
+  const adminModeRaw = (e.ADMIN_MODE || "").toLowerCase();
+  const adminMode =
+    adminModeRaw === "1" ||
+    adminModeRaw === "true" ||
+    adminModeRaw === "yes" ||
+    // Cursor groups default to admin-console mode (feishu-cursor UX)
+    (aiCli === "cursor" && adminModeRaw !== "0" && adminModeRaw !== "false" && adminModeRaw !== "no");
+
   const config: AgentConfig = {
     name: e.NAME || `Agent #${raw.index}`,
     index: raw.index,
@@ -99,6 +107,8 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     allowlist: new Set(
       (e.ALLOWLIST || e.FEISHU_ALLOWLIST || "").split(",").map((s) => s.trim()).filter(Boolean),
     ),
+    adminMode,
+    adminChatId: e.FEISHU_ADMIN_CHAT_ID || e.FEISHU_CHAT_ID || undefined,
   };
 
   // Platform-specific
@@ -213,6 +223,10 @@ export interface GlobalConfig {
   cursorAgentBin: string;
   codexBin: string;
   logLevel: string;
+  /** Agent stall timeout (ms); 0 = disabled. Default 45min (feishu-cursor) */
+  agentStallMs: number;
+  /** Agent hard max duration (ms); 0 = unlimited */
+  agentMaxMs: number;
 }
 
 export function loadGlobalConfig(env: Record<string, string>): GlobalConfig {
@@ -238,5 +252,7 @@ export function loadGlobalConfig(env: Record<string, string>): GlobalConfig {
       "/usr/local/bin/codex",
     ]),
     logLevel: env.LOG_LEVEL || "info",
+    agentStallMs: Number(env.AGENT_STALL_MS || 45 * 60 * 1000),
+    agentMaxMs: Number(env.AGENT_MAX_MS || 0),
   };
 }

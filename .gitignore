@@ -4,3 +4,5 @@ dist/
 *.log
 state/
 debug/
+.tasks.json
+.feishu-uploads/

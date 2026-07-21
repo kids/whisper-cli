@@ -2,7 +2,10 @@
 // Feishu (Lark) platform adapter — WebSocket long-connection mode
 // =============================================================================
 import * as Lark from "@larksuiteoapi/node-sdk";
-import type { FeishuConfig } from "../types";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, extname, join } from "node:path";
+import type { AgentFile, AgentImage, FeishuConfig, IncomingAttachment } from "../types";
+import { chunkMarkdown, markdownToPostBody } from "../post";
 
 // ---------------------------------------------------------------------------
 // Message event types
@@ -16,6 +19,7 @@ export interface FeishuMessageEvent {
   text: string;            // parsed plain text
   senderOpenId: string;
   content: string;         // raw JSON content
+  attachments: IncomingAttachment[];
 }
 
 export type MessageHandler = (event: FeishuMessageEvent) => Promise<void> | void;
@@ -74,8 +78,9 @@ export class FeishuClient {
         const sender = ev.sender as Record<string, unknown> | undefined;
         if (sender?.sender_type === "app") return;
 
-        // Parse text
+        // Parse text + attachments
         const text = parseFeishuContent(content, messageType).trim();
+        const attachments = parseIncomingAttachments(content, messageType);
 
         // Extract sender open_id
         const senderOpenId = extractFeishuSenderOpenId(ev);
@@ -89,12 +94,14 @@ export class FeishuClient {
             text,
             senderOpenId,
             content,
+            attachments,
           });
         }
       },
 
       // Suppress noisy events
       "im.message.message_read_v1": async () => {},
+      "im.chat.access_event.bot_p2p_chat_entered_v1": async () => {},
     });
 
     this.wsClient.start({ eventDispatcher: dispatcher });
@@ -276,11 +283,17 @@ export class FeishuClient {
   }
 
   /** Create a Feishu group with a fresh session */
-  async createSessionChat(name: string, ownerOpenId: string): Promise<{ chatId: string | null; message: string }> {
+  async createSessionChat(name: string, ownerOpenId: string, description?: string): Promise<{ chatId: string | null; message: string }> {
     try {
       const resp = await this.client.im.v1.chat.create({
         params: { user_id_type: "open_id" },
-        data: { name, chat_mode: "group", chat_type: "private", user_id_list: [ownerOpenId] },
+        data: {
+          name,
+          description: description || "whisper-cli 工作群 · 在此与 AI CLI 对话",
+          chat_mode: "group",
+          chat_type: "private",
+          user_id_list: [ownerOpenId],
+        },
       });
       if (resp.code !== 0) return { chatId: null, message: `⚠️ Failed: code=${resp.code} msg=${resp.msg}` };
       return { chatId: resp.data?.chat_id ?? null, message: `✅ Created「${name}」` };
@@ -302,6 +315,122 @@ export class FeishuClient {
   }
 
   // -----------------------------------------------------------------------
+  // Attachments — download incoming / upload agent images & files
+  // -----------------------------------------------------------------------
+
+  async downloadAttachments(
+    messageId: string,
+    workspace: string,
+    attachments: IncomingAttachment[],
+  ): Promise<string[]> {
+    if (attachments.length === 0) return [];
+    const dir = join(workspace, ".feishu-uploads");
+    mkdirSync(dir, { recursive: true });
+    const saved: string[] = [];
+
+    for (const att of attachments) {
+      const resourceType = att.type === "image" ? "image" : "file";
+      const resp = await this.client.im.messageResource.get({
+        path: { message_id: messageId, file_key: att.fileKey },
+        params: { type: resourceType },
+      });
+      const safeName = (att.fileName || `${att.type}_${att.fileKey.slice(0, 8)}`)
+        .replace(/[/\\?%*:|"<>]/g, "_");
+      const dest = join(dir, `${Date.now()}_${safeName}`);
+      await resp.writeFile(dest);
+      saved.push(dest);
+      console.log(`[feishu] downloaded ${resourceType} → ${dest}`);
+    }
+    return saved;
+  }
+
+  async sendAgentImages(chatId: string, images: AgentImage[]): Promise<void> {
+    for (const img of images) {
+      try {
+        const buffer = loadImageBuffer(img);
+        if (!buffer) continue;
+        if (buffer.length > MAX_IMAGE_BYTES) throw new Error(`image > 10MB (${buffer.length})`);
+        const res = await this.client.im.image.create({
+          data: { image_type: "message", image: buffer },
+        });
+        if (!res?.image_key) throw new Error("missing image_key");
+        await this.client.im.v1.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: {
+            receive_id: chatId,
+            msg_type: "image",
+            content: JSON.stringify({ image_key: res.image_key }),
+          },
+        });
+        console.log(`[feishu] sent image ${img.filePath || "base64"}`);
+      } catch (err) {
+        const label = img.filePath || "generated image";
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[feishu] image failed ${label}:`, msg);
+        await this.sendMarkdown(chatId, `⚠️ 图片发送失败 (${label}): ${msg.slice(0, 500)}`);
+      }
+    }
+  }
+
+  async sendAgentFiles(chatId: string, files: AgentFile[]): Promise<void> {
+    for (const f of files) {
+      try {
+        if (!f.filePath || !existsSync(f.filePath)) continue;
+        const buffer = readFileSync(f.filePath);
+        if (buffer.length > MAX_FILE_BYTES) throw new Error(`file > 30MB (${buffer.length})`);
+        const fileName = f.fileName || basename(f.filePath);
+        const res = await this.client.im.file.create({
+          data: {
+            file_type: inferFileType(fileName),
+            file_name: fileName,
+            file: buffer,
+          },
+        });
+        if (!res?.file_key) throw new Error("missing file_key");
+        await this.client.im.v1.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: {
+            receive_id: chatId,
+            msg_type: "file",
+            content: JSON.stringify({ file_key: res.file_key }),
+          },
+        });
+        console.log(`[feishu] sent file ${f.filePath}`);
+      } catch (err) {
+        const label = f.filePath || "file";
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[feishu] file failed ${label}:`, msg);
+        await this.sendMarkdown(chatId, `⚠️ 文件发送失败 (${label}): ${msg.slice(0, 500)}`);
+      }
+    }
+  }
+
+  /** Send markdown via post body with smart chunking (feishu-cursor post.ts) */
+  async sendPostMarkdown(chatId: string, text: string, title = ""): Promise<void> {
+    const chunks = chunkMarkdown(text);
+    for (let i = 0; i < chunks.length; i++) {
+      const partTitle = chunks.length > 1 ? `${title} (${i + 1}/${chunks.length})`.trim() : title;
+      const body = markdownToPostBody(chunks[i], partTitle);
+      try {
+        const resp = await this.client.im.v1.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: {
+            receive_id: chatId,
+            msg_type: "post",
+            content: JSON.stringify(body),
+          },
+        });
+        if (resp.code !== 0) {
+          console.error(`[feishu] post error code=${resp.code}, falling back`);
+          await this.sendMarkdown(chatId, chunks[i]);
+        }
+      } catch {
+        await this.sendMarkdown(chatId, chunks[i]);
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // Helpers
   // -----------------------------------------------------------------------
 
@@ -312,6 +441,25 @@ export class FeishuClient {
     this.seen.set(id, now);
     return false;
   }
+}
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
+
+function loadImageBuffer(img: AgentImage): Buffer | undefined {
+  if (img.filePath && existsSync(img.filePath)) return readFileSync(img.filePath);
+  if (img.imageData) return Buffer.from(img.imageData, "base64");
+  return undefined;
+}
+
+function inferFileType(fileName: string): "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream" {
+  const ext = extname(fileName).toLowerCase();
+  if (ext === ".pdf") return "pdf";
+  if (ext === ".doc" || ext === ".docx") return "doc";
+  if (ext === ".xls" || ext === ".xlsx") return "xls";
+  if (ext === ".ppt" || ext === ".pptx") return "ppt";
+  if (ext === ".mp4" || ext === ".mov") return "mp4";
+  return "stream";
 }
 
 // ---------------------------------------------------------------------------
@@ -339,10 +487,34 @@ function parseFeishuContent(content: string, messageType: string): string {
       }
       return texts.join("\n");
     }
-    if (messageType === "image") return "[Image]";
-    if (messageType === "file") return p.file_name ? `[File: ${p.file_name}]` : "[File]";
+    if (messageType === "image") return "";
+    if (messageType === "file") return p.file_name ? `[文件: ${p.file_name}]` : "[文件]";
   } catch { /* JSON parse failure, return raw */ }
   return content;
+}
+
+export function parseIncomingAttachments(
+  content: string,
+  messageType: string,
+): IncomingAttachment[] {
+  try {
+    const p = JSON.parse(content);
+    if (messageType === "file" && p.file_key) {
+      return [{ type: "file", fileKey: p.file_key, fileName: p.file_name }];
+    }
+    if (messageType === "image" && p.image_key) {
+      return [{ type: "image", fileKey: p.image_key, fileName: "image.png" }];
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+export function buildPromptWithAttachments(text: string, localPaths: string[]): string {
+  const trimmed = text.trim();
+  const base = trimmed || (localPaths.length > 0 ? "请查看并处理用户上传的附件。" : "");
+  if (localPaths.length === 0) return base;
+  const list = localPaths.map((p) => `- \`${p}\``).join("\n");
+  return `${base}\n\n**用户上传的附件（已保存到工作区）：**\n${list}`;
 }
 
 function extractFeishuSenderOpenId(ev: Record<string, unknown>): string {

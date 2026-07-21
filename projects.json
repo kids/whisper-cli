@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "finch": {
+      "path": "/data/dev/finch",
+      "description": "Finch 主项目"
+    },
+    "叙事": {
+      "path": "/data/dev/kids.github.io",
+      "description": "叙事写作",
+      "systemPromptFile": ".cursor/rules/narrative.mdc"
+    }
+  },
+  "default_project": "finch"
+}

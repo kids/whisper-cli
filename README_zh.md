@@ -12,6 +12,16 @@
 
 ⚡ 轻量高效：极低的延迟，让"聊天即编程"成为现实。
 
+从 feishu-cursor 合并的特性：
+
+📋 管理台模式：私聊 = `/新任务` `/列表` `/归档`；每个工作群 = 独立 AI session
+
+🗂 工作区路由：`projects.json` 支持 `项目名:指令` 路由到不同 workspace，可配 `systemPromptFile`
+
+🔍 `/review`：以 reviewer 视角审视上一轮回复（别名 `/审视` `/critique`）
+
+📎 附件：群内发图片/文件自动下载到工作区；Agent 产出的图片/文件自动回传
+
 ---
 
 ## 快速开始
@@ -20,6 +30,7 @@
 ```bash
 cp .env.example .env
 # 编辑 .env，填入各组 Agent 的令牌
+# 工作区路由：编辑 projects.json
 ```
 
 每组 Agent 按 `AGENT_<N>_*` 格式配置，例如：
@@ -32,12 +43,14 @@ AGENT_1_FEISHU_APP_ID=cli_xxx
 AGENT_1_FEISHU_APP_SECRET=xxx
 AGENT_1_CODEBUDDY_API_KEY=ck_xxx
 
-# 第 2 组：飞书 ↔ Cursor
+# 第 2 组：飞书 ↔ Cursor（管理台模式）
 AGENT_2_NAME=Cursor Bot
 AGENT_2_PLATFORM=feishu
 AGENT_2_AI_CLI=cursor
+AGENT_2_ADMIN_MODE=true
 AGENT_2_FEISHU_APP_ID=cli_yyy
 AGENT_2_FEISHU_APP_SECRET=yyy
+AGENT_2_FEISHU_CHAT_ID=oc_xxx
 AGENT_2_CURSOR_API_KEY=crsr_xxx
 AGENT_2_WORKDIR=/path/to/project
 
@@ -79,21 +92,53 @@ npm install
 npm start
 ```
 
+systemd（Linux）：
+```bash
+sudo cp whisper-cli.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now whisper-cli
+```
+
 ### 4. 使用
 在飞书 Bot 对话中发送消息即可，所有配置的 Agent 组同时在线。
 
-**支持指令：**
+**通用指令：**
 | 指令 | 说明 |
 |------|------|
-| `/help` | 显示所有可用指令 |
-| `/reset` | 重置当前会话，清零累计 token |
+| `/help` `/帮助` | 显示所有可用指令 |
+| `/reset` `/重置` | 重置当前会话，清零累计 token |
 | `/model` | 查看可用模型列表 |
 | `/model <id>` | 切换模型（`/model default` 恢复默认） |
-| `/new [name]` | 创建新飞书群 = 全新独立会话 |
-| `/stop` 或 `/cancel` | 终止当前运行的任务 |
-| `/status` | 查看当前状态（CLI、模型等） |
+| `/new [name]` | 创建新飞书群 = 全新独立会话（非管理台模式） |
+| `/stop` `/停止` | 终止当前运行的任务 |
+| `/review [焦点]` | 审视上一轮 bot 回复 |
+| `/status` `/状态` | 查看当前状态（CLI、模型等） |
+
+**管理台模式（`ADMIN_MODE=true`，Cursor 默认开启）：**
+
+私聊专用：
+| 指令 | 说明 |
+|------|------|
+| `/新任务 标题` | 建群，开新 AI session |
+| `/新任务 finch:首条指令` | 建群并立即执行 |
+| `/列表` | 活跃任务群 |
+| `/归档 编号` | 归档任务 |
+
+工作群内直接发自然语言；支持 `项目名:指令` 路由（见 `projects.json`）。
 
 **特性：**
 - 📡 **流式输出** — 回复以卡片形式实时逐字更新，不用等完成
 - 💾 **会话持久化** — 重启 bot 不丢会话历史（存储在 `state/state_<N>.json`）
 - 📊 **Token 统计** — 每次回复显示本轮 + 会话累计 token 用量
+- 🗂 **多工作区** — `projects.json` 路由 + 可选系统提示文件
+- 📎 **附件往返** — 下载用户图片/文件，回传 Agent 产出
+
+### 辅助脚本
+
+```bash
+# 抓取 chat_id（勿与 start 同时跑）
+npm run capture-chat-id
+
+# 主动发一条消息
+python scripts/send.py "hello"
+```
