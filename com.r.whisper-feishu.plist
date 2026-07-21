@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.r.whisper-feishu</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>--import</string>
+    <string>file:///Users/r/code/dev/whisper-cli/node_modules/tsx/dist/loader.mjs</string>
+    <string>/Users/r/code/dev/whisper-cli/src/index.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/r/code/dev/whisper-cli</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/r</string>
+    <key>PATH</key>
+    <string>/Users/r/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>/tmp/whisper-feishu.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/whisper-feishu.log</string>
+</dict>
+</plist>

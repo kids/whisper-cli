@@ -45,7 +45,7 @@ async function main(): Promise<void> {
   for (const agent of agents) {
     const runner = new AgentRunner(
       agent,
-      globalConfig.workdir,
+      agent.workdir || globalConfig.workdir,
       globalConfig.codebuddyBin,
       globalConfig.cursorAgentBin,
       globalConfig.codexBin,

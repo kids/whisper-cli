@@ -18,6 +18,8 @@ export interface AgentConfig {
   platform: Platform;
   /** AI CLI to invoke */
   aiCli: AiCli;
+  /** Working directory for this agent; overrides the global WORKDIR */
+  workdir?: string;
   /** Feishu-specific config (when platform === "feishu") */
   feishu?: FeishuConfig;
   /** WeCom-specific config (when platform === "wecom") */

@@ -39,6 +39,7 @@ AGENT_2_AI_CLI=cursor
 AGENT_2_FEISHU_APP_ID=cli_yyy
 AGENT_2_FEISHU_APP_SECRET=yyy
 AGENT_2_CURSOR_API_KEY=crsr_xxx
+AGENT_2_WORKDIR=/path/to/project
 
 # 第 3 组：飞书 ↔ Codex（无需 API Key，先执行 codex login）
 AGENT_3_NAME=Codex Bot

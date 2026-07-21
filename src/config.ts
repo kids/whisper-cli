@@ -95,6 +95,7 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     index: raw.index,
     platform,
     aiCli,
+    workdir: e.WORKDIR,
     allowlist: new Set(
       (e.ALLOWLIST || e.FEISHU_ALLOWLIST || "").split(",").map((s) => s.trim()).filter(Boolean),
     ),
