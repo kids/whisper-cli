@@ -170,6 +170,8 @@ export interface RunCursorOptions {
   chatId: string;
   config: CursorConfig;
   workspace: string;
+  /** Extra workspace roots (`agent --add-dir`); readable beyond primary workspace */
+  addDirs?: string[];
   agentBin?: string;
   model?: string;
   onActivity?: (label: string) => void;
@@ -181,6 +183,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
   const bin = opts.agentBin || DEFAULT_BIN;
   const model = opts.model || "auto";
   const sessionId = sessions.get(chatId);
+  const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
 
   const onStreamUpdate = opts.onStreamUpdate;
   const lockKey = sessionId ? `session:${sessionId}` : `chat:${chatId}`;
@@ -193,6 +196,9 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
         "--model", model,
         "--output-format", "stream-json",
       ];
+      for (const dir of addDirs) {
+        args.push("--add-dir", dir);
+      }
       if (sessionId) args.push("--resume", sessionId);
       args.push("--", prompt);
 

@@ -2,12 +2,87 @@
   "projects": {
     "finch": {
       "path": "/data/dev/finch",
-      "description": "Finch 主项目"
+      "description": "Finch 仓库根（数据同步 / 通用）"
     },
     "叙事": {
       "path": "/data/dev/kids.github.io",
       "description": "叙事写作",
       "systemPromptFile": ".cursor/rules/narrative.mdc"
+    },
+    "limit_up": {
+      "path": "/data/dev/finch/trials/limit_up",
+      "description": "淘股吧涨停策略",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "淘股吧": {
+      "path": "/data/dev/finch/trials/limit_up",
+      "description": "淘股吧涨停策略",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "daily_rl": {
+      "path": "/data/dev/finch/trials/daily_rl",
+      "description": "A股日线 swing RL",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "swing特征化": {
+      "path": "/data/dev/finch/trials/daily_rl",
+      "description": "A股日线 swing RL",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "swing_rules": {
+      "path": "/data/dev/finch/trials/swing_rules",
+      "description": "A股日线 swing 规则",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "swing规则": {
+      "path": "/data/dev/finch/trials/swing_rules",
+      "description": "A股日线 swing 规则",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "industry_rotation": {
+      "path": "/data/dev/finch/trials/industry_rotation",
+      "description": "行业轮动",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "行业轮动": {
+      "path": "/data/dev/finch/trials/industry_rotation",
+      "description": "行业轮动",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "reversal_rules": {
+      "path": "/data/dev/finch/trials/reversal_rules",
+      "description": "日线抄底/反转规则",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "反转": {
+      "path": "/data/dev/finch/trials/reversal_rules",
+      "description": "日线抄底/反转规则",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "orb": {
+      "path": "/data/dev/finch/trials/orb",
+      "description": "ORB 对照线",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "ORB": {
+      "path": "/data/dev/finch/trials/orb",
+      "description": "ORB 对照线",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "intraday_rl": {
+      "path": "/data/dev/finch/trials/intraday_rl",
+      "description": "FU/tick 日内 RL 工具",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "intraday_rules": {
+      "path": "/data/dev/finch/trials/intraday_rules",
+      "description": "金融期货日内规则",
+      "addDirs": ["/data/dev/finch"]
+    },
+    "日内规则": {
+      "path": "/data/dev/finch/trials/intraday_rules",
+      "description": "金融期货日内规则",
+      "addDirs": ["/data/dev/finch"]
     }
   },
   "default_project": "finch"

@@ -31,7 +31,12 @@ import {
   getCodexDefaultModel,
 } from "./ai/codex";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
-import { buildReviewPrompt, parseReviewCommand, wrapWithProjectPrompt } from "./prompt";
+import {
+  buildReviewPrompt,
+  parseReviewCommand,
+  wrapWithProjectPrompt,
+  wrapWithWorkspaceHint,
+} from "./prompt";
 import {
   addTask,
   archiveTask,
@@ -729,6 +734,7 @@ export class AgentRunner {
       if (!isReview) {
         const project = getProjects().projects[label];
         promptText = wrapWithProjectPrompt(workspace, project?.systemPromptFile, promptText);
+        promptText = wrapWithWorkspaceHint(workspace, promptText);
       }
     }
 
@@ -757,7 +763,7 @@ export class AgentRunner {
 
     let result: AiResult;
     try {
-      result = await this.dispatchAi(promptText, chatId, workspace, onStreamUpdate);
+      result = await this.dispatchAi(promptText, chatId, workspace, label, onStreamUpdate);
     } catch (err) {
       result = { text: `⚠️ Error: ${(err as Error).message}` };
     }
@@ -803,6 +809,7 @@ export class AgentRunner {
     prompt: string,
     chatId: string,
     workspace: string,
+    label: string,
     onStreamUpdate?: (text: string) => void,
   ): Promise<AiResult> {
     const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig } = this.config;
@@ -823,11 +830,20 @@ export class AgentRunner {
     }
 
     if (aiCli === "cursor" && curConfig) {
+      const project = getProjects().projects[label];
+      // Prefer explicit addDirs; for trials/* default to finch repo root
+      let addDirs = project?.addDirs ? [...project.addDirs] : [];
+      if (workspace.includes("/trials/") && workspace.startsWith("/data/dev/finch")) {
+        if (!addDirs.includes("/data/dev/finch")) addDirs.push("/data/dev/finch");
+      }
+      addDirs = addDirs.filter((d) => d && d !== workspace);
+
       const result = await runCursor({
         prompt,
         chatId,
         config: curConfig,
         workspace,
+        addDirs,
         agentBin: this.cursorAgentBin,
         model,
         onStreamUpdate,

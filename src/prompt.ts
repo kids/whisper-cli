@@ -32,6 +32,19 @@ export function buildReviewPrompt(focus?: string): string {
 }
 
 /**
+ * Soft preference when workspace is a trials/* subdir: prefer writes there,
+ * still allow reading elsewhere (via --add-dir / absolute paths). Not a hard sandbox.
+ */
+export function wrapWithWorkspaceHint(workspace: string, userPrompt: string): string {
+  if (!workspace.includes("/trials/")) return userPrompt;
+  return [
+    "【工作区提示】当前 workspace 为本实验目录。可读仓库其他路径与数据；默认只在本目录内创建/修改文件，除非用户明确要求改仓外。",
+    "",
+    userPrompt,
+  ].join("\n");
+}
+
+/**
  * If the project has systemPromptFile, wrap user input with explicit system instructions
  * (more reliable for headless agent than relying on workspace rules alone).
  */
