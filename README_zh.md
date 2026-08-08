@@ -112,7 +112,7 @@ sudo systemctl enable --now whisper-cli
 | `/new [name]` | 创建新飞书群 = 全新独立会话（非管理台模式） |
 | `/stop` `/停止` | 终止当前运行的任务 |
 | `/review [焦点]` | 审视上一轮 bot 回复 |
-| `/status` `/状态` | 查看当前状态（CLI、模型等） |
+| `/status` `/状态` `/sys` | 查看当前状态（CLI、模型、工作区）+ 机器资源（CPU/内存/GPU/磁盘） |
 
 **管理台模式（`ADMIN_MODE=true`，Cursor 默认开启）：**
 

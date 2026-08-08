@@ -92,7 +92,7 @@ Send messages in the Feishu bot chat — all configured agent groups run simulta
 | `/model <id>` | Switch model (`/model default` to reset) |
 | `/new [name]` | Create a new Feishu group = fresh session |
 | `/stop` or `/cancel` | Stop the current running task |
-| `/status` | Show agent status (CLI, model, etc.) |
+| `/status` `/sys` | Agent status (CLI, model, workspace) + host resources (CPU/mem/GPU/disk) |
 
 **Features:**
 - 📡 **Streaming output** — replies update in real-time as text is generated

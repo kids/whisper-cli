@@ -37,6 +37,7 @@ import {
   wrapWithProjectPrompt,
   wrapWithWorkspaceHint,
 } from "./prompt";
+import { collectSysStatus } from "./sys-status";
 import {
   addTask,
   archiveTask,
@@ -572,7 +573,7 @@ export class AgentRunner {
         "• `/new [name]` — 创建新飞书群 = 全新独立会话",
         "• `/review [焦点]` — 审视上一轮回复（别名 `/审视` `/critique`）",
         "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
-        "• `/status` — 查看当前状态",
+        "• `/status` — 查看当前状态 + 机器资源",
         "• `/help` — 显示此帮助",
         ...extra,
         "",
@@ -581,7 +582,7 @@ export class AgentRunner {
       return true;
     }
 
-    if (text === "/status" || text === "/状态") {
+    if (text === "/status" || text === "/状态" || text === "/sys") {
       const model = this.getEffectiveModel(chatId);
       const ws = chatWorkspace.get(chatId);
       await feishu.sendMarkdown(chatId, [
@@ -590,6 +591,10 @@ export class AgentRunner {
         `AI CLI: \`${this.config.aiCli}\``,
         `当前模型: \`${model}\``,
         ws ? `工作区: \`${ws.label}\` → ${ws.workspace}` : `工作区: ${this.workdir}`,
+        "",
+        "---",
+        "",
+        collectSysStatus(),
       ].join("\n"));
       return true;
     }
@@ -833,10 +838,13 @@ export class AgentRunner {
       const project = getProjects().projects[label];
       // Prefer explicit addDirs; for trials/* default to finch repo root
       let addDirs = project?.addDirs ? [...project.addDirs] : [];
-      if (workspace.includes("/trials/") && workspace.startsWith("/data/dev/finch")) {
-        if (!addDirs.includes("/data/dev/finch")) addDirs.push("/data/dev/finch");
+      const trialsMarker = "/trials/";
+      const trialsIdx = workspace.indexOf(trialsMarker);
+      if (trialsIdx > 0) {
+        const finchRoot = workspace.slice(0, trialsIdx);
+        if (!addDirs.includes(finchRoot)) addDirs.push(finchRoot);
       }
-      addDirs = addDirs.filter((d) => d && d !== workspace);
+      addDirs = addDirs.filter((d) => d && d !== workspace && existsSync(d));
 
       const result = await runCursor({
         prompt,
