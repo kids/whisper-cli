@@ -421,6 +421,14 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     let inputTokens = 0, outputTokens = 0, cacheRead = 0, cacheWrite = 0;
     let resultText = "";
     let resultItem: any = null;
+    // Text of every distinct assistant turn seen in this single `-p` run.
+    // A single invocation can span many turns: the model may answer the
+    // user's question in an early turn, then autonomously keep going on
+    // unfinished background work (tool calls + more turns) before the
+    // process exits. The final `result` event only reflects the *last*
+    // turn, which can be an unrelated progress update — so we must keep
+    // every turn's text to recover the turn that actually answers the ask.
+    const assistantTurnTexts: string[] = [];
 
     for (const item of items) {
       if (item?.type === "system" && item?.subtype === "init" && item?.model && !model) {
@@ -437,6 +445,12 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
         outputTokens += u.output_tokens || 0;
         cacheRead += u.cache_read_input_tokens || 0;
         cacheWrite += u.cache_creation_input_tokens || 0;
+      }
+      if (item?.type === "assistant") {
+        const t = assistantTextOf(item);
+        if (t && t !== assistantTurnTexts[assistantTurnTexts.length - 1]) {
+          assistantTurnTexts.push(t);
+        }
       }
     }
 
@@ -455,9 +469,18 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
       return { text: `⚠️ ${String(resultItem.result ?? "").slice(0, 4000)}`, model, usage };
     }
 
-    // Preferred: the final result event's text
-    if (resultText) {
-      return { text: resultText, model, usage, sessionId };
+    // Preferred: the final `result` event's text — UNLESS the run spanned
+    // multiple assistant turns whose combined text is substantially longer.
+    // In that case the model kept working after producing the real answer
+    // (autonomous continuation on unfinished background tasks), and the
+    // `result` field is just the last turn's closing remark/progress note,
+    // not an answer to what was actually asked. Surfacing every turn keeps
+    // the real answer visible instead of silently dropping it.
+    const fullTurnsText = assistantTurnTexts.join("\n\n---\n\n").trim();
+    const usedMultiTurn = fullTurnsText.length > resultText.length + 20 && assistantTurnTexts.length > 1;
+    const finalText = usedMultiTurn ? fullTurnsText : resultText;
+    if (finalText) {
+      return { text: finalText, model, usage, sessionId };
     }
 
     // Fallback 1: last assistant event in the parsed stream
