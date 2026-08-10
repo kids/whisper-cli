@@ -19,7 +19,12 @@ const DEFAULT_BIN = findBinary("codebuddy", [
   "/usr/bin/codebuddy",
 ]);
 const HARD_TIMEOUT_MS = 30 * 60 * 1000;
-const STALE_TIMEOUT_MS = 120 * 1000;
+/**
+ * No-output timeout. Resuming a large session can silently prefill for several
+ * minutes before the first event arrives, so this must stay well above typical
+ * prefill time — a too-low value SIGKILLs the run before the `result` event.
+ */
+const STALE_TIMEOUT_MS = Number(process.env.CODEBUDDY_STALE_MS || 10 * 60 * 1000);
 const DEBUG_DIR = resolve(import.meta.dirname, "../../debug");
 
 // ---------------------------------------------------------------------------
@@ -154,6 +159,59 @@ function tryRecoverItems(s: string): any[] | null {
 }
 
 // ---------------------------------------------------------------------------
+// Assistant text extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull text out of an assistant event.
+ *
+ * Handles both shapes:
+ *  - stream-json: `{ type: "assistant", message: { role, content } }`
+ *  - legacy transcript: `{ role: "assistant", content }`
+ *
+ * The legacy-only check was the original bug: stream-json events carry no
+ * top-level `role`, so the fallback loop never matched anything.
+ */
+export function assistantTextOf(item: any): string {
+  if (!item) return "";
+  const isStream = item.type === "assistant" && item.message;
+  const isLegacy = item.role === "assistant";
+  if (!isStream && !isLegacy) return "";
+
+  const content = isStream ? item.message.content : item.content;
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c?.type === "text" && typeof c?.text === "string" && c.text.trim())
+      .map((c: any) => c.text)
+      .join("\n")
+      .trim();
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Timeout reporting
+// ---------------------------------------------------------------------------
+
+function wasTimedOut(stderr: string): boolean {
+  return /\[(STALE|HARD) TIMEOUT\]/.test(stderr || "");
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} 秒`;
+  return `${Math.round(ms / 60_000)} 分钟`;
+}
+
+function timeoutNotice(stderr: string): string {
+  const isHard = (stderr || "").includes("[HARD TIMEOUT]");
+  const dur = formatDuration(isHard ? HARD_TIMEOUT_MS : STALE_TIMEOUT_MS);
+  return isHard
+    ? `⏱️ 任务超过 ${dur} 硬上限，已被终止。`
+    : `⏱️ Agent 静默超过 ${dur} 被终止（可能正在恢复超大上下文）。建议 \`/reset\` 重置会话，或调大 \`CODEBUDDY_STALE_MS\`。`;
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
@@ -185,8 +243,8 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
 
     console.log(`[codebuddy] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"} model=${opts.model || "default"}`);
 
-    const { stdout, stderr, wasCancelled } = await new Promise<{
-      stdout: string; stderr: string; wasCancelled: boolean;
+    const { stdout, stderr, wasCancelled, streamedText } = await new Promise<{
+      stdout: string; stderr: string; wasCancelled: boolean; streamedText: string;
     }>((resolveP) => {
       const child = spawn(bin, args, {
         cwd: workdir,
@@ -211,7 +269,12 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
       let hardTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
         clearRun();
         child.kill("SIGKILL");
-        resolveP({ stdout: out, stderr: err + "\n[HARD TIMEOUT]", wasCancelled: false });
+        resolveP({
+          stdout: out,
+          stderr: err + "\n[HARD TIMEOUT]",
+          wasCancelled: false,
+          streamedText: lastAssistantText,
+        });
       }, HARD_TIMEOUT_MS);
 
       let staleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -220,7 +283,12 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
         staleTimer = setTimeout(() => {
           clearRun();
           child.kill("SIGKILL");
-          resolveP({ stdout: out, stderr: err + "\n[STALE TIMEOUT]", wasCancelled: false });
+          resolveP({
+            stdout: out,
+            stderr: err + "\n[STALE TIMEOUT]",
+            wasCancelled: false,
+            streamedText: lastAssistantText,
+          });
         }, STALE_TIMEOUT_MS);
       };
 
@@ -228,7 +296,12 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
         clearTimeout(hardTimer!);
         if (staleTimer) clearTimeout(staleTimer);
         clearRun();
-        resolveP({ stdout: "", stderr: `spawn error: ${e.message}`, wasCancelled: false });
+        resolveP({
+          stdout: "",
+          stderr: `spawn error: ${e.message}`,
+          wasCancelled: false,
+          streamedText: "",
+        });
       });
 
       child.stdout!.on("data", (d: Buffer | string) => {
@@ -275,22 +348,31 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
         if (staleTimer) clearTimeout(staleTimer);
         const wasCancelled = activeRun.cancelled;
         clearRun();
-        if (wasCancelled) {
-          resolveP({ stdout: out, stderr: err, wasCancelled: true });
-          return;
-        }
-        if (lineBuf.trim()) {
-          // Flush partial last line — it was already added to stdout buffer
-        }
-        resolveP({ stdout: out, stderr: err, wasCancelled: false });
+        // Any trailing partial line is already part of `out`.
+        resolveP({
+          stdout: out,
+          stderr: err,
+          wasCancelled,
+          streamedText: lastAssistantText,
+        });
       });
     });
 
+    const timedOut = wasTimedOut(stderr);
+    const partial = streamedText.trim();
+
     if (wasCancelled) {
-      return { text: "🛑 任务已被用户终止。" };
+      return {
+        text: partial
+          ? `🛑 任务已被用户终止。以下是已生成的部分内容：\n\n${partial}`
+          : "🛑 任务已被用户终止。",
+      };
     }
 
     if (!stdout.trim()) {
+      // A timeout is not a stale session — retrying would just burn another
+      // full run. Report it instead of silently dropping the session.
+      if (timedOut) return { text: timeoutNotice(stderr) };
       if (sid) {
         console.warn(`[codebuddy] session ${sid} stale, retrying`);
         sessions.delete(chatId);
@@ -366,33 +448,39 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
       totalTokens: inputTokens + outputTokens,
     };
 
-    // Result text
-    if (resultItem) {
-      if (resultItem.is_error) {
-        return { text: `⚠️ ${String(resultItem.result ?? "").slice(0, 4000)}`, model, usage };
-      }
-      if (resultText && resultText.length > 0) {
-        return { text: resultText, model, usage, sessionId: sessions.get(chatId) };
-      }
+    const sessionId = sessions.get(chatId);
+
+    // Explicit error reported by the result event
+    if (resultItem?.is_error) {
+      return { text: `⚠️ ${String(resultItem.result ?? "").slice(0, 4000)}`, model, usage };
     }
 
-    // Fallback to last assistant message
+    // Preferred: the final result event's text
+    if (resultText) {
+      return { text: resultText, model, usage, sessionId };
+    }
+
+    // Fallback 1: last assistant event in the parsed stream
     for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      if (!it || it.role !== "assistant") continue;
-      const content = it.content;
-      if (typeof content === "string" && content.trim()) {
-        return { text: content.trim(), model, usage, sessionId: sessions.get(chatId) };
-      }
-      if (Array.isArray(content)) {
-        const texts = content
-          .filter((c: any) => c?.type === "text" && c?.text?.trim())
-          .map((c: any) => c.text);
-        if (texts.length) return { text: texts.join("\n"), model, usage, sessionId: sessions.get(chatId) };
+      const text = assistantTextOf(items[i]);
+      if (text) {
+        const notice = timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n` : "";
+        return { text: notice + text, model, usage, sessionId };
       }
     }
 
-    if (resultText) return { text: resultText, model, usage, sessionId: sessions.get(chatId) };
+    // Fallback 2: text accumulated while streaming — survives a SIGKILL that
+    // prevents the `result` event from ever arriving.
+    if (partial) {
+      const notice = timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n` : "";
+      return { text: notice + partial, model, usage, sessionId };
+    }
+
+    if (timedOut) {
+      return { text: timeoutNotice(stderr), model, usage, sessionId };
+    }
+
+    dumpDebug("no-usable-result", stdout);
     return { text: "⚠️ No usable result.", model, usage };
   }
 
