@@ -6,7 +6,7 @@
 export type Platform = "feishu" | "wecom";
 
 /** Supported AI CLI tools */
-export type AiCli = "codebuddy" | "cursor" | "codex";
+export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini";
 
 /** A single agent group configuration parsed from .env */
 export interface AgentConfig {
@@ -30,6 +30,10 @@ export interface AgentConfig {
   cursor?: CursorConfig;
   /** Codex-specific config (when aiCli === "codex") */
   codex?: CodexConfig;
+  /** Claude Code config (when aiCli === "claude") */
+  claude?: ClaudeConfig;
+  /** Gemini CLI config (when aiCli === "gemini") */
+  gemini?: GeminiConfig;
   /** Allowed user open_ids (optional) */
   allowlist: Set<string>;
   /**
@@ -84,7 +88,16 @@ export interface CursorConfig {
 
 export interface CodexConfig {
   // Codex uses persistent auth via `codex login` — no API key required at runtime.
-  // Keep as empty interface for type consistency.
+}
+
+export interface ClaudeConfig {
+  /** Optional Anthropic API key. If omitted, uses `claude login` (Claude.ai 订阅). */
+  apiKey?: string;
+}
+
+export interface GeminiConfig {
+  /** Optional Gemini API key. If omitted, uses `gemini` OAuth login. */
+  apiKey?: string;
 }
 
 /** AI CLI run result */

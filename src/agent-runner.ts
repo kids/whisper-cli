@@ -30,6 +30,22 @@ import {
   getCodexSession,
   getCodexDefaultModel,
 } from "./ai/codex";
+import {
+  runClaude,
+  stopClaudeRun,
+  clearClaudeSession,
+  setClaudeSession,
+  getClaudeSession,
+  CLAUDE_MODEL_ALIASES,
+} from "./ai/claude";
+import {
+  runGemini,
+  stopGeminiRun,
+  clearGeminiSession,
+  setGeminiSession,
+  getGeminiSession,
+  GEMINI_MODEL_ALIASES,
+} from "./ai/gemini";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
 import {
   buildReviewPrompt,
@@ -89,6 +105,8 @@ function pushSessionToAi(aiCli: AgentConfig["aiCli"], chatId: string, sid: strin
   if (aiCli === "codebuddy") setCodebuddySession(chatId, sid);
   else if (aiCli === "cursor") setCursorSession(chatId, sid);
   else if (aiCli === "codex") setCodexSession(chatId, sid);
+  else if (aiCli === "claude") setClaudeSession(chatId, sid);
+  else if (aiCli === "gemini") setGeminiSession(chatId, sid);
 }
 
 /**
@@ -205,28 +223,30 @@ function isStopCommand(text: string): boolean {
 // Agent runner class
 // ---------------------------------------------------------------------------
 
+export interface AgentBins {
+  codebuddyBin?: string;
+  cursorAgentBin?: string;
+  codexBin?: string;
+  claudeBin?: string;
+  geminiBin?: string;
+}
+
 export class AgentRunner {
   private config: AgentConfig;
   private feishu?: FeishuClient;
   private workdir: string;
-  private codebuddyBin?: string;
-  private cursorAgentBin?: string;
-  private codexBin?: string;
+  private bins: AgentBins;
   private statePath: string;
 
   constructor(
     config: AgentConfig,
     workdir: string,
-    codebuddyBin?: string,
-    cursorAgentBin?: string,
-    codexBin?: string,
+    bins: AgentBins = {},
     stateDir?: string,
   ) {
     this.config = config;
     this.workdir = workdir;
-    this.codebuddyBin = codebuddyBin;
-    this.cursorAgentBin = cursorAgentBin;
-    this.codexBin = codexBin;
+    this.bins = bins;
     this.statePath = resolve(
       stateDir || workdir,
       `state_${config.index}.json`,
@@ -521,6 +541,8 @@ export class AgentRunner {
     if (aiCli === "codebuddy") stopped = stopCodebuddyRun(ev.chatId);
     if (aiCli === "cursor") stopped = stopCursorRun(ev.chatId);
     if (aiCli === "codex") stopped = stopCodexRun(ev.chatId);
+    if (aiCli === "claude") stopped = stopClaudeRun(ev.chatId);
+    if (aiCli === "gemini") stopped = stopGeminiRun(ev.chatId);
     if (stopped) {
       this.feishu?.sendToChat(ev.chatId, "⏹️ 正在停止…");
     } else {
@@ -619,15 +641,14 @@ export class AgentRunner {
 
     if (!arg) {
       const effective = this.getEffectiveModel(chatId);
-      if (aiCli === "codebuddy") {
-        const bin = this.codebuddyBin || "codebuddy";
-        const supported = queryCodebuddyModels(bin);
+      const listed = this.listKnownModels();
+      if (listed.length) {
         await feishu.sendMarkdown(chatId, [
           `当前模型: \`${effective}\``,
           `用法: /model <id>  （/model default 恢复默认）`,
           "",
           `**可用模型:**`,
-          ...supported.map((s) => `• \`${s}\``),
+          ...listed.map((s) => `• \`${s}\``),
         ].join("\n"));
       } else {
         await feishu.sendMarkdown(chatId, [
@@ -648,18 +669,15 @@ export class AgentRunner {
       return true;
     }
 
-    if (aiCli === "codebuddy") {
-      const bin = this.codebuddyBin || "codebuddy";
-      const supported = queryCodebuddyModels(bin);
-      if (!supported.includes(arg) && arg !== "default") {
-        await feishu.sendMarkdown(chatId, [
-          `⚠️ 未知模型: \`${arg}\``,
-          "",
-          "**可用:**",
-          ...supported.map((s) => `• \`${s}\``),
-        ].join("\n"));
-        return true;
-      }
+    const known = this.listKnownModels();
+    if (aiCli === "codebuddy" && known.length && !known.includes(arg) && arg !== "default") {
+      await feishu.sendMarkdown(chatId, [
+        `⚠️ 未知模型: \`${arg}\``,
+        "",
+        "**可用:**",
+        ...known.map((s) => `• \`${s}\``),
+      ].join("\n"));
+      return true;
     }
 
     models.set(chatId, arg);
@@ -817,8 +835,9 @@ export class AgentRunner {
     label: string,
     onStreamUpdate?: (text: string) => void,
   ): Promise<AiResult> {
-    const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig } = this.config;
+    const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig } = this.config;
     const model = models.get(chatId);
+    const addDirs = this.resolveAddDirs(workspace, label);
 
     if (aiCli === "codebuddy" && cbConfig) {
       const result = await runCodebuddy({
@@ -826,46 +845,63 @@ export class AgentRunner {
         chatId,
         config: cbConfig,
         workdir: workspace,
-        codebuddyBin: this.codebuddyBin,
+        codebuddyBin: this.bins.codebuddyBin,
         model,
         onStreamUpdate,
       });
-      // sessionId persisted in runAiAndReply via rememberSession
       return result;
     }
 
     if (aiCli === "cursor" && curConfig) {
-      const project = getProjects().projects[label];
-      // Prefer explicit addDirs; for trials/* default to finch repo root
-      let addDirs = project?.addDirs ? [...project.addDirs] : [];
-      const trialsMarker = "/trials/";
-      const trialsIdx = workspace.indexOf(trialsMarker);
-      if (trialsIdx > 0) {
-        const finchRoot = workspace.slice(0, trialsIdx);
-        if (!addDirs.includes(finchRoot)) addDirs.push(finchRoot);
-      }
-      addDirs = addDirs.filter((d) => d && d !== workspace && existsSync(d));
-
       const result = await runCursor({
         prompt,
         chatId,
         config: curConfig,
         workspace,
         addDirs,
-        agentBin: this.cursorAgentBin,
+        agentBin: this.bins.cursorAgentBin,
         model,
         onStreamUpdate,
       });
       return result;
     }
 
-    if (aiCli === "codex" && codexConfig && this.codexBin) {
+    if (aiCli === "codex" && codexConfig && this.bins.codexBin) {
       const result = await runCodex({
         prompt,
         chatId,
         config: codexConfig,
         workdir: workspace,
-        codexBin: this.codexBin,
+        addDirs,
+        codexBin: this.bins.codexBin,
+        model,
+        onStreamUpdate,
+      });
+      return result;
+    }
+
+    if (aiCli === "claude" && claudeConfig) {
+      const result = await runClaude({
+        prompt,
+        chatId,
+        config: claudeConfig,
+        workspace,
+        addDirs,
+        claudeBin: this.bins.claudeBin,
+        model,
+        onStreamUpdate,
+      });
+      return result;
+    }
+
+    if (aiCli === "gemini" && geminiConfig) {
+      const result = await runGemini({
+        prompt,
+        chatId,
+        config: geminiConfig,
+        workspace,
+        addDirs,
+        geminiBin: this.bins.geminiBin,
         model,
         onStreamUpdate,
       });
@@ -873,6 +909,18 @@ export class AgentRunner {
     }
 
     throw new Error(`Cannot dispatch: no config for "${aiCli}"`);
+  }
+
+  private resolveAddDirs(workspace: string, label: string): string[] {
+    const project = getProjects().projects[label];
+    let addDirs = project?.addDirs ? [...project.addDirs] : [];
+    const trialsMarker = "/trials/";
+    const trialsIdx = workspace.indexOf(trialsMarker);
+    if (trialsIdx > 0) {
+      const finchRoot = workspace.slice(0, trialsIdx);
+      if (!addDirs.includes(finchRoot)) addDirs.push(finchRoot);
+    }
+    return addDirs.filter((d) => d && d !== workspace && existsSync(d));
   }
 
   // -----------------------------------------------------------------------
@@ -888,7 +936,16 @@ export class AgentRunner {
   private getDefaultModelName(): string | undefined {
     if (this.config.aiCli === "codex") return getCodexDefaultModel();
     if (this.config.aiCli === "cursor") return "auto";
+    if (this.config.aiCli === "gemini") return "auto";
     return undefined;
+  }
+
+  private listKnownModels(): string[] {
+    const { aiCli } = this.config;
+    if (aiCli === "codebuddy") return queryCodebuddyModels(this.bins.codebuddyBin || "codebuddy");
+    if (aiCli === "claude") return CLAUDE_MODEL_ALIASES;
+    if (aiCli === "gemini") return GEMINI_MODEL_ALIASES;
+    return [];
   }
 
   // -----------------------------------------------------------------------
@@ -899,6 +956,8 @@ export class AgentRunner {
     if (this.config.aiCli === "codebuddy") clearCodebuddySession(chatId);
     if (this.config.aiCli === "cursor") clearCursorSession(chatId);
     if (this.config.aiCli === "codex") clearCodexSession(chatId);
+    if (this.config.aiCli === "claude") clearClaudeSession(chatId);
+    if (this.config.aiCli === "gemini") clearGeminiSession(chatId);
     sessions.delete(chatId);
     cumUsage.delete(chatId);
     scheduleSave();
@@ -909,6 +968,8 @@ export class AgentRunner {
     if (this.config.aiCli === "cursor") return getCursorSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "codebuddy") return getCodebuddySession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "codex") return getCodexSession(chatId) || sessions.get(chatId);
+    if (this.config.aiCli === "claude") return getClaudeSession(chatId) || sessions.get(chatId);
+    if (this.config.aiCli === "gemini") return getGeminiSession(chatId) || sessions.get(chatId);
     return sessions.get(chatId);
   }
 

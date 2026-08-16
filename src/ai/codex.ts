@@ -13,13 +13,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AiResult, CodexConfig } from "../types";
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-const HARD_TIMEOUT_MS = 30 * 60 * 1000; // 30 min hard cap
-const STALE_TIMEOUT_MS = 120 * 1000;    // 2 min no-output
+import { HARD_TIMEOUT_MS, STALL_TIMEOUT_MS } from "./helpers";
 
 // ---------------------------------------------------------------------------
 // Session store (chat_id -> thread_id)
@@ -110,13 +104,14 @@ export interface RunCodexOptions {
   config: CodexConfig;
   workdir: string;
   codexBin: string;
+  addDirs?: string[];
   model?: string;
   onStreamUpdate?: (text: string) => void;
 }
 
 export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
   const { prompt, chatId, workdir, codexBin } = opts;
-  const threadId = threads.get(chatId);
+  const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
 
   async function attempt(resume: boolean): Promise<AiResult | null> {
     const tid = resume ? threads.get(chatId) : undefined;
@@ -131,6 +126,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
         "--dangerously-bypass-hook-trust",
       ];
       if (opts.model) args.push("-m", opts.model);
+      for (const dir of addDirs) args.push("--add-dir", dir);
       args.push(prompt);
     } else {
       args = [
@@ -142,6 +138,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
       ];
       if (opts.model) args.push("-m", opts.model);
       if (workdir) args.push("-C", workdir);
+      for (const dir of addDirs) args.push("--add-dir", dir);
       args.push(prompt);
     }
 
@@ -165,31 +162,28 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
         let out = "";
         let err = "";
 
-        const hardTimer: NodeJS.Timeout | null = setTimeout(() => {
-          child.kill("SIGKILL");
-          clearRun();
-          resolveP({ stdout: out, stderr: err + "\n[HARD TIMEOUT]" });
-        }, HARD_TIMEOUT_MS);
-
-        let staleTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-          child.kill("SIGKILL");
-          clearRun();
-          resolveP({ stdout: out, stderr: err + "\n[STALE TIMEOUT]" });
-        }, STALE_TIMEOUT_MS);
-
-        const touch = () => {
-          if (staleTimer) {
-            clearTimeout(staleTimer);
-            staleTimer = setTimeout(() => {
+        const hardTimer: NodeJS.Timeout | null = HARD_TIMEOUT_MS > 0
+          ? setTimeout(() => {
               child.kill("SIGKILL");
               clearRun();
-              resolveP({ stdout: out, stderr: err + "\n[STALE TIMEOUT]" });
-            }, STALE_TIMEOUT_MS);
-          }
+              resolveP({ stdout: out, stderr: err + "\n[HARD TIMEOUT]" });
+            }, HARD_TIMEOUT_MS)
+          : null;
+
+        let staleTimer: ReturnType<typeof setTimeout> | null = null;
+        const touch = () => {
+          if (STALL_TIMEOUT_MS <= 0) return;
+          if (staleTimer) clearTimeout(staleTimer);
+          staleTimer = setTimeout(() => {
+            child.kill("SIGKILL");
+            clearRun();
+            resolveP({ stdout: out, stderr: err + "\n[STALE TIMEOUT]" });
+          }, STALL_TIMEOUT_MS);
         };
+        touch();
 
         child.on("error", (e: Error) => {
-          clearTimeout(hardTimer!);
+          if (hardTimer) clearTimeout(hardTimer);
           if (staleTimer) clearTimeout(staleTimer);
           clearRun();
           resolveP({ stdout: "", stderr: `spawn error: ${e.message}` });
@@ -226,7 +220,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
         });
 
         child.on("close", (_code: number | null) => {
-          clearTimeout(hardTimer!);
+          if (hardTimer) clearTimeout(hardTimer);
           if (staleTimer) clearTimeout(staleTimer);
 
           // If cancelled by user, return partial
@@ -253,6 +247,9 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
     }
 
     if (events.length === 0) {
+      if ((stderr || "").includes("[STALE TIMEOUT]") || (stderr || "").includes("[HARD TIMEOUT]")) {
+        return { text: `⚠️ Codex timed out.\n${stderr?.slice(0, 500) || ""}` };
+      }
       if (tid) {
         console.warn(`[codex] thread ${tid} stale, clearing and retrying`);
         threads.delete(chatId);

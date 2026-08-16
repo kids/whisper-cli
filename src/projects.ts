@@ -12,7 +12,7 @@ export interface ProjectEntry {
   path: string;
   description: string;
   systemPromptFile?: string;
-  /** Extra roots for cursor `--add-dir` (readable beyond primary workspace) */
+  /** Extra roots (`--add-dir` / `--include-directories`) readable beyond primary workspace */
   addDirs?: string[];
 }
 

@@ -6,7 +6,7 @@ Key Features:
 
 💬 Multi-Agent Concurrent: Configure multiple "IM Platform + AI CLI" groups in `.env` — all running simultaneously.
 
-🤖 AI CLI Driven: Supports Codex, Cursor, CodeBuddy, and other modern AI coding assistant CLIs.
+🤖 AI CLI Driven: Supports Codex, Claude Code, Gemini, Cursor, CodeBuddy, and other modern AI coding assistant CLIs.
 
 🔒 Secure Remote Control: Supports user allowlist to keep your development environment safe.
 
@@ -47,7 +47,23 @@ AGENT_3_PLATFORM=feishu
 AGENT_3_AI_CLI=codex
 AGENT_3_FEISHU_APP_ID=cli_zzz
 AGENT_3_FEISHU_APP_SECRET=zzz
+
+# Group 4: Feishu ↔ Claude Code (no API key — run `claude /login` first)
+AGENT_4_NAME=Claude Bot
+AGENT_4_PLATFORM=feishu
+AGENT_4_AI_CLI=claude
+AGENT_4_FEISHU_APP_ID=cli_aaa
+AGENT_4_FEISHU_APP_SECRET=aaa
+
+# Group 5: Feishu ↔ Gemini CLI (no API key — complete `gemini` OAuth first)
+AGENT_5_NAME=Gemini Bot
+AGENT_5_PLATFORM=feishu
+AGENT_5_AI_CLI=gemini
+AGENT_5_FEISHU_APP_ID=cli_bbb
+AGENT_5_FEISHU_APP_SECRET=bbb
 ```
+
+> Each Feishu bot group needs its **own Feishu app** (different `APP_ID`); long-connection events cannot be shared. `AI_CLI` aliases: `codex-cli`, `claude-code` / `claude-code-cli`, `gemini-cli`.
 
 > **Codex Auth:** Codex uses OAuth persistent login (`codex login`) — this is **not** the same as an OpenAI API Key (`sk-xxx`):
 >
@@ -60,17 +76,28 @@ AGENT_3_FEISHU_APP_SECRET=zzz
 >
 > ⚠️ **Not recommended** to use API Key with Codex — your Pro subscription already includes Codex usage. Switching to API Key would result in double billing.
 
-### 2. Codex Login (codex agent only)
+### 2. CLI Login (Codex / Claude / Gemini)
 
 ```bash
-# Browser OAuth (recommended)
+# Codex — browser OAuth (recommended; billed to ChatGPT subscription)
 codex login
+codex login status
 
-# Or: with API Key (not recommended, see table above)
+# Claude Code — Claude.ai subscription (recommended)
+claude /login
+
+# Gemini CLI — first interactive run completes Google OAuth
+gemini
+```
+
+Avoid swapping subscription CLIs to API keys (pay-as-you-go would double-bill). If you must:
+
+```bash
+# Codex (not recommended)
 echo "sk-xxx" | codex login --with-api-key
 
-# Verify login status
-codex login status
+# Claude: AGENT_N_ANTHROPIC_API_KEY in .env
+# Gemini: AGENT_N_GEMINI_API_KEY or AGENT_N_GOOGLE_API_KEY in .env
 ```
 
 ### 3. Start

@@ -46,9 +46,13 @@ async function main(): Promise<void> {
     const runner = new AgentRunner(
       agent,
       agent.workdir || globalConfig.workdir,
-      globalConfig.codebuddyBin,
-      globalConfig.cursorAgentBin,
-      globalConfig.codexBin,
+      {
+        codebuddyBin: globalConfig.codebuddyBin,
+        cursorAgentBin: globalConfig.cursorAgentBin,
+        codexBin: globalConfig.codexBin,
+        claudeBin: globalConfig.claudeBin,
+        geminiBin: globalConfig.geminiBin,
+      },
       stateDir,
     );
     runners.push(runner);

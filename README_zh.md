@@ -1,12 +1,12 @@
 本项目是一个 ChatOps 开发自动化工具。解除了开发环境的地理限制，将飞书、企业微信等主流即时通讯（IM）工具转化为移动端/远程的"命令行终端"。
 
-通过本项目，你只需在聊天框中发送自然语言或特定指令，背后的机器人就能自动调用、驱动本地或云端的 Cursor、CodeBuddy 等 AI 辅助编程 CLI 工具。无论是出门在外通过手机紧急修复 Bug、触发代码审查，还是在工位上实现多端联动，它都能让你随时随地，触手可得。
+通过本项目，你只需在聊天框中发送自然语言或特定指令，背后的机器人就能自动调用、驱动本地或云端的 Codex、Claude Code、Gemini、Cursor、CodeBuddy 等 AI 辅助编程 CLI 工具。无论是出门在外通过手机紧急修复 Bug、触发代码审查，还是在工位上实现多端联动，它都能让你随时随地，触手可得。
 
 核心特性：
 
 💬 多组并发转发：在 `.env` 中配置多组「IM 平台 + AI CLI」token 组合，所有组同时启动转发服务。
 
-🤖 AI CLI 驱动：完美对接 Codex、Cursor、CodeBuddy 等现代 AI 编程助手的命令行接口。
+🤖 AI CLI 驱动：完美对接 Codex、Claude Code、Gemini、Cursor、CodeBuddy 等现代 AI 编程助手的命令行接口。
 
 🔒 安全远程控制：支持用户白名单，确保你的开发环境安全无虞。
 
@@ -60,7 +60,23 @@ AGENT_3_PLATFORM=feishu
 AGENT_3_AI_CLI=codex
 AGENT_3_FEISHU_APP_ID=cli_zzz
 AGENT_3_FEISHU_APP_SECRET=zzz
+
+# 第 4 组：飞书 ↔ Claude Code（无需 API Key，先执行 claude /login）
+AGENT_4_NAME=Claude Bot
+AGENT_4_PLATFORM=feishu
+AGENT_4_AI_CLI=claude
+AGENT_4_FEISHU_APP_ID=cli_aaa
+AGENT_4_FEISHU_APP_SECRET=aaa
+
+# 第 5 组：飞书 ↔ Gemini CLI（无需 API Key，先交互登录 gemini）
+AGENT_5_NAME=Gemini Bot
+AGENT_5_PLATFORM=feishu
+AGENT_5_AI_CLI=gemini
+AGENT_5_FEISHU_APP_ID=cli_bbb
+AGENT_5_FEISHU_APP_SECRET=bbb
 ```
+
+> 每组飞书 Bot 必须使用**独立的飞书应用**（不同 `APP_ID`），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`。
 
 > **Codex 认证说明：** Codex 使用的是 OAuth 持久化认证（`codex login`），与 OpenAI API Key（`sk-xxx`）**不是同一回事**：
 >
@@ -73,17 +89,28 @@ AGENT_3_FEISHU_APP_SECRET=zzz
 >
 > ⚠️ **不建议** 对 Codex 使用 API Key 方式——Pro 订阅已包含 Codex 调用额度，换成 API Key 会重复计费。
 
-### 2. Codex 登录（仅 codex agent 需要）
+### 2. CLI 登录（Codex / Claude / Gemini 需要）
 
 ```bash
-# 浏览器 OAuth 登录（推荐）
+# Codex — 浏览器 OAuth（推荐，走 ChatGPT 订阅额度）
 codex login
+codex login status
 
-# 或：使用 API Key（不推荐，见上表）
+# Claude Code — Claude.ai 订阅（推荐）
+claude /login
+
+# Gemini CLI — 首次交互运行完成 Google OAuth
+gemini
+```
+
+不建议把订阅类 CLI 换成 API Key（会变成按量付费，和订阅重复计费）。若必须使用 API Key：
+
+```bash
+# Codex（不推荐）
 echo "sk-xxx" | codex login --with-api-key
 
-# 验证登录状态
-codex login status
+# Claude：在 .env 里设 AGENT_N_ANTHROPIC_API_KEY
+# Gemini：在 .env 里设 AGENT_N_GEMINI_API_KEY 或 AGENT_N_GOOGLE_API_KEY
 ```
 
 ### 3. 启动

@@ -67,9 +67,26 @@ function validatePlatform(p: string): Platform {
   throw new Error(`Unsupported platform: "${p}". Supported: feishu, wecom`);
 }
 
+const AI_CLI_ALIASES: Record<string, AiCli> = {
+  codebuddy: "codebuddy",
+  cursor: "cursor",
+  "cursor-cli": "cursor",
+  "cursor-agent": "cursor",
+  codex: "codex",
+  "codex-cli": "codex",
+  claude: "claude",
+  "claude-code": "claude",
+  "claude-code-cli": "claude",
+  gemini: "gemini",
+  "gemini-cli": "gemini",
+};
+
 function validateAiCli(c: string): AiCli {
-  if (c === "codebuddy" || c === "cursor" || c === "codex") return c;
-  throw new Error(`Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex`);
+  const canonical = AI_CLI_ALIASES[c];
+  if (canonical) return canonical;
+  throw new Error(
+    `Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex, claude (claude-code / claude-code-cli), gemini (gemini-cli)`,
+  );
 }
 
 function parseGroup(raw: RawGroup): AgentConfig | null {
@@ -157,6 +174,18 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     // Codex uses persistent auth via `codex login` — no API key needed.
     config.codex = {};
   }
+  if (aiCli === "claude") {
+    // Claude Code uses `claude login` (Claude.ai 订阅) or optional ANTHROPIC_API_KEY.
+    config.claude = {
+      apiKey: e.ANTHROPIC_API_KEY || e.CLAUDE_API_KEY,
+    };
+  }
+  if (aiCli === "gemini") {
+    // Gemini CLI uses OAuth login or optional GEMINI_API_KEY / GOOGLE_API_KEY.
+    config.gemini = {
+      apiKey: e.GEMINI_API_KEY || e.GOOGLE_API_KEY,
+    };
+  }
 
   return config;
 }
@@ -222,6 +251,8 @@ export interface GlobalConfig {
   codebuddyBin: string;
   cursorAgentBin: string;
   codexBin: string;
+  claudeBin: string;
+  geminiBin: string;
   logLevel: string;
   /** Agent stall timeout (ms); 0 = disabled. Default 45min (feishu-cursor) */
   agentStallMs: number;
@@ -250,6 +281,18 @@ export function loadGlobalConfig(env: Record<string, string>): GlobalConfig {
       resolve(home, ".local/bin/codex"),
       "/opt/homebrew/bin/codex",
       "/usr/local/bin/codex",
+    ]),
+    claudeBin: env.CLAUDE_BIN || findBinary("claude", [
+      resolve(home, ".local/bin/claude"),
+      resolve(home, ".claude/local/claude"),
+      "/opt/homebrew/bin/claude",
+      "/usr/local/bin/claude",
+    ]),
+    geminiBin: env.GEMINI_BIN || findBinary("gemini", [
+      resolve(home, ".local/bin/gemini"),
+      "/opt/homebrew/bin/gemini",
+      "/usr/local/bin/gemini",
+      resolve(home, ".npm-global/bin/gemini"),
     ]),
     logLevel: env.LOG_LEVEL || "info",
     agentStallMs: Number(env.AGENT_STALL_MS || 45 * 60 * 1000),
