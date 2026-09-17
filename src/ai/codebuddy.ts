@@ -432,6 +432,18 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
       }
     }
 
+    // The CLI's stream-json *error* channel: a fatal error is reported as a lone
+    // `{"type":"error","error":…}` event, with no assistant/result text at all.
+    // The common cause here is resuming a session whose transcript CodeBuddy has
+    // already cleaned up ("No conversation found with session ID: …"). That is
+    // recoverable: drop the dead session so the caller retries without it.
+    const cliError: string | undefined = items.find((i: any) => i?.type === "error")?.error;
+    if (cliError && sid) {
+      console.warn(`[codebuddy] session ${sid.slice(0, 8)} unusable: ${cliError}`);
+      sessions.delete(chatId);
+      return null;
+    }
+
     // Track session
     for (const item of items) {
       const newSid = item.session_id || item.sessionId;
@@ -523,6 +535,12 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
 
     if (timedOut) {
       return { text: timeoutNotice(stderr), model, usage, sessionId };
+    }
+
+    // Non-resume fatal error (no session to drop): surface the CLI's message
+    // instead of the unhelpful "No usable result".
+    if (cliError) {
+      return { text: `⚠️ CodeBuddy 错误：${String(cliError).slice(0, 1000)}`, model, usage, sessionId };
     }
 
     dumpDebug("no-usable-result", stdout);
