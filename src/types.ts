@@ -6,7 +6,7 @@
 export type Platform = "feishu" | "wecom";
 
 /** Supported AI CLI tools */
-export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini";
+export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini" | "pi";
 
 /** A single agent group configuration parsed from .env */
 export interface AgentConfig {
@@ -34,6 +34,8 @@ export interface AgentConfig {
   claude?: ClaudeConfig;
   /** Gemini CLI config (when aiCli === "gemini") */
   gemini?: GeminiConfig;
+  /** Pi-specific config (when aiCli === "pi") */
+  pi?: PiConfig;
   /** Allowed user open_ids (optional) */
   allowlist: Set<string>;
   /**
@@ -98,6 +100,11 @@ export interface ClaudeConfig {
 export interface GeminiConfig {
   /** Optional Gemini API key. If omitted, uses `gemini` OAuth login. */
   apiKey?: string;
+}
+
+export interface PiConfig {
+  /** Provider name for `pi --provider`; defaults to "openai-codex" (ChatGPT Plus/Pro OAuth). */
+  provider?: string;
 }
 
 /** AI CLI run result */

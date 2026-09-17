@@ -46,6 +46,13 @@ import {
   getGeminiSession,
   GEMINI_MODEL_ALIASES,
 } from "./ai/gemini";
+import {
+  runPi,
+  stopPiRun,
+  clearPiSession,
+  setPiSession,
+  getPiSession,
+} from "./ai/pi";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
 import {
   buildReviewPrompt,
@@ -107,6 +114,7 @@ function pushSessionToAi(aiCli: AgentConfig["aiCli"], chatId: string, sid: strin
   else if (aiCli === "codex") setCodexSession(chatId, sid);
   else if (aiCli === "claude") setClaudeSession(chatId, sid);
   else if (aiCli === "gemini") setGeminiSession(chatId, sid);
+  else if (aiCli === "pi") setPiSession(chatId, sid);
 }
 
 /**
@@ -229,6 +237,7 @@ export interface AgentBins {
   codexBin?: string;
   claudeBin?: string;
   geminiBin?: string;
+  piBin?: string;
 }
 
 export class AgentRunner {
@@ -543,6 +552,7 @@ export class AgentRunner {
     if (aiCli === "codex") stopped = stopCodexRun(ev.chatId);
     if (aiCli === "claude") stopped = stopClaudeRun(ev.chatId);
     if (aiCli === "gemini") stopped = stopGeminiRun(ev.chatId);
+    if (aiCli === "pi") stopped = stopPiRun(ev.chatId);
     if (stopped) {
       this.feishu?.sendToChat(ev.chatId, "⏹️ 正在停止…");
     } else {
@@ -837,7 +847,7 @@ export class AgentRunner {
     label: string,
     onStreamUpdate?: (text: string) => void,
   ): Promise<AiResult> {
-    const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig } = this.config;
+    const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig } = this.config;
     const model = models.get(chatId);
     const addDirs = this.resolveAddDirs(workspace, label);
 
@@ -910,6 +920,19 @@ export class AgentRunner {
       return result;
     }
 
+    if (aiCli === "pi" && piConfig && this.bins.piBin) {
+      const result = await runPi({
+        prompt,
+        chatId,
+        config: piConfig,
+        workdir: workspace,
+        piBin: this.bins.piBin,
+        model,
+        onStreamUpdate,
+      });
+      return result;
+    }
+
     throw new Error(`Cannot dispatch: no config for "${aiCli}"`);
   }
 
@@ -960,6 +983,7 @@ export class AgentRunner {
     if (this.config.aiCli === "codex") clearCodexSession(chatId);
     if (this.config.aiCli === "claude") clearClaudeSession(chatId);
     if (this.config.aiCli === "gemini") clearGeminiSession(chatId);
+    if (this.config.aiCli === "pi") clearPiSession(chatId);
     sessions.delete(chatId);
     cumUsage.delete(chatId);
     scheduleSave();
@@ -972,6 +996,7 @@ export class AgentRunner {
     if (this.config.aiCli === "codex") return getCodexSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "claude") return getClaudeSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "gemini") return getGeminiSession(chatId) || sessions.get(chatId);
+    if (this.config.aiCli === "pi") return getPiSession(chatId) || sessions.get(chatId);
     return sessions.get(chatId);
   }
 

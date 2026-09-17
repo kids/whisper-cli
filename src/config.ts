@@ -79,13 +79,14 @@ const AI_CLI_ALIASES: Record<string, AiCli> = {
   "claude-code-cli": "claude",
   gemini: "gemini",
   "gemini-cli": "gemini",
+  pi: "pi",
 };
 
 function validateAiCli(c: string): AiCli {
   const canonical = AI_CLI_ALIASES[c];
   if (canonical) return canonical;
   throw new Error(
-    `Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex, claude (claude-code / claude-code-cli), gemini (gemini-cli)`,
+    `Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex, claude (claude-code / claude-code-cli), gemini (gemini-cli), pi`,
   );
 }
 
@@ -186,6 +187,11 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
       apiKey: e.GEMINI_API_KEY || e.GOOGLE_API_KEY,
     };
   }
+  if (aiCli === "pi") {
+    // Pi uses persistent auth via `pi login` — no API key needed.
+    // Provider defaults to openai-codex; override via AGENT_<N>_PI_PROVIDER.
+    config.pi = { provider: e.PI_PROVIDER || undefined };
+  }
 
   return config;
 }
@@ -253,6 +259,7 @@ export interface GlobalConfig {
   codexBin: string;
   claudeBin: string;
   geminiBin: string;
+  piBin: string;
   logLevel: string;
   /** Agent stall timeout (ms); 0 = disabled. Default 45min (feishu-cursor) */
   agentStallMs: number;
@@ -293,6 +300,12 @@ export function loadGlobalConfig(env: Record<string, string>): GlobalConfig {
       "/opt/homebrew/bin/gemini",
       "/usr/local/bin/gemini",
       resolve(home, ".npm-global/bin/gemini"),
+    ]),
+    piBin: env.PI_BIN || findBinary("pi", [
+      resolve(home, ".local/bin/pi"),
+      "/opt/homebrew/bin/pi",
+      "/usr/local/bin/pi",
+      "/usr/bin/pi",
     ]),
     logLevel: env.LOG_LEVEL || "info",
     agentStallMs: Number(env.AGENT_STALL_MS || 45 * 60 * 1000),
