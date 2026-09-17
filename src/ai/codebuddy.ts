@@ -67,22 +67,44 @@ export function stopCodebuddyRun(runKey: string): boolean {
 // Model listing
 // ---------------------------------------------------------------------------
 
-const modelCache = new Map<string, string[]>();
+interface ModelListCache {
+  ids: string[];
+  ts: number;
+}
+
+const modelCache = new Map<string, ModelListCache>();
+
+/**
+ * TTL for a cached model list. `codebuddy --help` builds the list dynamically
+ * (the CLI queries its agent's model registry while printing help), so a
+ * process-lifetime cache would freeze the list at whatever it was when the bot
+ * first answered `/model` — newly released models would never show up.
+ * Override with CODEBUDDY_MODEL_TTL_MS (0 = always re-query).
+ */
+const MODEL_CACHE_TTL_MS = Number(process.env.CODEBUDDY_MODEL_TTL_MS ?? 10 * 60 * 1000);
 
 /** Query installed CodeBuddy CLI for supported model list */
 export function queryCodebuddyModels(bin: string): string[] {
   const cached = modelCache.get(bin);
-  if (cached) return cached;
-  const ids = ["default-model"];
+  if (cached && Date.now() - cached.ts < MODEL_CACHE_TTL_MS) return cached.ids;
+
   try {
-    const out = execSync(`"${bin}" --help`, { encoding: "utf8", timeout: 10000 });
+    // The CLI fetches the list remotely while printing --help (its own timeout
+    // is 10s per lookup, up to two lookups), so give it more than the old 10s
+    // budget before declaring failure.
+    const out = execSync(`"${bin}" --help`, { encoding: "utf8", timeout: 30000 });
     const m = out.match(/Currently supported:\s*\(([^)]+)\)/);
-    if (m) ids.push(...m[1].split(",").map((s) => s.trim()).filter(Boolean));
+    const parsed = m ? m[1].split(",").map((s) => s.trim()).filter(Boolean) : [];
+    if (!parsed.length) throw new Error("no \"Currently supported\" list in --help output");
+    const ids = ["default-model", ...parsed];
+    modelCache.set(bin, { ids, ts: Date.now() });
+    return ids;
   } catch (e) {
     console.error(`[codebuddy/models] failed: ${e}`);
+    // Never cache a failure: a stale list beats a bogus one, and the next call
+    // should retry instead of serving "default-model" for the rest of the run.
+    return cached?.ids ?? ["default-model"];
   }
-  modelCache.set(bin, ids);
-  return ids;
 }
 
 // ---------------------------------------------------------------------------

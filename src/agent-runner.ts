@@ -670,7 +670,9 @@ export class AgentRunner {
     }
 
     const known = this.listKnownModels();
-    if (aiCli === "codebuddy" && known.length && !known.includes(arg) && arg !== "default") {
+    // A lone "default-model" means the CLI query failed, not that the user's id
+    // is wrong — pass it through and let the CLI reject it if it really is.
+    if (aiCli === "codebuddy" && known.length > 1 && !known.includes(arg)) {
       await feishu.sendMarkdown(chatId, [
         `⚠️ 未知模型: \`${arg}\``,
         "",
