@@ -161,6 +161,10 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     config.codebuddy = {
       apiKey,
       internetEnvironment: e.CODEBUDDY_INTERNET_ENVIRONMENT,
+      models: (e.CODEBUDDY_MODELS || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
     };
   }
   if (aiCli === "cursor") {

@@ -983,7 +983,12 @@ export class AgentRunner {
 
   private listKnownModels(): string[] {
     const { aiCli } = this.config;
-    if (aiCli === "codebuddy") return queryCodebuddyModels(this.bins.codebuddyBin || "codebuddy");
+    if (aiCli === "codebuddy") {
+      // The CLI only reports its fallback catalog when it cannot resolve an
+      // enterpriseId, so merge the ids configured in AGENT_<N>_CODEBUDDY_MODELS.
+      const extra = this.config.codebuddy?.models ?? [];
+      return [...new Set([...queryCodebuddyModels(this.bins.codebuddyBin || "codebuddy"), ...extra])];
+    }
     if (aiCli === "claude") return CLAUDE_MODEL_ALIASES;
     if (aiCli === "gemini") return GEMINI_MODEL_ALIASES;
     return [];

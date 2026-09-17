@@ -82,6 +82,15 @@ export interface WeComConfig {
 export interface CodeBuddyConfig {
   apiKey: string;
   internetEnvironment?: string;
+  /**
+   * Extra model ids advertised by `/model`, merged with the list the CLI
+   * reports (AGENT_<N>_CODEBUDDY_MODELS, comma separated).
+   *
+   * Needed because `codebuddy --help` only exposes the fallback catalog when the
+   * CLI cannot resolve an enterpriseId (API-key auth), so newer models such as
+   * claude-opus-5 never show up even though they run fine.
+   */
+  models?: string[];
 }
 
 export interface CursorConfig {
