@@ -695,23 +695,21 @@ export class AgentRunner {
       return true;
     }
 
-    const known = this.listKnownModels();
-    // A lone "default-model" means the CLI query failed, not that the user's id
-    // is wrong — pass it through and let the CLI reject it if it really is.
-    if (aiCli === "codebuddy" && known.length > 1 && !known.includes(arg)) {
-      await feishu.sendMarkdown(chatId, [
-        `⚠️ 未知模型: \`${arg}\``,
-        "",
-        "**可用:**",
-        ...known.map((s) => `• \`${s}\``),
-      ].join("\n"));
-      return true;
-    }
+    // No whitelist gate: the curated list is just a convenience, and a stale or
+    // incomplete one must not block a valid id. The CLI reports an unknown model
+    // itself on the next run, so pass anything through and only hint if the id
+    // is not in the list.
+    const unlisted = aiCli === "codebuddy" && !this.listKnownModels().includes(arg);
 
     models.set(chatId, arg);
     this.clearSession(chatId);
     scheduleSave();
-    await feishu.sendToChat(chatId, `✅ 模型已切换至: \`${arg}\`，会话已重置。`);
+    await feishu.sendToChat(
+      chatId,
+      unlisted
+        ? `✅ 模型已切换至: \`${arg}\`，会话已重置。\n\n（该 id 不在 /model 列表中；若模型不存在，CLI 会在下次执行时报错）`
+        : `✅ 模型已切换至: \`${arg}\`，会话已重置。`,
+    );
     return true;
   }
 
@@ -984,10 +982,12 @@ export class AgentRunner {
   private listKnownModels(): string[] {
     const { aiCli } = this.config;
     if (aiCli === "codebuddy") {
-      // The CLI only reports its fallback catalog when it cannot resolve an
-      // enterpriseId, so merge the ids configured in AGENT_<N>_CODEBUDDY_MODELS.
-      const extra = this.config.codebuddy?.models ?? [];
-      return [...new Set([...queryCodebuddyModels(this.bins.codebuddyBin || "codebuddy"), ...extra])];
+      // Under API-key auth the CLI reports only its fallback catalog (no
+      // enterpriseId → enterprise models API skipped), so a configured list
+      // overrides it with a short, curated "latest per family" set.
+      const configured = this.config.codebuddy?.models ?? [];
+      if (configured.length) return ["default-model", ...configured];
+      return queryCodebuddyModels(this.bins.codebuddyBin || "codebuddy");
     }
     if (aiCli === "claude") return CLAUDE_MODEL_ALIASES;
     if (aiCli === "gemini") return GEMINI_MODEL_ALIASES;
