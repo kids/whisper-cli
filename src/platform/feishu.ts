@@ -72,7 +72,10 @@ export class FeishuClient {
         const content = msg.content as string;
 
         // Dedup
-        if (this.isDup(messageId)) return;
+        if (this.isDup(messageId)) {
+          console.log(`[feishu] dup message_id=${messageId}`);
+          return;
+        }
 
         // Skip bot's own messages
         const sender = ev.sender as Record<string, unknown> | undefined;
@@ -84,6 +87,11 @@ export class FeishuClient {
 
         // Extract sender open_id
         const senderOpenId = extractFeishuSenderOpenId(ev);
+
+        console.log(
+          `[消息] ${chatType} chat=${String(chatId).slice(0, 8)} type=${messageType} ` +
+            `text=${text.slice(0, 80)}${attachments.length ? ` atts=${attachments.length}` : ""}`,
+        );
 
         if (this.handler) {
           await this.handler({
@@ -472,20 +480,49 @@ function parseFeishuContent(content: string, messageType: string): string {
     if (messageType === "text") return p.text || "";
     if (messageType === "post") {
       const texts: string[] = [];
-      for (const lang of Object.values(p) as Array<{
+      // Feishu post: { zh_cn: { title, content: [[{tag,text,...}]] } }
+      // also tolerate a bare { title, content } shape
+      const langs: unknown[] = [];
+      if (p && typeof p === "object") {
+        if (Array.isArray(p.content) || typeof p.title === "string") langs.push(p);
+        for (const v of Object.values(p)) langs.push(v);
+      }
+      for (const lang of langs as Array<{
         title?: string;
-        content?: Array<Array<{ tag: string; text?: string }>>;
+        content?: Array<Array<Record<string, unknown>>>;
       }>) {
-        if (lang?.title) texts.push(lang.title);
-        if (Array.isArray(lang?.content)) {
-          for (const para of lang.content) {
-            for (const e of para) {
-              if ((e.tag === "text" || e.tag === "md") && e.text) texts.push(e.text);
+        if (!lang || typeof lang !== "object") continue;
+        if (lang.title) texts.push(String(lang.title));
+        if (!Array.isArray(lang.content)) continue;
+        for (const para of lang.content) {
+          if (!Array.isArray(para)) continue;
+          for (const e of para) {
+            if (!e || typeof e !== "object") continue;
+            const tag = String(e.tag || "");
+            if ((tag === "text" || tag === "md" || tag === "code_block") && e.text) {
+              texts.push(String(e.text));
+            } else if (tag === "a") {
+              const label = e.text ? String(e.text) : "";
+              const href = e.href ? String(e.href) : "";
+              if (label && href) texts.push(`${label} (${href})`);
+              else if (href) texts.push(href);
+              else if (label) texts.push(label);
+            } else if (tag === "at" && e.user_name) {
+              texts.push(`@${String(e.user_name)}`);
+            } else if (tag === "img" && e.image_key) {
+              texts.push(`[图片:${String(e.image_key)}]`);
+            } else if (tag === "media" && (e.file_key || e.image_key)) {
+              texts.push(`[媒体:${String(e.file_key || e.image_key)}]`);
+            } else if (typeof e.text === "string" && e.text.trim()) {
+              texts.push(String(e.text));
             }
           }
         }
       }
-      return texts.join("\n");
+      const joined = texts.join("\n").trim();
+      if (joined) return joined;
+      // last resort: keep raw so we don't silently drop rich posts
+      return content;
     }
     if (messageType === "image") return "";
     if (messageType === "file") return p.file_name ? `[文件: ${p.file_name}]` : "[文件]";
@@ -504,6 +541,26 @@ export function parseIncomingAttachments(
     }
     if (messageType === "image" && p.image_key) {
       return [{ type: "image", fileKey: p.image_key, fileName: "image.png" }];
+    }
+    if (messageType === "post") {
+      const out: IncomingAttachment[] = [];
+      const langs: unknown[] = [];
+      if (p && typeof p === "object") {
+        if (Array.isArray(p.content)) langs.push(p);
+        for (const v of Object.values(p)) langs.push(v);
+      }
+      for (const lang of langs as Array<{ content?: Array<Array<Record<string, unknown>>> }>) {
+        if (!lang || !Array.isArray(lang.content)) continue;
+        for (const para of lang.content) {
+          if (!Array.isArray(para)) continue;
+          for (const e of para) {
+            if (e?.tag === "img" && typeof e.image_key === "string") {
+              out.push({ type: "image", fileKey: e.image_key, fileName: "image.png" });
+            }
+          }
+        }
+      }
+      return out;
     }
   } catch { /* ignore */ }
   return [];

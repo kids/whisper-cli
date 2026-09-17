@@ -333,9 +333,25 @@ export class AgentRunner {
 
   private async processMessage(ev: FeishuMessageEvent): Promise<void> {
     const supported = new Set(["text", "post", "file", "image"]);
-    if (!supported.has(ev.messageType)) return;
+    if (!supported.has(ev.messageType)) {
+      console.warn(`[跳过] 不支持的消息类型 type=${ev.messageType} chat=${ev.chatId.slice(0, 8)}`);
+      await this.feishu?.sendToChat(
+        ev.chatId,
+        `暂不支持该消息类型（${ev.messageType}）。请发文字 / 富文本 / 图片 / 文件。`,
+      );
+      return;
+    }
     const text = ev.text.trim();
-    if (!text && ev.attachments.length === 0) return;
+    if (!text && ev.attachments.length === 0) {
+      console.warn(
+        `[跳过] 空内容 type=${ev.messageType} chat=${ev.chatId.slice(0, 8)} raw=${ev.content?.slice(0, 200) || ""}`,
+      );
+      await this.feishu?.sendToChat(
+        ev.chatId,
+        "收到消息但未能解析出文字内容。请改发纯文本，或把链接/正文直接粘贴发送。",
+      );
+      return;
+    }
 
     if (this.config.allowlist.size > 0 && !this.config.allowlist.has(ev.senderOpenId)) {
       await this.feishu?.sendToChat(ev.chatId, "⛔ Not authorized.");
