@@ -250,17 +250,22 @@ export class FeishuClient {
     } catch { return undefined; }
   }
 
-  /** Patch (update in-place) an existing interactive card message */
-  async updateCardMessage(messageId: string, text: string): Promise<void> {
+  /** Patch (update in-place) an existing interactive card message. Returns false on failure. */
+  async updateCardMessage(messageId: string, text: string): Promise<boolean> {
     const content = FeishuClient.buildMarkdownCard(text);
     try {
       const resp = await this.client.im.v1.message.patch({
         path: { message_id: messageId },
         data: { content },
       });
-      if (resp.code !== 0) console.error(`[feishu] updateCard FAIL code=${resp.code} msg=${resp.msg}`);
+      if (resp.code !== 0) {
+        console.error(`[feishu] updateCard FAIL code=${resp.code} msg=${resp.msg}`);
+        return false;
+      }
+      return true;
     } catch (e) {
       console.error("[feishu] updateCard exception:", e);
+      return false;
     }
   }
 

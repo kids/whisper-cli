@@ -833,12 +833,18 @@ export class AgentRunner {
       body += formatUsageFooter(chatId, displayModel, usage);
     }
 
-    if (cardId) {
-      await feishu.updateCardMessage(cardId, body).catch(() => {});
-      if (body.length > 3000) {
-        await feishu.sendPostMarkdown(chatId, body);
-      }
+    // Cards reject some markdown (e.g. too many tables → ErrCode 11310) and truncate
+    // poorly when oversized. Never put the full reply on both card and post.
+    const tableHeavy = (body.match(/^\|/gm) || []).length >= 4 || body.includes("|---");
+    const preferPost = !cardId || body.length > 3000 || tableHeavy;
+    if (!preferPost) {
+      const ok = await feishu.updateCardMessage(cardId!, body).catch(() => false);
+      if (!ok) await feishu.sendPostMarkdown(chatId, body);
     } else {
+      if (cardId) {
+        const tip = isReview ? "🔍 审视完成，见下方。" : "✅ 生成完成，见下方。";
+        await feishu.updateCardMessage(cardId, tip).catch(() => false);
+      }
       await feishu.sendPostMarkdown(chatId, body);
     }
 
