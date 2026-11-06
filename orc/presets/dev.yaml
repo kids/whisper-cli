@@ -1,0 +1,13 @@
+name: dev
+description: 新功能交付：规划 → 实现 ⇄ 评审（换 CLI）→ 独立测试
+roles:
+  planner:     { count: 1 }
+  implementer: { count: 3 }
+  critic:      { count: 2 }
+  tester:      { count: 1 }
+stages:
+  - { id: plan,          role: planner }
+  - { id: design_review, role: critic, optional: true, on_fail: plan, max_loops: 2 }
+  - { id: impl,          role: implementer }
+  - { id: review,        role: critic, on_fail: impl, max_loops: 3 }
+  - { id: test,          role: tester, on_fail: impl, max_loops: 2 }

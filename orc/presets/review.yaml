@@ -1,0 +1,10 @@
+name: review
+description: 只审不改：两个不同模型各审一遍 → 汇总
+roles:
+  critic:      { count: 1 }
+  critic_alt:  { count: 1 }
+  synthesizer: { count: 1 }
+stages:
+  - { id: review_a, role: critic,     advisory: true }
+  - { id: review_b, role: critic_alt, advisory: true }
+  - { id: summary,  role: synthesizer }
