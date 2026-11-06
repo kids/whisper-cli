@@ -14,6 +14,7 @@ import { classifyResult, eventToProgress } from "../src/orc/runner";
 import { Orchestrator } from "../src/orc/scheduler";
 import { OrcStore } from "../src/orc/store";
 import type { NotifyPayload, Task } from "../src/orc/types";
+import { parseLeadAction, renderCard, resolveChatPreset } from "../src/orc/chat";
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail?: unknown) {
@@ -104,6 +105,21 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("parent blocked by child", decideParent(mkTask(), kids)?.patch.status === "blocked");
 }
 
+
+// ---- lead agent action parsing ----------------------------------------------
+{
+  const a: any = parseLeadAction('好的，我来安排。\n```json\n{"action":"submit","goal":"加登录限流","preset":"dev"}\n```');
+  check("lead submit", a.action === "submit" && a.goal === "加登录限流" && a.preset === "dev", a);
+  check("lead attach urgent", (parseLeadAction('{"action":"attach","task":"7","text":"改用 redis","urgent":true}') as any).urgent === true);
+  check("lead bad task id", "error" in parseLeadAction('{"action":"stop","task":"x"}'));
+  check("lead unknown action ignored", "error" in parseLeadAction('{"action":"rm -rf"}'));
+  check("lead announce trims", (parseLeadAction('{"action":"announce","paragraphs":[" 结论先行 ",""]}') as any).paragraphs.join() === "结论先行");
+  check("lead config", (parseLeadAction('{"action":"config","patch":{"roles":{"critic":{"cli":"claude"}}}}') as any).patch.roles.critic.cli === "claude");
+  const prof = { mode: "orc" as const, preset: "dev", patch: { roles: { implementer: { count: 1 } } }, version: 3 };
+  check("chat preset applies profile patch", resolveChatPreset(prof).roles.implementer.count === 1);
+  check("chat preset extra patch validated", throws(() => resolveChatPreset(prof, { roles: { ghost: { count: 1 } } }), /role library/));
+}
+
 // ---- scheduler end-to-end (fake executor) ------------------------------------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, encoding: "utf8" }).trim();
@@ -130,6 +146,8 @@ class FakeExec implements Executor {
       if (role === "implementer") {
         if (this.hang) { while (!this.stopped.has(req.sessionKey)) await sleep(10); return { text: "🛑 任务已被用户终止。", tokens: 0, timedOut: false, cancelled: true }; }
         await sleep(this.implDelay);
+        mkdirSync(join(req.cwd, "pkg", "__pycache__"), { recursive: true });
+        writeFileSync(join(req.cwd, "pkg", "__pycache__", "m.cpython-312.pyc"), "bin");
         const f = join(req.cwd, `feature-${taskId}.txt`);
         writeFileSync(f, (existsSync(f) ? readFileSync(f, "utf8") : "") + "x\n");
         return this.ok('{"status":"done","summary":"wrote feature"}', `sess-impl-${taskId}`);
@@ -192,9 +210,11 @@ async function e2e() {
     check("A critic sees diff", /feature-1\.txt/.test(critics[0].prompt));
     check("A critic on codex", critics.every((c) => c.cli === "codex"));
     check("A tester sees spec", exec.calls.find((c) => c.role === "tester")!.prompt.includes("写 feature.txt"));
+    check("A artifacts are not violations", notes.filter((n) => /只读角色/.test(n.text)).length === 1 && !/__pycache__/.test(notes.find((n) => /只读角色/.test(n.text))!.text));
     check("A readonly violation reset", !existsSync(join(done.worktree!, "critic-was-here.txt")) && notes.some((n) => /只读角色/.test(n.text)));
     const log = git(done.worktree!, "log", "--oneline", `${done.baseRef}..HEAD`);
     check("A commits per writer attempt", log.split("\n").length === 3 && /test: tester/.test(log), log);
+    check("A artifacts not committed", !git(done.worktree!, "ls-files").includes("__pycache__"), git(done.worktree!, "ls-files"));
     check("A main untouched", git(repo, "rev-parse", "main") === done.baseRef);
     const notesDir = join(dir, "home", "notes");
     check("A notes appended", readFileSync(join(notesDir, readdirSync(notesDir)[0]), "utf8").includes("用 txt 存特性"));

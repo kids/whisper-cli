@@ -61,13 +61,19 @@ export function mergeBranches(wt: string, branches: string[]): string | undefine
   return undefined;
 }
 
+/** Uncommitted changes, ignoring generated artifacts (pytest/node caches are not violations) */
 export function isDirty(wt: string): boolean {
-  return git(wt, ["status", "--porcelain"]).length > 0;
+  return git(wt, ["status", "--porcelain", "--", ".", ...ARTIFACT_EXCLUDES]).length > 0;
 }
+
+/** Generated artifacts never committed even if the repo forgot to .gitignore them */
+export const ARTIFACT_EXCLUDES = [
+  "__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".DS_Store", "*.egg-info",
+].flatMap((p) => [`:(exclude,glob)**/${p}`, `:(exclude,glob)**/${p}/**`]);
 
 /** Commit everything in the worktree; returns the new sha or undefined if nothing changed */
 export function commitAll(wt: string, message: string): string | undefined {
-  git(wt, ["add", "-A"]);
+  git(wt, ["add", "-A", "--", ".", ...ARTIFACT_EXCLUDES]);
   if (!git(wt, ["diff", "--cached", "--name-only"])) return undefined;
   execFileSync("git", [...IDENT, "commit", "-q", "--no-verify", "-m", message], { cwd: wt, stdio: ["ignore", "pipe", "pipe"] });
   return headSha(wt);
@@ -75,7 +81,7 @@ export function commitAll(wt: string, message: string): string | undefined {
 
 /** Throw away uncommitted changes (read-only role violation) */
 export function resetHard(wt: string): string {
-  const files = git(wt, ["status", "--porcelain"]);
+  const files = git(wt, ["status", "--porcelain", "--", ".", ...ARTIFACT_EXCLUDES]);
   git(wt, ["reset", "--hard", "-q"]);
   git(wt, ["clean", "-fdq"]);
   return files;

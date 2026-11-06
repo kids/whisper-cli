@@ -4,8 +4,8 @@
 // Bypasses AgentRunner.dispatchAi (which is bound to one CLI per bot group) so
 // critic can run on a different CLI/model than the implementer (002 §4.2).
 // =============================================================================
+import { existsSync } from "node:fs";
 import type { AgentConfig } from "../types";
-import type { GlobalConfig } from "../config";
 import { runCodebuddy, setCodebuddySession, clearCodebuddySession, getCodebuddySession, stopCodebuddyRun } from "../ai/codebuddy";
 import { runCodex, setCodexSession, clearCodexSession, getCodexSession, stopCodexRun } from "../ai/codex";
 import { runClaude, setClaudeSession, clearClaudeSession, getClaudeSession, stopClaudeRun } from "../ai/claude";
@@ -72,8 +72,10 @@ export function classifyResult(text: string): Pick<RunResult, "timedOut" | "canc
   return { timedOut: false, cancelled: false };
 }
 
+export interface ExecutorBins { codebuddyBin?: string; codexBin?: string; claudeBin?: string }
+
 export class CliExecutor implements Executor {
-  constructor(private agents: AgentConfig[], private bins: GlobalConfig) {}
+  constructor(private agents: AgentConfig[], private bins: ExecutorBins) {}
 
   private cfg<K extends "codebuddy" | "claude" | "codex">(k: K): AgentConfig[K] | undefined {
     return this.agents.find((a) => a[k])?.[k];
@@ -82,8 +84,8 @@ export class CliExecutor implements Executor {
   available(): CliName[] {
     const out: CliName[] = [];
     if (this.cfg("codebuddy")) out.push("codebuddy");
-    if (this.bins.codexBin) out.push("codex");
-    if (this.bins.claudeBin) out.push("claude");
+    if (this.bins.codexBin && existsSync(this.bins.codexBin)) out.push("codex");
+    if (this.bins.claudeBin && existsSync(this.bins.claudeBin)) out.push("claude");
     return out;
   }
 
@@ -113,7 +115,7 @@ export class CliExecutor implements Executor {
     } else if (req.cli === "codex") {
       if (req.resumeSessionId) setCodexSession(key, req.resumeSessionId); else clearCodexSession(key);
       res = await runCodex({
-        prompt: req.prompt, chatId: key, config: this.cfg("codex") ?? {}, workdir: req.cwd, codexBin: this.bins.codexBin,
+        prompt: req.prompt, chatId: key, config: this.cfg("codex") ?? {}, workdir: req.cwd, codexBin: this.bins.codexBin || "codex",
         model: req.model, onStreamUpdate, onEvent, appendSystemPrompt: req.appendSystemPrompt,
         readOnly: req.readOnly, hardTimeoutMs: req.hardTimeoutMs, staleTimeoutMs: req.staleTimeoutMs,
       });

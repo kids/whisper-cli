@@ -55,6 +55,9 @@ import {
 } from "./ai/pi";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
 import { getChatInstructions } from "./announcement";
+import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
+import { activeTaskSummary, getProfile, stopChatTasks } from "./orc/chat";
+import { loadAllAgents } from "./config";
 import {
   buildReviewPrompt,
   parseReviewCommand,
@@ -432,6 +435,12 @@ export class AgentRunner {
     const handled = await this.handleCommand(ev);
     if (handled) return;
 
+    // orc mode: the lead agent picks an action, orc executes it (docs/orc/002 §2)
+    if (getProfile(ev.chatId).mode === "orc") {
+      await runLeadTurn(this.orcHost(), ev);
+      return;
+    }
+
     // Team groups: every user message drives a multi-role discussion round
     if (getTeam(ev.chatId)) {
       await this.runTeamRound(ev);
@@ -638,6 +647,12 @@ export class AgentRunner {
       if (this.stopRunByKey(moderatorSessionKey(ev.chatId))) stopped = true;
     }
 
+    const orcStopped = getProfile(ev.chatId).mode === "orc" ? stopChatTasks(ev.chatId) : [];
+    if (orcStopped.length) {
+      this.feishu?.sendToChat(ev.chatId, `⏹️ 已终止 orc 任务 ${orcStopped.map((i) => "#" + i).join(" ")}`);
+      if (!stopped) return;
+    }
+
     if (stopped) {
       this.feishu?.sendToChat(ev.chatId, team ? "⏹️ 正在停止团队讨论…" : "⏹️ 正在停止…");
     } else {
@@ -665,6 +680,9 @@ export class AgentRunner {
     const text = ev.text.trim();
     const feishu = this.feishu!;
     const chatId = ev.chatId;
+
+    // /mode /orc /task /tasks — orc scheduling layer
+    if (await handleOrcCommand(this.orcHost(), ev)) return true;
 
     // /team — create a team group, or manage the one we are in
     if (/^\/(team|团队)(\s|$)/i.test(text)) {
@@ -707,6 +725,8 @@ export class AgentRunner {
         "• `/new [name]` — 创建新飞书群 = 全新独立会话",
         "• `/team <任务描述>` — 建多角色团队群；群内 `/team` 管理角色与轮次",
         "• `/review [焦点]` — 审视上一轮回复（别名 `/审视` `/critique`）",
+        "• `/mode [single|orc [组合]]` — 切换单 agent / 多 agent 编排（主 agent 分派）",
+        "• `/task <目标>` — 交给多 agent 编排；`/tasks` 列表；`/orc` 查看/切换编排",
         "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
         "• `/status` — 查看当前状态 + 机器资源",
         "• `/help` — 显示此帮助",
@@ -868,6 +888,8 @@ export class AgentRunner {
 
       // Wrap with project system prompt (unless review)
       if (!isReview) {
+        const bg = activeTaskSummary(chatId);
+        if (bg) promptText = `${bg}\n\n---\n\n${promptText}`;
         const project = getProjects().projects[label];
         promptText = wrapWithProjectPrompt(workspace, project?.systemPromptFile, promptText);
         promptText = wrapWithWorkspaceHint(workspace, promptText);
@@ -935,6 +957,30 @@ export class AgentRunner {
     if (result.files && result.files.length > 0) {
       await feishu.sendAgentFiles(chatId, result.files);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // orc host (chat side of the scheduler; see src/orc/commands.ts)
+  // -----------------------------------------------------------------------
+
+  private _orcHost?: OrcChatHost;
+  private orcHost(): OrcChatHost {
+    if (this._orcHost) return this._orcHost;
+    let agents: AgentConfig[] = [this.config];
+    try { agents = [this.config, ...loadAllAgents().filter((a) => a.name !== this.config.name)]; } catch { /* keep own config */ }
+    this._orcHost = {
+      feishu: this.feishu!,
+      agents,
+      bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin },
+      workspaceFor: (chatId) => chatWorkspace.get(chatId)?.workspace || this.workdir,
+      runLead: async (prompt, sessionKey) => {
+        const ws = chatWorkspace.get(sessionKey.split("#")[0]);
+        const res = await this.dispatchAi(prompt, sessionKey, ws?.workspace || this.workdir, ws?.label || "default");
+        if (res.sessionId) rememberSession(this.config.aiCli, sessionKey, res.sessionId);
+        return res.text;
+      },
+    };
+    return this._orcHost;
   }
 
   // -----------------------------------------------------------------------
