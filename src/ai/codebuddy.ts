@@ -225,9 +225,9 @@ function formatDuration(ms: number): string {
   return `${Math.round(ms / 60_000)} 分钟`;
 }
 
-function timeoutNotice(stderr: string): string {
+function timeoutNoticeFor(stderr: string, hardMs = HARD_TIMEOUT_MS, staleMs = STALE_TIMEOUT_MS): string {
   const isHard = (stderr || "").includes("[HARD TIMEOUT]");
-  const dur = formatDuration(isHard ? HARD_TIMEOUT_MS : STALE_TIMEOUT_MS);
+  const dur = formatDuration(isHard ? hardMs : staleMs);
   return isHard
     ? `⏱️ 任务超过 ${dur} 硬上限，已被终止。`
     : `⏱️ Agent 静默超过 ${dur} 被终止（可能正在恢复超大上下文）。建议 \`/reset\` 重置会话，或调大 \`CODEBUDDY_STALE_MS\`。`;
@@ -246,22 +246,36 @@ export interface RunCodebuddyOptions {
   resumeSession?: boolean;
   model?: string;
   onStreamUpdate?: (text: string) => void;
+  /** Re-applied on every turn (incl. resumed sessions) via --append-system-prompt */
+  appendSystemPrompt?: string;
+  /** Default "bypassPermissions" (unattended bot) */
+  permissionMode?: string;
+  /** Built-in tools to deny, e.g. ["Write","Edit"] for read-only roles */
+  disallowedTools?: string[];
+  hardTimeoutMs?: number;
+  staleTimeoutMs?: number;
+  /** Raw stream-json events (tool calls etc.), for progress reporting */
+  onEvent?: (ev: any) => void;
 }
 
 export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
   const { prompt, chatId, config, workdir } = opts;
   const bin = opts.codebuddyBin || DEFAULT_BIN;
-  const sessionId = opts.resumeSession !== false ? sessions.get(chatId) : undefined;
+  const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;
+  const staleMs = opts.staleTimeoutMs ?? STALE_TIMEOUT_MS;
+  const timeoutNotice = (stderr: string) => timeoutNoticeFor(stderr, hardMs, staleMs);
 
   async function attempt(resume: boolean): Promise<AiResult | null> {
-    const sid = resume ? sessions.get(chatId) : undefined;
+    const sid = resume && opts.resumeSession !== false ? sessions.get(chatId) : undefined;
     const args = [
       "-p", prompt,
-      "--permission-mode", "bypassPermissions",
+      "--permission-mode", opts.permissionMode || "bypassPermissions",
       "--output-format", "stream-json",
     ];
     if (sid) args.push("-r", sid);
     if (opts.model) args.push("--model", opts.model);
+    if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
+    if (opts.disallowedTools?.length) args.push("--disallowedTools", opts.disallowedTools.join(","));
 
     console.log(`[codebuddy] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"} model=${opts.model || "default"}`);
 
@@ -297,7 +311,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
           wasCancelled: false,
           streamedText: lastAssistantText,
         });
-      }, HARD_TIMEOUT_MS);
+      }, hardMs);
 
       let staleTimer: ReturnType<typeof setTimeout> | null = null;
       const resetStale = () => {
@@ -311,7 +325,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
             wasCancelled: false,
             streamedText: lastAssistantText,
           });
-        }, STALE_TIMEOUT_MS);
+        }, staleMs);
       };
 
       child.on("error", (e: Error) => {
@@ -339,6 +353,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
           if (!line.startsWith("{")) continue;
           try {
             const ev = JSON.parse(line) as any;
+            try { opts.onEvent?.(ev); } catch { /* observer must not break the run */ }
             // Extract assistant text for streaming
             if (ev.type === "assistant" && ev.message?.content) {
               const content = ev.message.content;

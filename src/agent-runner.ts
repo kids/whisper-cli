@@ -54,6 +54,7 @@ import {
   getPiSession,
 } from "./ai/pi";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
+import { getChatInstructions } from "./announcement";
 import {
   buildReviewPrompt,
   parseReviewCommand,
@@ -951,6 +952,14 @@ export class AgentRunner {
     const model = models.get(chatId);
     const addDirs = this.resolveAddDirs(workspace, label);
 
+    // Group announcement = this chat's instructions, re-read (revision-cached) every turn.
+    // Session keys look like "<chatId>" or "<chatId>#role:x" - the chat is the prefix.
+    const instructions = this.feishu
+      ? await getChatInstructions(this.feishu.getClient(), chatId.split("#")[0])
+      : undefined;
+    // CLIs without an append-system-prompt flag get it as a prompt prefix
+    const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;
+
     if (aiCli === "codebuddy" && cbConfig) {
       const result = await runCodebuddy({
         prompt,
@@ -960,13 +969,14 @@ export class AgentRunner {
         codebuddyBin: this.bins.codebuddyBin,
         model,
         onStreamUpdate,
+        appendSystemPrompt: instructions,
       });
       return result;
     }
 
     if (aiCli === "cursor" && curConfig) {
       const result = await runCursor({
-        prompt,
+        prompt: prefixed,
         chatId,
         config: curConfig,
         workspace,
@@ -988,6 +998,7 @@ export class AgentRunner {
         codexBin: this.bins.codexBin,
         model,
         onStreamUpdate,
+        appendSystemPrompt: instructions,
       });
       return result;
     }
@@ -1002,13 +1013,14 @@ export class AgentRunner {
         claudeBin: this.bins.claudeBin,
         model,
         onStreamUpdate,
+        appendSystemPrompt: instructions,
       });
       return result;
     }
 
     if (aiCli === "gemini" && geminiConfig) {
       const result = await runGemini({
-        prompt,
+        prompt: prefixed,
         chatId,
         config: geminiConfig,
         workspace,
@@ -1022,7 +1034,7 @@ export class AgentRunner {
 
     if (aiCli === "pi" && piConfig && this.bins.piBin) {
       const result = await runPi({
-        prompt,
+        prompt: prefixed,
         chatId,
         config: piConfig,
         workdir: workspace,

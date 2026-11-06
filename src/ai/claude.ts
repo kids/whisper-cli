@@ -101,6 +101,10 @@ export interface RunClaudeOptions {
   claudeBin?: string;
   model?: string;
   onStreamUpdate?: (text: string) => void;
+  /** Re-applied on every turn (incl. resumed sessions) via --append-system-prompt */
+  appendSystemPrompt?: string;
+  /** Built-in tools to deny, e.g. ["Write","Edit"] for read-only roles */
+  disallowedTools?: string[];
 }
 
 export function runClaude(opts: RunClaudeOptions): Promise<AiResult> {
@@ -119,6 +123,8 @@ export function runClaude(opts: RunClaudeOptions): Promise<AiResult> {
     ];
     if (sid) args.push("--resume", sid);
     if (opts.model) args.push("--model", opts.model);
+    if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
+    if (opts.disallowedTools?.length) args.push("--disallowedTools", opts.disallowedTools.join(","));
     for (const dir of addDirs) args.push("--add-dir", dir);
 
     console.log(`[claude] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"}`);

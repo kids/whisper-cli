@@ -14,7 +14,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.67.0"
+    "@larksuiteoapi/node-sdk": "^1.67.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
