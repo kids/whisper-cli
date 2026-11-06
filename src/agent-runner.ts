@@ -62,6 +62,31 @@ import {
 } from "./prompt";
 import { collectSysStatus } from "./sys-status";
 import {
+  DEFAULT_MAX_ROUNDS,
+  MAX_ROLES,
+  MAX_ROUNDS_CAP,
+  TEAM_USAGE,
+  buildRosterPrompt,
+  buildRolePrompt,
+  buildSynthesisPrompt,
+  buildTranscript,
+  fallbackRoster,
+  flushTeams,
+  getTeam,
+  isAgree,
+  metaSessionKey,
+  moderatorSessionKey,
+  parseRoster,
+  roleSessionKey,
+  setTeam,
+  slugifyRoleId,
+  stripSentinel,
+  touchTeam,
+  type Speech,
+  type TeamRole,
+  type TeamState,
+} from "./team";
+import {
   addTask,
   archiveTask,
   findTask,
@@ -223,6 +248,28 @@ function formatUsageFooter(
   return `\n\n---\n${parts.join("  ·  ")}`;
 }
 
+/** Sum per-speaker usage into one footer so a team round counts as a single turn */
+function sumUsage(list: (AiResult["usage"] | undefined)[]): AiResult["usage"] | undefined {
+  const acc = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+  };
+  let any = false;
+  for (const u of list) {
+    if (!u) continue;
+    any = true;
+    acc.inputTokens += u.inputTokens;
+    acc.outputTokens += u.outputTokens;
+    acc.cacheReadTokens += u.cacheReadTokens || 0;
+    acc.cacheWriteTokens += u.cacheWriteTokens || 0;
+    acc.totalTokens += u.totalTokens;
+  }
+  return any ? acc : undefined;
+}
+
 function isStopCommand(text: string): boolean {
   return /^\/(stop|cancel|停止|终止|中止|abort)\s*$/i.test(text.trim());
 }
@@ -246,6 +293,8 @@ export class AgentRunner {
   private workdir: string;
   private bins: AgentBins;
   private statePath: string;
+  /** Chats whose team round the user asked to abort (checked between speakers) */
+  private teamCancel = new Set<string>();
 
   constructor(
     config: AgentConfig,
@@ -314,7 +363,10 @@ export class AgentRunner {
     currentStatePath = this.statePath;
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       process.on(sig, () => {
-        if (this.statePath === currentStatePath) flushState();
+        if (this.statePath === currentStatePath) {
+          flushState();
+          flushTeams();
+        }
       });
     }
   }
@@ -379,6 +431,12 @@ export class AgentRunner {
     const handled = await this.handleCommand(ev);
     if (handled) return;
 
+    // Team groups: every user message drives a multi-role discussion round
+    if (getTeam(ev.chatId)) {
+      await this.runTeamRound(ev);
+      return;
+    }
+
     await this.runAiAndReply(ev);
   }
 
@@ -401,6 +459,7 @@ export class AgentRunner {
         "",
         "- `/新任务 标题` — 建群并开始新 session",
         "- `/新任务 finch:首条指令` — 建群并立即执行",
+        "- `/team 任务描述` — 建多角色团队群，自动发言并收敛总结",
         "- `/列表` — 活跃任务群",
         "- `/归档 编号` — 归档任务（群保留，不再响应）",
         "- `/状态` — 服务状态",
@@ -428,6 +487,11 @@ export class AgentRunner {
 
     if (/^\/(新任务|new|task)\s*$/i.test(trimmed)) {
       await feishu.sendToChat(ev.chatId, "请提供任务标题，例如：`/新任务 重构 auth`");
+      return;
+    }
+
+    if (/^\/(team|团队)(\s|$)/i.test(trimmed)) {
+      await this.handleTeamCommand(ev);
       return;
     }
 
@@ -561,19 +625,35 @@ export class AgentRunner {
   // -----------------------------------------------------------------------
 
   private handleStop(ev: FeishuMessageEvent): void {
-    const { aiCli } = this.config;
-    let stopped = false;
-    if (aiCli === "codebuddy") stopped = stopCodebuddyRun(ev.chatId);
-    if (aiCli === "cursor") stopped = stopCursorRun(ev.chatId);
-    if (aiCli === "codex") stopped = stopCodexRun(ev.chatId);
-    if (aiCli === "claude") stopped = stopClaudeRun(ev.chatId);
-    if (aiCli === "gemini") stopped = stopGeminiRun(ev.chatId);
-    if (aiCli === "pi") stopped = stopPiRun(ev.chatId);
+    let stopped = this.stopRunByKey(ev.chatId);
+
+    // Team rounds run under per-role session keys, so /stop must sweep them all
+    const team = getTeam(ev.chatId);
+    if (team) {
+      this.teamCancel.add(ev.chatId);
+      for (const role of team.roles) {
+        if (this.stopRunByKey(roleSessionKey(ev.chatId, role.id))) stopped = true;
+      }
+      if (this.stopRunByKey(moderatorSessionKey(ev.chatId))) stopped = true;
+    }
+
     if (stopped) {
-      this.feishu?.sendToChat(ev.chatId, "⏹️ 正在停止…");
+      this.feishu?.sendToChat(ev.chatId, team ? "⏹️ 正在停止团队讨论…" : "⏹️ 正在停止…");
     } else {
       this.feishu?.sendToChat(ev.chatId, "当前没有运行中的任务。");
     }
+  }
+
+  /** Kill a running task for an arbitrary session key */
+  private stopRunByKey(key: string): boolean {
+    const { aiCli } = this.config;
+    if (aiCli === "codebuddy") return stopCodebuddyRun(key);
+    if (aiCli === "cursor") return stopCursorRun(key);
+    if (aiCli === "codex") return stopCodexRun(key);
+    if (aiCli === "claude") return stopClaudeRun(key);
+    if (aiCli === "gemini") return stopGeminiRun(key);
+    if (aiCli === "pi") return stopPiRun(key);
+    return false;
   }
 
   // -----------------------------------------------------------------------
@@ -584,6 +664,11 @@ export class AgentRunner {
     const text = ev.text.trim();
     const feishu = this.feishu!;
     const chatId = ev.chatId;
+
+    // /team — create a team group, or manage the one we are in
+    if (/^\/(team|团队)(\s|$)/i.test(text)) {
+      return this.handleTeamCommand(ev);
+    }
 
     // /review — critique previous reply (feishu-cursor)
     const reviewCmd = parseReviewCommand(text);
@@ -619,6 +704,7 @@ export class AgentRunner {
         "• `/reset` — 重置会话 + 清零累计 token",
         "• `/model [id]` — 查看/切换模型（`/model default` 恢复默认）",
         "• `/new [name]` — 创建新飞书群 = 全新独立会话",
+        "• `/team <任务描述>` — 建多角色团队群；群内 `/team` 管理角色与轮次",
         "• `/review [焦点]` — 审视上一轮回复（别名 `/审视` `/critique`）",
         "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
         "• `/status` — 查看当前状态 + 机器资源",
@@ -999,15 +1085,28 @@ export class AgentRunner {
   // -----------------------------------------------------------------------
 
   private clearSession(chatId: string): void {
-    if (this.config.aiCli === "codebuddy") clearCodebuddySession(chatId);
-    if (this.config.aiCli === "cursor") clearCursorSession(chatId);
-    if (this.config.aiCli === "codex") clearCodexSession(chatId);
-    if (this.config.aiCli === "claude") clearClaudeSession(chatId);
-    if (this.config.aiCli === "gemini") clearGeminiSession(chatId);
-    if (this.config.aiCli === "pi") clearPiSession(chatId);
-    sessions.delete(chatId);
+    this.clearAiKey(chatId);
+    // Team groups keep one session per role (+ moderator + roster); reset them all
+    const team = getTeam(chatId);
+    if (team) {
+      for (const role of team.roles) this.clearAiKey(roleSessionKey(chatId, role.id));
+      this.clearAiKey(moderatorSessionKey(chatId));
+      this.clearAiKey(metaSessionKey(chatId));
+    }
     cumUsage.delete(chatId);
     scheduleSave();
+  }
+
+  /** Drop a session in both the AI adapter and the persisted state Map */
+  private clearAiKey(key: string): void {
+    const { aiCli } = this.config;
+    if (aiCli === "codebuddy") clearCodebuddySession(key);
+    if (aiCli === "cursor") clearCursorSession(key);
+    if (aiCli === "codex") clearCodexSession(key);
+    if (aiCli === "claude") clearClaudeSession(key);
+    if (aiCli === "gemini") clearGeminiSession(key);
+    if (aiCli === "pi") clearPiSession(key);
+    sessions.delete(key);
   }
 
   /** Prefer AI module Map (source of truth at runtime), fall back to persisted Map */
@@ -1019,6 +1118,450 @@ export class AgentRunner {
     if (this.config.aiCli === "gemini") return getGeminiSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "pi") return getPiSession(chatId) || sessions.get(chatId);
     return sessions.get(chatId);
+  }
+
+  // -----------------------------------------------------------------------
+  // Team mode (/team) — multi-role orchestrated discussion
+  // -----------------------------------------------------------------------
+
+  private async handleTeamCommand(ev: FeishuMessageEvent): Promise<boolean> {
+    const feishu = this.feishu!;
+    const raw = ev.text.trim().replace(/^\/(team|团队)/i, "").trim();
+    const existing = getTeam(ev.chatId);
+
+    // Inside a team group the argument is a management sub-command; anywhere
+    // else it is the topic description for a brand new team group.
+    if (existing) return this.handleTeamManage(ev, existing, raw);
+
+    const isP2p = ev.chatType === "p2p" || isAdminChat(ev.chatId, this.config.adminChatId);
+    if (this.config.adminMode && !isP2p) {
+      await feishu.sendToChat(ev.chatId, "请在 Bot 私聊发 `/team <任务描述>` 创建团队群。");
+      return true;
+    }
+
+    if (!raw) {
+      await feishu.sendMarkdown(ev.chatId, [
+        "**创建多角色团队群**",
+        "",
+        "`/team <任务描述>` — 按描述拆解出多个互补角色，建群后立即开跑第一轮讨论",
+        "",
+        TEAM_USAGE,
+      ].join("\n"));
+      return true;
+    }
+
+    await this.createTeamGroup(ev, raw);
+    return true;
+  }
+
+  private async handleTeamManage(
+    ev: FeishuMessageEvent,
+    team: TeamState,
+    raw: string,
+  ): Promise<boolean> {
+    const feishu = this.feishu!;
+    const chatId = ev.chatId;
+
+    if (!raw || /^(帮助|help|状态|status)$/i.test(raw)) {
+      await feishu.sendMarkdown(chatId, [
+        `**团队 · ${team.topic.slice(0, 60)}**`,
+        `角色: ${team.roles.map((r) => r.name).join("、")}`,
+        `轮次上限: ${team.maxRounds}`,
+        "",
+        TEAM_USAGE,
+      ].join("\n"));
+      return true;
+    }
+
+    if (/^(角色|成员|roster)$/i.test(raw)) {
+      await feishu.sendMarkdown(chatId, [
+        "**花名册**",
+        "",
+        ...team.roles.map((r, i) => `**${i + 1}. ${r.name}**（\`${r.id}\`）\n${r.prompt}`),
+      ].join("\n"));
+      return true;
+    }
+
+    const rounds = raw.match(/^(?:轮次|rounds?)\s*(\d+)$/i);
+    if (rounds) {
+      const n = Math.min(Math.max(Number.parseInt(rounds[1], 10), 1), MAX_ROUNDS_CAP);
+      team.maxRounds = n;
+      setTeam(team);
+      await feishu.sendToChat(chatId, `✅ 每轮讨论上限已设为 ${n} 轮（1~${MAX_ROUNDS_CAP}）。`);
+      return true;
+    }
+
+    const add = raw.match(/^(?:加|add)\s+(\S+?)(?:\s*[:：]\s*([\s\S]+))?$/i);
+    if (add) {
+      const name = add[1].trim().slice(0, 20);
+      if (!name) {
+        await feishu.sendToChat(chatId, "用法：`/team 加 <角色名>[:角色描述]`");
+        return true;
+      }
+      if (team.roles.length >= MAX_ROLES) {
+        await feishu.sendToChat(chatId, `角色已达上限（${MAX_ROLES} 个）。`);
+        return true;
+      }
+      const base = slugifyRoleId(name, team.roles.length + 1);
+      let id = base;
+      let n = 2;
+      while (team.roles.some((r) => r.id === id)) id = `${base}-${n++}`;
+
+      const role: TeamRole = {
+        id,
+        name,
+        prompt:
+          (add[2] || "").trim() ||
+          `${name} 视角：只从该角色的立场与关注点发言，提出其他角色容易忽略的问题。`,
+      };
+      team.roles.push(role);
+      setTeam(team);
+      await feishu.sendMarkdown(chatId, [
+        `✅ 已加入 **${name}**（\`${role.id}\`）`,
+        "",
+        role.prompt,
+        "",
+        `当前角色: ${team.roles.map((r) => r.name).join("、")}`,
+      ].join("\n"));
+      return true;
+    }
+
+    if (/^(收敛|总结|summar|summarize|converge)$/i.test(raw)) {
+      if (!team.lastTranscript) {
+        await feishu.sendToChat(chatId, "还没有可收敛的讨论记录。先在本群发一条问题或观点。");
+        return true;
+      }
+      const ws = this.resolveTeamWorkspace(chatId);
+      await this.runTeamSynthesis({
+        chatId,
+        topic: team.topic,
+        userText: team.lastUserText || team.topic,
+        transcript: team.lastTranscript,
+        workspace: ws.workspace,
+        label: ws.label,
+      });
+      return true;
+    }
+
+    if (/^(重置|reset)$/i.test(raw)) {
+      this.clearSession(chatId);
+      await feishu.sendToChat(chatId, "🔄 已清空所有角色的会话记忆（花名册与轮次设置保留）。");
+      return true;
+    }
+
+    await feishu.sendToChat(chatId, `未知的团队指令：\`${raw}\`\n\n${TEAM_USAGE}`);
+    return true;
+  }
+
+  private async createTeamGroup(ev: FeishuMessageEvent, topic: string): Promise<void> {
+    const feishu = this.feishu!;
+    const title = titleFromPrompt(topic);
+    const groupName = `🧑‍🤝‍🧑 team · ${title}`.slice(0, 50);
+
+    try {
+      await feishu.sendToChat(ev.chatId, `正在组建团队「${groupName}」…`);
+      const openId = ev.senderOpenId || getStore().adminOpenId;
+      if (!openId) {
+        await feishu.sendToChat(ev.chatId, "未知用户 open_id，请先在私聊发一条消息。");
+        return;
+      }
+
+      const routed = routePrompt("", {
+        workspace: this.workdir,
+        label: getProjects().default_project || "default",
+      });
+      const { chatId, message } = await feishu.createSessionChat(
+        groupName,
+        openId,
+        `team 群 · 主题：${topic}`.slice(0, 200),
+      );
+      if (!chatId) {
+        await feishu.sendToChat(ev.chatId, `❌ 创建失败\n${message}`);
+        return;
+      }
+
+      addTask({ chatId, title, workspace: routed.workspace, projectLabel: routed.label });
+      chatWorkspace.set(chatId, { workspace: routed.workspace, label: routed.label });
+
+      // Roster: one AI turn decomposes the topic into complementary roles
+      const cardId = await feishu.sendCardAndGetId(chatId, "🧑‍🤝‍🧑 正在拆解任务、组建团队…");
+      let roster: TeamRole[] | null = null;
+      try {
+        const res = await this.dispatchAi(
+          buildRosterPrompt(topic),
+          metaSessionKey(chatId),
+          routed.workspace,
+          routed.label,
+        );
+        roster = parseRoster(res.text);
+      } catch (err) {
+        console.warn(`[team] roster generation failed: ${(err as Error).message}`);
+      }
+      const usedFallback = !roster;
+      const roles = roster ?? fallbackRoster();
+
+      setTeam({
+        chatId,
+        topic,
+        roles,
+        maxRounds: DEFAULT_MAX_ROUNDS,
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+      });
+
+      const rosterCard = [
+        `**团队已就绪 · ${title}**`,
+        "",
+        ...roles.map((r, i) => `**${i + 1}. ${r.name}**\n${r.prompt}`),
+        "",
+        "---",
+        `主题：${topic}`,
+        "直接把问题或观点发在本群，团队会按顺序发言并自动收敛总结。",
+        "`/team 角色` · `/team 轮次 3` · `/team 加 法务:描述` · `/team 收敛` · `/stop` 中止",
+      ].join("\n");
+      if (cardId) await feishu.updateCardMessage(cardId, rosterCard).catch(() => {});
+      else await feishu.sendPostMarkdown(chatId, rosterCard);
+
+      if (usedFallback) {
+        await feishu.sendToChat(
+          chatId,
+          "（角色拆解未产出有效 JSON，已使用通用三角色兜底；可用 `/team 加 角色名:描述` 自定义）",
+        );
+      }
+
+      await feishu.sendMarkdown(ev.chatId, [
+        "✅ 已创建团队群",
+        `- 主题: **${title}**`,
+        `- 角色: ${roles.map((r) => r.name).join("、")}`,
+        `- chat_id: \`${chatId}\``,
+        "- 正在群内跑第一轮讨论…",
+      ].join("\n"));
+
+      await this.runTeamRound({
+        ...ev,
+        chatId,
+        chatType: "group",
+        text: topic,
+        attachments: [],
+        messageType: "text",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await feishu.sendToChat(ev.chatId, `❌ 创建团队群失败\n\n${msg.slice(0, 1500)}`);
+    }
+  }
+
+  /** One user message = up to `maxRounds` rounds of role speeches + convergence */
+  private async runTeamRound(ev: FeishuMessageEvent): Promise<void> {
+    const feishu = this.feishu!;
+    const chatId = ev.chatId;
+    const team = getTeam(chatId);
+    if (!team) return;
+
+    const ws = this.resolveTeamWorkspace(chatId);
+    let userText = ev.text.trim();
+    if (ev.attachments.length > 0) {
+      try {
+        const paths = await feishu.downloadAttachments(ev.messageId, ws.workspace, ev.attachments);
+        userText = buildPromptWithAttachments(userText, paths);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await feishu.sendToChat(chatId, `❌ 附件下载失败\n\n${msg.slice(0, 1000)}`);
+        return;
+      }
+    }
+    if (!userText) return;
+
+    this.teamCancel.delete(chatId);
+    const speeches: Speech[] = [];
+    const usages: (AiResult["usage"] | undefined)[] = [];
+    let model: string | undefined;
+
+    for (let round = 1; round <= team.maxRounds; round++) {
+      for (const role of team.roles) {
+        if (this.teamCancel.has(chatId)) break;
+        const speech = await this.runRoleSpeech({
+          chatId,
+          role,
+          topic: team.topic,
+          userText,
+          transcript: buildTranscript(speeches),
+          round,
+          maxRounds: team.maxRounds,
+          workspace: ws.workspace,
+          label: ws.label,
+        });
+        if (!speech) continue;
+        speeches.push(speech);
+        usages.push(speech.usage);
+        model = speech.model || model;
+      }
+      if (this.teamCancel.has(chatId)) break;
+      // Converge early: a round in which every role but at most one had
+      // nothing new to add means the discussion has already settled.
+      const fresh = speeches.filter((s) => s.round === round && !s.agreed).length;
+      if (fresh <= 1) break;
+    }
+
+    touchTeam(chatId, {
+      lastUserText: userText,
+      lastTranscript: buildTranscript(speeches, 4000),
+    });
+
+    if (this.teamCancel.has(chatId)) {
+      await feishu.sendToChat(chatId, "⏹️ 团队讨论已中止，已发言内容保留在上方卡片。");
+      return;
+    }
+    if (speeches.length === 0) return;
+
+    await this.runTeamSynthesis({
+      chatId,
+      topic: team.topic,
+      userText,
+      transcript: buildTranscript(speeches, 4000),
+      workspace: ws.workspace,
+      label: ws.label,
+      usage: sumUsage(usages),
+      model,
+    });
+  }
+
+  private async runRoleSpeech(opts: {
+    chatId: string;
+    role: TeamRole;
+    topic: string;
+    userText: string;
+    transcript: string;
+    round: number;
+    maxRounds: number;
+    workspace: string;
+    label: string;
+  }): Promise<Speech | null> {
+    const { chatId, role, topic, userText, transcript, round, maxRounds, workspace, label } = opts;
+    const header = `**🎤 ${role.name}** · R${round}/${maxRounds}`;
+    const prompt = buildRolePrompt({ role, topic, userText, transcript, round, maxRounds });
+
+    const res = await this.runStreamingCard({
+      chatId,
+      header,
+      prompt,
+      sessionKey: roleSessionKey(chatId, role.id),
+      workspace,
+      label,
+      finalHeader: (r) => (isAgree(r.text) ? `${header} · 无新增观点` : header),
+      // The agreement sentinel is an internal protocol token — never show it
+      renderText: (t) => stripSentinel(t),
+    });
+
+    return {
+      roleId: role.id,
+      name: role.name,
+      text: stripSentinel(res.text) || "(空)",
+      agreed: isAgree(res.text),
+      round,
+      usage: res.usage,
+      model: res.model,
+    };
+  }
+
+  private async runTeamSynthesis(opts: {
+    chatId: string;
+    topic: string;
+    userText: string;
+    transcript: string;
+    workspace: string;
+    label: string;
+    usage?: AiResult["usage"];
+    model?: string;
+  }): Promise<void> {
+    const team = getTeam(opts.chatId);
+    const prompt = buildSynthesisPrompt({
+      topic: opts.topic,
+      userText: opts.userText,
+      transcript: opts.transcript,
+      roleNames: team ? team.roles.map((r) => r.name) : [],
+    });
+
+    // Token footer is aggregated once per user turn (all roles + moderator),
+    // so the discussion does not spam one stats block per speaker.
+    const footer = opts.usage
+      ? formatUsageFooter(opts.chatId, opts.model || this.getDefaultModelName() || null, opts.usage)
+      : "";
+
+    const res = await this.runStreamingCard({
+      chatId: opts.chatId,
+      header: "**🎯 收口结论**",
+      prompt,
+      sessionKey: moderatorSessionKey(opts.chatId),
+      workspace: opts.workspace,
+      label: opts.label,
+      footer,
+    });
+
+    if (res.images && res.images.length > 0) {
+      await this.feishu?.sendAgentImages(opts.chatId, res.images);
+    }
+    if (res.files && res.files.length > 0) {
+      await this.feishu?.sendAgentFiles(opts.chatId, res.files);
+    }
+  }
+
+  /** Stream one AI turn into a dedicated card; shared by roles and moderator */
+  private async runStreamingCard(args: {
+    chatId: string;
+    header: string;
+    prompt: string;
+    sessionKey: string;
+    workspace: string;
+    label: string;
+    footer?: string;
+    finalHeader?: (res: AiResult) => string;
+    /** Map raw CLI output to what the user sees (e.g. drop protocol sentinels) */
+    renderText?: (text: string) => string;
+  }): Promise<AiResult> {
+    const feishu = this.feishu!;
+    const render = args.renderText ?? ((t: string) => t);
+
+    let cardId: string | undefined;
+    try {
+      cardId = await feishu.sendCardAndGetId(args.chatId, `${args.header}\n\n…`);
+    } catch { /* fall back to a plain post below */ }
+
+    let pendingText = "";
+    let updateTimer: ReturnType<typeof setTimeout> | null = null;
+    const onStreamUpdate = (text: string) => {
+      pendingText = text;
+      if (!cardId || updateTimer) return;
+      updateTimer = setTimeout(() => {
+        updateTimer = null;
+        feishu.updateCardMessage(cardId!, `${args.header}\n\n${render(pendingText)}`).catch(() => {});
+      }, 500);
+    };
+
+    let res: AiResult;
+    try {
+      res = await this.dispatchAi(args.prompt, args.sessionKey, args.workspace, args.label, onStreamUpdate);
+    } catch (err) {
+      res = { text: `⚠️ Error: ${(err as Error).message}` };
+    }
+    if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
+
+    // Each voice keeps its own CLI session so it remembers what it said before
+    if (res.sessionId) rememberSession(this.config.aiCli, args.sessionKey, res.sessionId);
+
+    const header = args.finalHeader ? args.finalHeader(res) : args.header;
+    const body = `${header}\n\n${render(res.text) || "(empty)"}${args.footer ?? ""}`;
+    if (cardId) await feishu.updateCardMessage(cardId, body).catch(() => {});
+    else await feishu.sendPostMarkdown(args.chatId, body);
+
+    return res;
+  }
+
+  private resolveTeamWorkspace(chatId: string): { workspace: string; label: string } {
+    return chatWorkspace.get(chatId) || {
+      workspace: this.workdir,
+      label: getProjects().default_project || "default",
+    };
   }
 
   private get label(): string {
