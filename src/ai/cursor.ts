@@ -192,7 +192,7 @@ export interface RunCursorOptions {
 export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
   const { prompt, chatId, config, workspace, onActivity } = opts;
   const bin = opts.agentBin || DEFAULT_BIN;
-  // Unset / "default" → auto: Cursor picks the model (same for bot, team roles and orc workers)
+  // Unset / "default" → auto: Cursor picks the model (same for the bot and orc workers)
   const model = opts.model && opts.model !== "default" ? opts.model : "auto";
   const stallMs = opts.staleTimeoutMs ?? STALL_TIMEOUT_MS;
   const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;

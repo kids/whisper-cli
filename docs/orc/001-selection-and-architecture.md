@@ -179,7 +179,7 @@ src/agent-runner.ts  只加 /task 命令与卡片通知的接线（出入口）
 
 ### 4.7 和 `/team`、`/review` 的关系
 
-- 002 修订：`/team` 并入组合体系，即 `discuss` 组合（`/team <描述>` = `/mode orc discuss`）。
+- 002 修订：`/team` 并入组合体系。2026-11-09 再修订：`/team` 已删除，`discuss` 组合暂不做。
 - `/review` 保持不变。orc 的 critic 是流水线里的一道关卡，不是聊天命令。
 
 ## 5. 小验证要确认的风险

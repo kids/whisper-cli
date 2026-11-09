@@ -2,7 +2,7 @@
 
 > 日期：2026-11-06　状态：设计定稿，部分已实测　前置文档：[001](001-selection-and-architecture.md)
 >
-> 本文档覆盖并修订 001 的这几处：流水线不再写死在代码里（改为预制组合）；群级约束不落成文件（改为群公告注入）；`/team` 并入组合体系。
+> 本文档覆盖并修订 001 的这几处：流水线不再写死在代码里（改为预制组合）；群级约束不落成文件（改为群公告注入）；`/team` 并入组合体系。（2026-11-09 修订：`/team` 已删除，从未上线；多视角调研用 `research`/`review` 组合，`discuss` 组合暂不做，确有需要再加。）
 
 ## 0. 需求
 
@@ -38,7 +38,7 @@ interface ChatProfile {
 ```
 
 - 用 `/mode single` / `/mode orc [组合名]` 切换，也可以直接说「切到 dev 编排」，由主 agent 识别成 `config` 动作。
-- 原来的 `/team <描述>` 保留成快捷方式，等于 `/mode orc discuss`，并用描述生成讨论角色。
+- ~~原来的 `/team <描述>` 保留成快捷方式~~ 已删除，见文首修订。
 
 ### 2.2 消息分发
 
@@ -209,7 +209,7 @@ optional: [design_review]   # 可以按群或按任务开启：impl 之前先让
 | `fix` | reproducer（先写失败用例）→ implementer → tester（回归）→ critic | 修 bug |
 | `review` | critic×2（不同模型各审一遍）→ synthesizer | 只审不改：PR、方案、论文 |
 | `research` | researcher×N 并行 → critic → synthesizer | 调研、方案对比 |
-| `discuss` | 多个视角轮流发言，有轮数上限，最后收口（即现在的 `/team`） | 开放讨论 |
+| ~~`discuss`~~ | 暂不做（`/team` 已删除） | — |
 
 角色提示词从 `/root/.codebuddy/agents/` 下的 `implementer.md`、`mighty.md`、`critic-manual.md` 改写。
 
@@ -237,7 +237,7 @@ v1 的流水线只支持**线性阶段 + 有上限的退回**，不支持任意 
 | §4.3 只有一个 `roles.yaml` | `orc/roles/*.md` 角色库 + `orc/presets/*.yaml` 组合 + 群级调整 |
 | §4.4 共享三层 | 加一层「群公告」：每轮注入，不落成文件 |
 | §4.6 只有 CLI 和 `/task` 入口 | 群 `mode` + 主 agent 判断意图 |
-| §4.7 `/team` 与 orc 并存 | `/team` = `discuss` 组合 |
+| §4.7 `/team` 与 orc 并存 | `/team` 删除（2026-11-09） |
 | 适配器硬超时 | 超时作为参数，由角色配置传入 |
 
 ## 7. 新增的小验证项（追加到 001 §5）
