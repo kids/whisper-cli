@@ -17,8 +17,6 @@ import { spawn } from "node:child_process";
 import type { AiResult, GeminiConfig } from "../types";
 import { findBinary } from "../config";
 import {
-  collectFilesFromText,
-  collectImagesFromText,
   HARD_TIMEOUT_MS,
   normalizeUsage,
   STALL_TIMEOUT_MS,
@@ -135,7 +133,6 @@ export function runGemini(opts: RunGeminiOptions): Promise<AiResult> {
       let settled = false;
       const images: NonNullable<AiResult["images"]> = [];
       const files: NonNullable<AiResult["files"]> = [];
-      const seenPaths = new Set<string>();
       const startedAt = Date.now();
       let lastOutputAt = startedAt;
       let timedOut = false;
@@ -253,8 +250,7 @@ export function runGemini(opts: RunGeminiOptions): Promise<AiResult> {
           return;
         }
 
-        for (const img of collectImagesFromText(output, seenPaths)) images.push(img);
-        for (const f of collectFilesFromText(output, seenPaths)) files.push(f);
+        // paths in the reply text are handled by agent-runner (src/outgoing.ts)
         if (outSessionId) sessions.set(chatId, outSessionId);
         finish({
           text: resultError ? `${output}\n\n⚠️ ${resultError}` : output,

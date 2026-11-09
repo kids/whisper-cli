@@ -17,8 +17,6 @@ import { spawn } from "node:child_process";
 import type { AiResult, ClaudeConfig } from "../types";
 import { findBinary } from "../config";
 import {
-  collectFilesFromText,
-  collectImagesFromText,
   HARD_TIMEOUT_MS,
   normalizeUsage,
   STALL_TIMEOUT_MS,
@@ -154,7 +152,6 @@ export function runClaude(opts: RunClaudeOptions): Promise<AiResult> {
       let settled = false;
       const images: AiResult["images"] = [];
       const files: NonNullable<AiResult["files"]> = [];
-      const seenPaths = new Set<string>();
       const startedAt = Date.now();
       let lastOutputAt = startedAt;
       let timedOut = false;
@@ -281,8 +278,7 @@ export function runClaude(opts: RunClaudeOptions): Promise<AiResult> {
           return;
         }
 
-        for (const img of collectImagesFromText(output, seenPaths)) images!.push(img);
-        for (const f of collectFilesFromText(output, seenPaths)) files.push(f);
+        // paths in the reply text are handled by agent-runner (src/outgoing.ts)
         if (outSessionId) sessions.set(chatId, outSessionId);
         finish({ text: output, model: outModel, sessionId: outSessionId, usage, images, files });
       });

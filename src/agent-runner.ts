@@ -59,6 +59,7 @@ import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstruction
 import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
 import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks, taskForCard } from "./orc/chat";
 import { flushRecent, recordTurn } from "./recent";
+import { extractSendOps, formatSendHint, resolveOutgoing, sendRoots } from "./outgoing";
 import {
   addWatch, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch, listWatches,
   parseWatchSpec, registerWatchHost, renderWatchCard, startWatches, tickWatches, updateWatch, watchCommandKind,
@@ -977,6 +978,16 @@ export class AgentRunner {
       recordTurn(chatId, "agent", result.text || "");
     }
 
+    // `[[image]]` / `[[file]]` lines (+ bare image paths) → attachments sent by code (src/outgoing.ts)
+    const sendOps = extractSendOps(result.text || "");
+    if (sendOps.ops.length) result = { ...result, text: sendOps.text };
+    const project = getProjects().projects[label];
+    const outgoing = resolveOutgoing(sendOps.ops, {
+      cwd: workspace,
+      roots: sendRoots([workspace, this.workdir, project?.path, ...(project?.addDirs ?? []), ...Object.values(getProjects().projects).map((p) => p.path)]),
+      fallbackText: result.text,
+    });
+
     if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
 
     // Persist session: agent-runner Map (state file) + AI module Map + task store
@@ -987,13 +998,14 @@ export class AgentRunner {
 
     const usage = result.usage && result.usage.totalTokens > 0 ? result.usage : undefined;
     const header = isReview ? `**🔍 审视 [${label}]**\n\n` : "";
-    let body = header + (result.text || "(empty)");
+    let body = header + (result.text || (sendOps.ops.length ? `📎 附件 ×${sendOps.ops.length}` : "(empty)"));
     if (usage) {
       const displayModel = result.model || this.getDefaultModelName() || null;
       body += formatUsageFooter(chatId, displayModel, usage);
     }
     if (memoryFooter) body += `\n\n${memoryFooter}`;
     if (watchNotes.length) body += `\n\n${watchNotes.join("\n")}`;
+    if (outgoing.notes.length) body += `\n\n${outgoing.notes.join("\n")}`;
 
     if (cardId) {
       await feishu.updateCardMessage(cardId, body).catch(() => {});
@@ -1081,6 +1093,7 @@ export class AgentRunner {
       announcement,
       chat.startsWith("oc_") ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
       memoryMode === "rw" && process.env.WHISPER_WATCH_HINT !== "0" ? formatWatchContext(chat) : undefined,
+      memoryMode === "rw" ? formatSendHint() : undefined,
     );
     // CLIs without an append-system-prompt flag get it as a prompt prefix
     const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;

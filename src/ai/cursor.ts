@@ -2,8 +2,6 @@
 // Cursor Agent CLI runner — spawns `agent` with session management
 // =============================================================================
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { basename } from "node:path";
 import type { AgentFile, AgentImage, AiResult, CursorConfig } from "../types";
 import { findBinary } from "../config";
 
@@ -103,18 +101,6 @@ function normalizeUsage(u: Record<string, unknown> | undefined): AiResult["usage
   return { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, totalTokens: input + output };
 }
 
-const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
-const IMG_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.(?:png|jpe?g|gif|webp|bmp))(?:[\s`'")]|$)/gi;
-const FILE_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.[\w.-]+)(?:[\s`'")]|$)/gi;
-
-function isRegularFile(path: string): boolean {
-  try {
-    return existsSync(path) && statSync(path).isFile();
-  } catch {
-    return false;
-  }
-}
-
 function extractGenerateImage(ev: StreamEvent): AgentImage | undefined {
   if (ev.type !== "tool_call" || ev.subtype !== "completed" || !ev.tool_call) return undefined;
   const gen = ev.tool_call.generateImageToolCall as Record<string, unknown> | undefined;
@@ -126,28 +112,6 @@ function extractGenerateImage(ev: StreamEvent): AgentImage | undefined {
   if (typeof success.filePath === "string") img.filePath = success.filePath;
   if (typeof success.imageData === "string") img.imageData = success.imageData;
   return img.filePath || img.imageData ? img : undefined;
-}
-
-function collectImagesFromText(text: string, seenPaths: Set<string>): AgentImage[] {
-  const out: AgentImage[] = [];
-  for (const m of text.matchAll(IMG_PATH_RE)) {
-    const p = m[1];
-    if (seenPaths.has(p) || !isRegularFile(p)) continue;
-    seenPaths.add(p);
-    out.push({ filePath: p });
-  }
-  return out;
-}
-
-function collectFilesFromText(text: string, seenPaths: Set<string>): AgentFile[] {
-  const out: AgentFile[] = [];
-  for (const m of text.matchAll(FILE_PATH_RE)) {
-    const p = m[1];
-    if (seenPaths.has(p) || IMG_EXT.test(p) || !isRegularFile(p)) continue;
-    seenPaths.add(p);
-    out.push({ filePath: p, fileName: basename(p) });
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,9 +301,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
           return;
         }
 
-        for (const img of collectImagesFromText(output, seenPaths)) pushImage(img);
-        for (const f of collectFilesFromText(output, seenPaths)) files.push(f);
-
+        // paths in the reply text are handled by agent-runner (src/outgoing.ts)
         finish({
           text: output,
           model: outModel,
