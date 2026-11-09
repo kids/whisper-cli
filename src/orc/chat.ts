@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import type { FeishuClient } from "../platform/feishu";
 import type { AgentConfig } from "../types";
 import { getChatInstructions } from "../announcement";
+import { formatMemory, joinInstructions } from "../memory";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { findJsonObjects } from "./output";
 import { CliExecutor, type ExecutorBins } from "./runner";
@@ -121,8 +122,10 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
   orc = new Orchestrator(new OrcStore(resolve(ORC_HOME, "orc.db")), executor, {
     orcHome: ORC_HOME,
     instructionsFor: async (t) => {
-      const f = t.chatId ? chatClients.get(t.chatId) : undefined;
-      return f && t.chatId ? getChatInstructions(f.getClient(), t.chatId) : undefined;
+      if (!t.chatId) return undefined;
+      const f = chatClients.get(t.chatId);
+      const ann = f ? await getChatInstructions(f.getClient(), t.chatId) : undefined;
+      return joinInstructions(ann, formatMemory(t.chatId)); // workers read group memory, never write it
     },
     onProgress: (t) => void refreshCard(t, TERMINAL.includes(t.status)),
     notify: async (t, n) => {
@@ -169,9 +172,11 @@ export type LeadAction =
   | { action: "retry"; task: number; note?: string }
   | { action: "config"; patch: PresetPatch; reason?: string }
   | { action: "announce"; paragraphs: string[]; reason?: string }
+  | { action: "remember"; items: string[] }
+  | { action: "forget"; ids: number[] }
   | { action: "reply"; text: string };
 
-const ACTIONS = ["submit", "attach", "status", "stop", "retry", "config", "announce", "reply"];
+const ACTIONS = ["submit", "attach", "status", "stop", "retry", "config", "announce", "remember", "forget", "reply"];
 
 export function buildLeadPrompt(c: {
   userText: string; presetLine: string; tasks: Task[]; presets: string[]; roles: string[]; history?: string;
@@ -193,7 +198,8 @@ export function buildLeadPrompt(c: {
     '- {"action":"status","task":12}  —— 问进展（task 可省略=全部）',
     '- {"action":"stop","task":12} / {"action":"retry","task":12,"note":"补充说明"}',
     '- {"action":"config","patch":{"preset":"fix","roles":{"critic":{"cli":"claude","count":1},"tester":null},"enable":["design_review"],"disable":[],"maxLoops":{"review":2}},"reason":"…"}  —— 调整编排；只能用角色库里已有的角色',
-    '- {"action":"announce","paragraphs":["要追加到群公告（=本群长期指令）的规则，每段一句"],"reason":"…"}  —— 用户想修改本群的长期约束/规则',
+    '- {"action":"announce","paragraphs":["要追加到群公告（=本群长期指令）的规则，每段一句"],"reason":"…"}  —— 用户想修改本群的长期约束/规则（人人可见、约束所有 agent 的硬规则）',
+    '- {"action":"remember","items":["一句话"]} / {"action":"forget","ids":[3]}  —— 用户要你记住/忘掉本群的背景信息、偏好（软信息，编号见【本群记忆】）；分不清是规则还是记忆时，用 remember',
     '- {"action":"reply","text":"直接回答"}  —— 闲聊、简单问题、或意图不清时向用户澄清（宁可问，不要猜）',
   ].filter(Boolean).join("\n");
 }
@@ -213,6 +219,15 @@ export function parseLeadAction(text: string): LeadAction | { error: string } {
     case "announce": {
       const ps = Array.isArray(a.paragraphs) ? a.paragraphs.map(String).map((s: string) => s.trim()).filter(Boolean) : [];
       return ps.length ? { action: "announce", paragraphs: ps.slice(0, 10), reason: a.reason } : { error: "announce 缺少 paragraphs" };
+    }
+    case "remember": {
+      const raw = Array.isArray(a.items) ? a.items : a.text ? [a.text] : [];
+      const items = raw.map(String).map((s: string) => s.trim()).filter(Boolean).slice(0, 10);
+      return items.length ? { action: "remember", items } : { error: "remember 缺少 items" };
+    }
+    case "forget": {
+      const ids = (Array.isArray(a.ids) ? a.ids : [a.ids ?? a.id]).map(num).filter((x: number | undefined): x is number => !!x);
+      return ids.length ? { action: "forget", ids } : { error: "forget 缺少 ids" };
     }
     default: return { action: "reply", text: String(a.text ?? "") };
   }

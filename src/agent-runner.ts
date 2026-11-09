@@ -55,6 +55,7 @@ import {
 } from "./ai/pi";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
 import { getChatInstructions } from "./announcement";
+import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstructions, memoryCommand } from "./memory";
 import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
 import { activeTaskSummary, getProfile, stopChatTasks } from "./orc/chat";
 import { loadAllAgents } from "./config";
@@ -681,6 +682,13 @@ export class AgentRunner {
     const feishu = this.feishu!;
     const chatId = ev.chatId;
 
+    // /记住 /记忆 — per-chat memory (src/memory.ts)
+    const memReply = memoryCommand(chatId, text);
+    if (memReply) {
+      await feishu.sendMarkdown(chatId, memReply);
+      return true;
+    }
+
     // /mode /orc /task /tasks — orc scheduling layer
     if (await handleOrcCommand(this.orcHost(), ev)) return true;
 
@@ -727,6 +735,7 @@ export class AgentRunner {
         "• `/review [焦点]` — 审视上一轮回复（别名 `/审视` `/critique`）",
         "• `/mode [single|orc [组合]]` — 切换单 agent / 多 agent 编排（主 agent 分派）",
         "• `/task <目标>` — 交给多 agent 编排；`/tasks` 列表；`/orc` 查看/切换编排",
+        "• `/记住 <内容>` · `/记忆 [forget <编号> | clear]` — 本群记忆（也可直接说「记住…」）",
         "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
         "• `/status` — 查看当前状态 + 机器资源",
         "• `/help` — 显示此帮助",
@@ -921,9 +930,19 @@ export class AgentRunner {
 
     let result: AiResult;
     try {
-      result = await this.dispatchAi(promptText, chatId, workspace, label, onStreamUpdate);
+      result = await this.dispatchAi(promptText, chatId, workspace, label, onStreamUpdate, isReview ? "ro" : "rw");
     } catch (err) {
       result = { text: `⚠️ Error: ${(err as Error).message}` };
+    }
+
+    // `[[remember]]` / `[[forget]]` lines → per-chat memory (stripped from the reply)
+    let memoryFooter = "";
+    if (!isReview) {
+      const ops = extractMemoryOps(result.text || "");
+      if (ops.remember.length || ops.forget.length) {
+        result = { ...result, text: ops.text };
+        memoryFooter = applyMemoryOps(chatId, ops, "agent");
+      }
     }
 
     if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
@@ -941,6 +960,7 @@ export class AgentRunner {
       const displayModel = result.model || this.getDefaultModelName() || null;
       body += formatUsageFooter(chatId, displayModel, usage);
     }
+    if (memoryFooter) body += `\n\n${memoryFooter}`;
 
     if (cardId) {
       await feishu.updateCardMessage(cardId, body).catch(() => {});
@@ -993,16 +1013,23 @@ export class AgentRunner {
     workspace: string,
     label: string,
     onStreamUpdate?: (text: string) => void,
+    /** "rw": the agent may emit [[remember]] lines (single-agent replies only) */
+    memoryMode: "rw" | "ro" = "ro",
   ): Promise<AiResult> {
     const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig } = this.config;
     const model = models.get(chatId);
     const addDirs = this.resolveAddDirs(workspace, label);
 
-    // Group announcement = this chat's instructions, re-read (revision-cached) every turn.
+    // Group announcement (= this chat's rules, revision-cached) + per-chat memory, every turn.
     // Session keys look like "<chatId>" or "<chatId>#role:x" - the chat is the prefix.
-    const instructions = this.feishu
-      ? await getChatInstructions(this.feishu.getClient(), chatId.split("#")[0])
+    const chat = chatOf(chatId);
+    const announcement = this.feishu
+      ? await getChatInstructions(this.feishu.getClient(), chat)
       : undefined;
+    const instructions = joinInstructions(
+      announcement,
+      chat.startsWith("oc_") ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
+    );
     // CLIs without an append-system-prompt flag get it as a prompt prefix
     const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;
 
@@ -1016,6 +1043,8 @@ export class AgentRunner {
         model,
         onStreamUpdate,
         appendSystemPrompt: instructions,
+        // per-chat memory replaces the cwd-keyed Auto Memory; WHISPER_CB_AUTO_MEMORY=1 keeps it on
+        disableAutoMemory: process.env.WHISPER_CB_AUTO_MEMORY !== "1",
       });
       return result;
     }

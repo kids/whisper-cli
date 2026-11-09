@@ -256,6 +256,8 @@ export interface RunCodebuddyOptions {
   staleTimeoutMs?: number;
   /** Raw stream-json events (tool calls etc.), for progress reporting */
   onEvent?: (ev: any) => void;
+  /** Turn off CodeBuddy Auto Memory (cwd-keyed; whisper-cli keeps per-chat memory itself) */
+  disableAutoMemory?: boolean;
 }
 
 export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
@@ -289,6 +291,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
           CODEBUDDY_API_KEY: config.apiKey,
           CODEBUDDY_INTERNET_ENVIRONMENT: config.internetEnvironment || "ioa",
           CODEBUDDY_GIT_REPO_SCAN_DISABLED: "1",
+          ...(opts.disableAutoMemory ? { CODEBUDDY_DISABLE_AUTO_MEMORY: "1" } : {}),
         },
       });
 

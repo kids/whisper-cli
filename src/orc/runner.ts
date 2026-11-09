@@ -110,6 +110,8 @@ export class CliExecutor implements Executor {
         model: req.model, onStreamUpdate, onEvent, appendSystemPrompt: req.appendSystemPrompt,
         disallowedTools: req.readOnly ? [...WRITE_TOOLS, ...(req.disallowedTools ?? [])] : req.disallowedTools,
         hardTimeoutMs: req.hardTimeoutMs, staleTimeoutMs: req.staleTimeoutMs,
+        // each task worktree is a new cwd → Auto Memory would only scatter fragments
+        disableAutoMemory: true,
       });
       res.sessionId ||= getCodebuddySession(key);
     } else if (req.cli === "codex") {

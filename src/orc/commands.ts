@@ -14,6 +14,7 @@
 import type { FeishuClient, FeishuMessageEvent } from "../platform/feishu";
 import type { AgentConfig } from "../types";
 import { appendAnnouncementText, fetchAnnouncement } from "../announcement";
+import { applyMemoryOps } from "../memory";
 import { loadPresets, loadRoles, presetSummary } from "./config";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
@@ -182,6 +183,12 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
   const p = getProfile(chatId);
   switch (act.action) {
     case "reply": await say(act.text || "（空）"); return;
+    case "remember":
+    case "forget": {
+      const ops = act.action === "remember" ? { text: "", remember: act.items, forget: [] } : { text: "", remember: [], forget: act.ids };
+      await say(applyMemoryOps(chatId, ops, "lead") || (act.action === "forget" ? "没有找到这些编号的记忆。" : "没有新内容需要记录。"));
+      return;
+    }
     case "submit": await say(`🧭 ${await submit(h, chatId, act.goal, act.preset)}`); return;
     case "status": {
       const ts = act.task ? [o.store.getTask(act.task)].filter((t): t is NonNullable<typeof t> => !!t && t.chatId === chatId) : o.store.listTasks({ chatId, limit: 5 });
