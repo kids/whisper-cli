@@ -6,7 +6,7 @@
 // =============================================================================
 import type { Attempt, LaunchPayload, OutputKind, ResolvedRole, StageDef, Task } from "./types";
 
-const CONTRACT: Record<OutputKind, string> = {
+export const CONTRACT: Record<OutputKind, string> = {
   plan: `{"spec": "可验收的规格：要做什么、不做什么、验收标准", "subtasks": [{"title": "…", "spec": "…", "deps": [0]}], "summary": "一句话", "notes": ["值得团队记住的发现/决策"]}
 - 只有当工作确实可以并行、且每块能独立验收时才拆 subtasks（2～5 个）；否则 subtasks 给空数组 []。
 - deps 是本数组里**排在前面**的子任务下标。`,
@@ -20,6 +20,7 @@ const CONTRACT: Record<OutputKind, string> = {
 - 用例要覆盖规格里的验收标准与边界/异常；你新增的测试文件会被 orc 单独提交。
 - 不要修改业务代码；发现缺陷就 pass=false 并写清复现方式。`,
   report: `{"summary": "完整结论（markdown）", "notes": ["…"]}`,
+  action: `{"action": "…"}（监督者动作，格式见 loop 提示词）`,
 };
 
 export interface PromptContext {

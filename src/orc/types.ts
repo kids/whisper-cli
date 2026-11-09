@@ -5,7 +5,7 @@
 export type CliName = "codebuddy" | "codex" | "claude" | "gemini" | "cursor" | "pi";
 
 /** What a role's final message must contain; drives the pass rule in core */
-export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report";
+export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report" | "action";
 
 export type Isolation =
   | "worktree"  // writes in the task worktree; changes are committed after the attempt
@@ -50,10 +50,35 @@ export interface PresetRoleSlot {
 export interface PresetDef {
   name: string;
   description: string;
+  /** pipeline = linear stages (core.ts); loop = supervisor ReAct loop (loop.ts) */
+  kind?: "pipeline" | "loop";
   roles: Record<string, PresetRoleSlot>;
   stages: StageDef[];
   /** Optional stage ids switched on */
   enabled?: string[];
+  loop?: LoopConfig;
+}
+
+export type Verbosity = "quiet" | "normal" | "verbose";
+
+/** Supervisor-loop settings (preset `loop:` block) */
+export interface LoopConfig {
+  /** role names (must be declared in the preset's roles) */
+  supervisor: string;
+  worker: string;
+  reviewer?: string;
+  /** finish needs a passing review at the current HEAD */
+  requireReview: boolean;
+  verbosity: Verbosity;
+  budget: LoopBudget;
+}
+
+export interface LoopBudget {
+  /** supervisor decisions (rejected ones count too) */
+  maxSteps: number;
+  maxWorkerRuns: number;
+  /** time spent deciding/executing — waits and open questions do not count */
+  maxActiveHours: number;
 }
 
 /** Bounded edits a lead agent / user may request (002 §5.3) */
@@ -71,14 +96,17 @@ export type ResolvedRole = RoleDef & { count: number };
 export interface ResolvedPreset {
   name: string;
   version: number;
+  kind: "pipeline" | "loop";
   roles: Record<string, ResolvedRole>;
-  /** Only active stages (optional ones not enabled are dropped) */
+  /** Only active stages (optional ones not enabled are dropped); empty for loop presets */
   stages: StageDef[];
+  loop?: LoopConfig;
 }
 
 export type TaskStatus =
   | "queued"            // waiting for deps / a slot
   | "running"
+  | "waiting"           // loop task parked on a watch (training, batch job…)
   | "waiting_children"  // planner split it; children are running
   | "ready"             // all stages passed — awaiting human acceptance
   | "blocked"           // needs a human decision
@@ -89,6 +117,7 @@ export const TERMINAL: TaskStatus[] = ["ready", "blocked", "failed", "dropped"];
 
 export interface Task {
   id: number;
+  kind: "pipeline" | "loop";
   parentId: number | null;
   title: string;
   goal: string;
@@ -134,7 +163,17 @@ export interface Attempt {
   endedAt: number | null;
 }
 
-export type EffectKind = "launch" | "notify";
+export type EffectKind = "launch" | "notify" | "loop";
+
+/** One supervisor round for a loop task */
+export interface LoopPayload {
+  taskId: number;
+  /** why this round runs: start / next / human / watch / heartbeat / ask_timeout / resume */
+  reason: string;
+  /** reason-specific reference: ask step (ask_timeout) / watch id (heartbeat) */
+  ref?: number;
+  recover?: boolean;
+}
 export type EffectStatus = "pending" | "running" | "done" | "failed";
 
 export interface Effect {
@@ -157,7 +196,8 @@ export interface LaunchPayload {
   note?: string;
 }
 
-export type NotifyKind = "ready" | "decision" | "failed" | "info";
+/** ready/decision/failed/info: pipeline + loop finals; turn/report/ask/constraints: loop rounds (002 IM visibility) */
+export type NotifyKind = "ready" | "decision" | "failed" | "info" | "turn" | "report" | "ask" | "constraints";
 
 export interface NotifyPayload {
   taskId: number;

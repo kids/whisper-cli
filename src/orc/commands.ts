@@ -19,9 +19,10 @@ import { formatRecent, recordTurn } from "../recent";
 import { loadPresets, loadRoles, presetSummary } from "./config";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
-  renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, type LeadAction,
+  renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, type LeadAction,
 } from "./chat";
 import type { ExecutorBins } from "./runner";
+import type { CliName } from "./types";
 import { repoRoot } from "./worktree";
 
 export interface OrcChatHost {
@@ -35,7 +36,10 @@ export interface OrcChatHost {
 
 const orcOf = (h: OrcChatHost) => getOrc(h.agents, h.bins);
 
-async function submit(h: OrcChatHost, chatId: string, goal: string, presetName?: string): Promise<string> {
+async function submit(
+  h: OrcChatHost, chatId: string, goal: string, presetName?: string,
+  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string } = {},
+): Promise<string> {
   const o = orcOf(h);
   const repo = repoRoot(h.workspaceFor(chatId));
   if (!repo) return `❌ 当前工作区 \`${h.workspaceFor(chatId)}\` 不是 git 仓库，orc 需要 git worktree 做隔离。先用 \`项目名:指令\` 切到一个仓库。`;
@@ -46,8 +50,9 @@ async function submit(h: OrcChatHost, chatId: string, goal: string, presetName?:
   } catch (e) {
     return `❌ 编排无效：${(e as Error).message}`;
   }
-  const t = await submitFromChat(o, h.feishu, chatId, goal, repo, preset);
-  return `已提交 #${t.id} → \`${presetSummary(preset)}\`\n仓库 \`${repo}\``;
+  const t = await submitFromChat(o, h.feishu, chatId, goal, repo, preset, extra);
+  const crit = preset.kind === "loop" && extra.criteria?.length ? `\n验收标准：${extra.criteria.map((c, i) => `C${i + 1} ${c}`).join("；")}` : "";
+  return `已提交 #${t.id} → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`${crit}`;
 }
 
 export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): Promise<boolean> {
@@ -162,6 +167,10 @@ export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent): Promi
   const p = getProfile(chatId);
   let presetLine = "";
   try { presetLine = presetSummary(resolveChatPreset(p)); } catch (e) { presetLine = `（无效：${(e as Error).message}）`; }
+  const threadTask = ev.rootId ? taskForCard(ev.rootId) : undefined;
+  const pending = !p.pending ? undefined
+    : p.pending.kind === "config" ? `调整编排 ${JSON.stringify(p.pending.patch)}`
+    : `追加群公告：${p.pending.paragraphs.join(" / ")}`;
   const prompt = buildLeadPrompt({
     userText: ev.text,
     presetLine,
@@ -169,6 +178,9 @@ export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent): Promi
     presets: [...loadPresets().keys()],
     roles: [...loadRoles().keys()],
     history: formatRecent(chatId), // the lead is stateless; this is its only conversational context
+    store: o.store,
+    pending,
+    threadTask,
   });
   recordTurn(chatId, "user", ev.text);
   const raw = await h.runLead(prompt, `${chatId}#lead`);
@@ -179,7 +191,7 @@ export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent): Promi
     return;
   }
   recordTurn(chatId, "lead", describeAction(act));
-  await executeLeadAction(h, chatId, act);
+  await executeLeadAction(h, chatId, act, ev.text);
 }
 
 /** One line for the shared transcript */
@@ -188,20 +200,49 @@ export function describeAction(a: LeadAction): string {
     case "reply": return a.text;
     case "submit": return `（提交任务）${a.goal}`;
     case "attach": return `（补充给 #${a.task}${a.urgent ? "，打断" : ""}）${a.text}`;
+    case "answer": return `（回答 #${a.task} 的问题）${a.option ?? ""}${a.text ? " " + a.text : ""}`;
     case "status": return `（查询状态${a.task ? " #" + a.task : ""}）`;
     case "stop": return `（终止 #${a.task}）`;
     case "retry": return `（重试 #${a.task}）${a.note ?? ""}`;
-    case "config": return `（拟调整编排）${JSON.stringify(a.patch)}`;
+    case "config": return a.task ? `（调整 #${a.task}）${JSON.stringify({ ...a.patch, verbosity: a.verbosity })}` : `（拟调整编排）${JSON.stringify(a.patch)}`;
+    case "confirm": return "（确认待定提议）";
+    case "cancel": return "（放弃待定提议）";
     case "announce": return `（拟改群公告）${a.paragraphs.join(" / ")}`;
     case "remember": return `（记入记忆）${a.items.join(" / ")}`;
     case "forget": return `（删除记忆）${a.ids.join(",")}`;
   }
 }
 
-export async function executeLeadAction(h: OrcChatHost, chatId: string, act: LeadAction): Promise<void> {
+/** Live change of a running loop task: role CLI / model and/or verbosity */
+function configTask(h: OrcChatHost, chatId: string, act: Extract<LeadAction, { action: "config" }>): string {
+  const o = orcOf(h);
+  const t = o.store.getTask(act.task!);
+  if (!t || t.chatId !== chatId) return `本群没有任务 #${act.task}`;
+  if (t.kind !== "loop") return `#${t.id} 是流水线任务，运行中不能换角色；可以 \`/task stop ${t.id}\` 后用新编排重新提交`;
+  const out: string[] = [];
+  const roles = act.patch.roles ?? {};
+  const ignored = Object.keys(act.patch).filter((k) => k !== "roles");
+  if (Object.keys(roles).length) {
+    const edits: Record<string, { cli?: CliName; model?: string | null } | null> = {};
+    for (const [name, v] of Object.entries(roles)) {
+      edits[name] = v ? { cli: (v as any).cli, model: (v as any).model === undefined ? undefined : (v as any).model } : null;
+    }
+    try { out.push(`🔀 #${t.id} ${o.loop.setRoles(t.id, edits, availableClis())}`); }
+    catch (e) { return `🧭 没有采纳：${(e as Error).message}`; }
+  }
+  if (act.verbosity) {
+    o.loop.setVerbosity(t.id, act.verbosity);
+    out.push(`📣 #${t.id} 播报改为 ${{ quiet: "安静（只发汇报、提问和结果）", normal: "正常（每轮一条摘要）", verbose: "详细（含指令原文和监督者分析）" }[act.verbosity]}`);
+  }
+  if (ignored.length) out.push(`（${ignored.join("、")} 只对新任务有效，这里没有采纳）`);
+  return out.join("\n") || "没有变化";
+}
+
+export async function executeLeadAction(h: OrcChatHost, chatId: string, act: LeadAction, userText?: string): Promise<void> {
   const o = orcOf(h);
   const say = (md: string) => h.feishu.sendMarkdown(chatId, md);
   const p = getProfile(chatId);
+  const own = (id: number) => o.store.getTask(id)?.chatId === chatId;
   switch (act.action) {
     case "reply": await say(act.text || "（空）"); return;
     case "remember":
@@ -210,20 +251,32 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       await say(applyMemoryOps(chatId, ops, "lead") || (act.action === "forget" ? "没有找到这些编号的记忆。" : "没有新内容需要记录。"));
       return;
     }
-    case "submit": await say(`🧭 ${await submit(h, chatId, act.goal, act.preset)}`); return;
+    case "submit": await say(`🧭 ${await submit(h, chatId, act.goal, act.preset, { criteria: act.criteria, constraints: act.constraints, sourceText: userText })}`); return;
     case "status": {
       const ts = act.task ? [o.store.getTask(act.task)].filter((t): t is NonNullable<typeof t> => !!t && t.chatId === chatId) : o.store.listTasks({ chatId, limit: 5 });
       await say(ts.length ? ts.map((t) => renderCard(t, o.store)).join("\n\n---\n\n") : "本群没有相关任务。");
       return;
     }
-    case "stop": await say(o.stop(act.task) ? `🛑 #${act.task} 已终止` : `#${act.task} 无法终止`); return;
-    case "retry": await say(o.retry(act.task, act.note) ? `🔁 #${act.task} 已重新排队` : `#${act.task} 当前状态不能重试`); return;
+    case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 #${act.task} 已终止` : `#${act.task} 无法终止`); return;
+    case "retry": await say(own(act.task) && o.retry(act.task, act.note) ? `🔁 #${act.task} 已重新排队` : `#${act.task} 当前状态不能重试`); return;
     case "attach": {
-      const ok = o.attach(act.task, act.text, act.urgent);
+      const ok = own(act.task) && o.attach(act.task, act.text, act.urgent, userText);
       await say(ok ? (act.urgent ? `⚡ 已打断 #${act.task}，带着你的补充续接原会话重跑` : `📎 已把补充交给 #${act.task}，下一轮生效`) : `#${act.task} 不在进行中`);
       return;
     }
+    case "answer": {
+      if (!own(act.task)) { await say(`本群没有任务 #${act.task}`); return; }
+      await say(o.loop.answer(act.task, act.option, act.text, userText));
+      return;
+    }
+    case "confirm": await confirmPending(h, chatId); return;
+    case "cancel": {
+      setProfile(chatId, { ...p, pending: undefined });
+      await say(p.pending ? "已放弃待确认的变更。" : "没有待确认的变更。");
+      return;
+    }
     case "config": {
+      if (act.task) { await say(configTask(h, chatId, act)); return; }
       try {
         const before = resolveChatPreset(p);
         const after = resolveChatPreset(p, act.patch, availableClis());

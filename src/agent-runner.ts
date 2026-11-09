@@ -57,7 +57,7 @@ import { getProjects, loadProjects, routePrompt, watchProjects } from "./project
 import { getChatInstructions } from "./announcement";
 import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstructions, memoryCommand } from "./memory";
 import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
-import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks } from "./orc/chat";
+import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks, taskForCard } from "./orc/chat";
 import { flushRecent, recordTurn } from "./recent";
 import {
   addWatch, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch, listWatches,
@@ -763,9 +763,17 @@ export class AgentRunner {
   private async onWatchFire(w: Watch, r: CheckResult): Promise<void> {
     const feishu = this.feishu;
     if (!feishu) return;
+    const loopTask = w.sessionKey.match(/^orc-loop:(\d+)$/)?.[1];
     const tail = r.evidence ? `\n\n\`\`\`\n${r.evidence.split("\n").slice(-15).join("\n").slice(-2500)}\n\`\`\`` : "";
-    const next = w.spec.onWake ? "\n\n正在唤醒 agent 接着处理…" : "";
+    const next = loopTask ? `\n\n交回 orc 任务 #${loopTask} 的监督者接着处理…` : w.spec.onWake ? "\n\n正在唤醒 agent 接着处理…" : "";
     await feishu.sendMarkdown(w.chatId, `**${w.status === "expired" ? "⌛" : "🔔"} 监控 #${w.id} ${w.spec.title}**\n${w.fired?.reason ?? ""}${tail}${next}`);
+    // a supervisor-loop task parked on this watch: hand the result to its ledger, not to a chat agent
+    if (loopTask) {
+      const h = this.orcHost();
+      try { getOrc(h.agents, h.bins).loop.onWatchFired(Number(loopTask), w, r); }
+      catch (e) { console.warn(`[orc] watch #${w.id} → task #${loopTask} failed: ${(e as Error).message}`); }
+      return;
+    }
     if (!w.spec.onWake) return;
     const ev: FeishuMessageEvent = {
       messageId: `watch-${w.id}`, chatId: w.chatId, chatType: "group", messageType: "text",

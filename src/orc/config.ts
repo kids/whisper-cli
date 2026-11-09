@@ -10,13 +10,13 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type {
-  CliName, OutputKind, Isolation, PresetDef, PresetPatch, ResolvedPreset, RoleDef, StageDef,
+  CliName, LoopConfig, OutputKind, Isolation, PresetDef, PresetPatch, ResolvedPreset, RoleDef, StageDef, Verbosity,
 } from "./types";
 
 export const ORC_CONFIG_DIR = resolve(import.meta.dirname, "../../orc");
 
 const CLIS: CliName[] = ["codebuddy", "codex", "claude", "gemini", "cursor", "pi"];
-const OUTPUTS: OutputKind[] = ["plan", "impl", "verdict", "test", "report"];
+const OUTPUTS: OutputKind[] = ["plan", "impl", "verdict", "test", "report", "action"];
 const ISOLATIONS: Isolation[] = ["worktree", "readonly", "fresh"];
 export const MAX_ROLE_COUNT = 8;
 export const MAX_LOOPS_CAP = 10;
@@ -70,12 +70,32 @@ export function parsePresetYaml(src: string): PresetDef {
   for (const [k, v] of Object.entries<any>(y.roles ?? {})) {
     roles[k] = { count: Number(v?.count ?? 1), cli: v?.cli, model: v?.model };
   }
+  const kind = y.kind === "loop" ? "loop" : "pipeline";
+  let loop: LoopConfig | undefined;
+  if (kind === "loop") {
+    const l = y.loop ?? {};
+    const b = l.budget ?? {};
+    loop = {
+      supervisor: String(l.supervisor ?? "supervisor"),
+      worker: String(l.worker ?? "implementer"),
+      reviewer: l.reviewer ? String(l.reviewer) : undefined,
+      requireReview: Boolean(l.require_review ?? false),
+      verbosity: (["quiet", "normal", "verbose"].includes(l.verbosity) ? l.verbosity : "normal") as Verbosity,
+      budget: {
+        maxSteps: Number(b.max_steps ?? 60),
+        maxWorkerRuns: Number(b.max_worker_runs ?? 25),
+        maxActiveHours: Number(b.max_active_hours ?? 8),
+      },
+    };
+  }
   return {
     name: String(y.name ?? ""),
     description: String(y.description ?? ""),
+    kind,
     roles,
     stages,
     enabled: Array.isArray(y.enabled) ? y.enabled.map(String) : [],
+    loop,
   };
 }
 
@@ -148,6 +168,22 @@ export function resolvePreset(
     resolvedRoles[name] = { ...role, cli, model, count: slot.count };
   }
   const enabled = new Set(def.enabled ?? []);
+  if (def.kind === "loop") {
+    const l = def.loop;
+    if (!l) errs.push("loop preset needs a loop: block");
+    else {
+      for (const [k, r] of [["supervisor", l.supervisor], ["worker", l.worker], ["reviewer", l.reviewer]] as const) {
+        if (r && !resolvedRoles[r] && !errs.some((e) => e.includes(`"${r}"`))) errs.push(`loop.${k}: role "${r}" not declared in preset roles`);
+      }
+      const b = l.budget;
+      if (!(b.maxSteps >= 1 && b.maxSteps <= 500)) errs.push("loop.budget.max_steps must be 1..500");
+      if (!(b.maxWorkerRuns >= 1 && b.maxWorkerRuns <= 200)) errs.push("loop.budget.max_worker_runs must be 1..200");
+      if (!(b.maxActiveHours > 0 && b.maxActiveHours <= 72)) errs.push("loop.budget.max_active_hours must be (0, 72]");
+      if (l.requireReview && !l.reviewer) errs.push("loop.require_review needs loop.reviewer");
+    }
+    if (errs.length) throw new Error(`invalid preset "${def.name}":\n- ${errs.join("\n- ")}`);
+    return { name: def.name, version: opts.version ?? 1, kind: "loop", roles: resolvedRoles, stages: [], loop: structuredClone(l) };
+  }
   const stages = def.stages.filter((s) => !s.optional || enabled.has(s.id));
   if (!stages.length) errs.push("preset has no active stages");
   const ids = stages.map((s) => s.id);
@@ -165,11 +201,18 @@ export function resolvePreset(
     }
   });
   if (errs.length) throw new Error(`invalid preset "${def.name}":\n- ${errs.join("\n- ")}`);
-  return { name: def.name, version: opts.version ?? 1, roles: resolvedRoles, stages };
+  return { name: def.name, version: opts.version ?? 1, kind: "pipeline", roles: resolvedRoles, stages };
 }
 
 /** One-line summary for cards / announcement, e.g. "dev: plan[planner/codebuddy] → impl[implementer/codebuddy]×3 → …" */
 export function presetSummary(p: ResolvedPreset): string {
+  const rl = (name?: string) => {
+    const r = name ? p.roles[name] : undefined;
+    return r ? `${r.name}/${r.cli}${r.model ? ":" + r.model : ""}` : "-";
+  };
+  if (p.kind === "loop" && p.loop) {
+    return `${p.name}: 监督[${rl(p.loop.supervisor)}] ⇄ 执行[${rl(p.loop.worker)}]${p.loop.reviewer ? ` · 审查[${rl(p.loop.reviewer)}]` : ""}`;
+  }
   const parts = p.stages.map((s) => {
     const r = p.roles[s.role];
     const n = r.count > 1 ? `×${r.count}` : "";

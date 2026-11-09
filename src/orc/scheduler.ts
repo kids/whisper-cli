@@ -14,6 +14,7 @@ import { basename, resolve } from "node:path";
 import { childStartStage, decideAfterAttempt, decideParent, depsGate, type Decision, type Outcome } from "./core";
 import { parseRoleOutput, lastProgressLine } from "./output";
 import { buildStagePrompt } from "./prompts";
+import { LoopEngine, type LoopOptions } from "./loop";
 import type { Executor } from "./runner";
 import type { OrcStore } from "./store";
 import type { Attempt, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, Task } from "./types";
@@ -31,6 +32,8 @@ export interface OrchestratorOptions {
   onProgress?: (task: Task) => void;
   tickMs?: number;
   progressThrottleMs?: number;
+  /** Supervisor-loop hooks (watch routing etc.) */
+  loop?: Pick<LoopOptions, "watchBot" | "onWatchCreated" | "concurrency" | "askTimeoutMs" | "verifyTimeoutMs">;
 }
 
 const MAX_NOTIFY_TRIES = 5;
@@ -44,24 +47,36 @@ export class Orchestrator {
   private busy = new Map<string, Set<number>>();
   /** role → launch effect ids parked because every slot was busy */
   private slotWaiters = new Map<string, Set<number>>();
+  /** Supervisor ReAct loop for kind=loop tasks */
+  readonly loop: LoopEngine;
 
   constructor(readonly store: OrcStore, private exec: Executor, private opts: OrchestratorOptions) {
     mkdirSync(resolve(opts.orcHome, "notes"), { recursive: true });
     mkdirSync(resolve(opts.orcHome, "tasks"), { recursive: true });
+    this.loop = new LoopEngine(store, exec, {
+      ...opts.loop, orcHome: opts.orcHome, instructionsFor: opts.instructionsFor, onProgress: opts.onProgress,
+      ensureWorktree: (t) => this.prepareWorktree(t),
+    });
   }
 
   // ---- public API ---------------------------------------------------------
 
-  submit(input: { goal: string; title?: string; repo: string; preset: ResolvedPreset; chatId?: string | null }): Task {
+  submit(input: {
+    goal: string; title?: string; repo: string; preset: ResolvedPreset; chatId?: string | null;
+    /** loop presets: acceptance criteria / constraints known at submit time, and the human's own words */
+    criteria?: string[]; constraints?: string[]; sourceText?: string;
+  }): Task {
     const root = wt.repoRoot(input.repo);
     if (!root) throw new Error(`${input.repo} is not inside a git repository (orc needs git worktrees)`);
     const baseRef = wt.headSha(root);
+    const kind = input.preset.kind === "loop" ? "loop" : "pipeline";
     return this.store.tx(() => {
       const task = this.store.createTask({
         title: input.title || input.goal.split("\n")[0].slice(0, 60), goal: input.goal, repo: root, baseRef,
-        preset: input.preset, chatId: input.chatId ?? null,
+        preset: input.preset, chatId: input.chatId ?? null, kind,
       });
-      this.store.addEffect("launch", { taskId: task.id, stageIdx: 0 } satisfies LaunchPayload);
+      if (kind === "loop") this.loop.init(task, input);
+      else this.store.addEffect("launch", { taskId: task.id, stageIdx: 0 } satisfies LaunchPayload);
       return task;
     });
   }
@@ -70,22 +85,26 @@ export class Orchestrator {
   stop(taskId: number): boolean {
     const task = this.store.getTask(taskId);
     if (!task) return false;
+    const stoppable = !TERMINAL.includes(task.status) || (task.kind === "loop" && task.status === "blocked");
     this.store.tx(() => {
       this.store.cancelPendingLaunches(taskId);
       for (const child of this.store.listTasks({ parentId: taskId })) {
         if (!TERMINAL.includes(child.status)) this.stop(child.id);
       }
-      if (!TERMINAL.includes(task.status)) this.store.updateTask(taskId, { status: "dropped", progress: "已被用户终止" });
+      if (stoppable) this.store.updateTask(taskId, { status: "dropped", progress: "已被用户终止" });
     });
+    if (task.kind === "loop") this.loop.stop(taskId);
     for (const r of this.running.values()) {
       if (r.taskId === taskId) { r.cancelled = true; this.exec.stop(r.sessionKey, r.cli); }
     }
+    this.emitProgress(taskId);
     return true;
   }
 
   /** Resume a blocked/failed task at its current stage with fresh loop budget */
   retry(taskId: number, note?: string): boolean {
     const task = this.store.getTask(taskId);
+    if (task?.kind === "loop") return this.loop.resume(taskId, note);
     if (!task || !["blocked", "failed", "dropped"].includes(task.status)) return false;
     const stage = task.preset.stages[Math.min(task.stageIdx, task.preset.stages.length - 1)];
     const loops = { ...task.loops };
@@ -98,8 +117,9 @@ export class Orchestrator {
   }
 
   /** Queue human input for the task's next attempt; urgent = interrupt current run and resume */
-  attach(taskId: number, text: string, urgent = false): boolean {
+  attach(taskId: number, text: string, urgent = false, raw?: string): boolean {
     const task = this.store.getTask(taskId);
+    if (task?.kind === "loop") return this.loop.attach(taskId, text, urgent, raw);
     if (!task || TERMINAL.includes(task.status)) return false;
     this.store.updateTask(taskId, { inbox: [...task.inbox, text] });
     if (urgent) {
@@ -153,6 +173,10 @@ export class Orchestrator {
       for (const e of this.store.dueEffects()) {
         if (e.kind === "notify") await this.runNotify(e);
         else if (e.kind === "launch") this.tryLaunch(e);
+        else if (e.kind === "loop") {
+          const pr = this.loop.handle(e);
+          if (pr) { this.inflight.add(pr); void pr.finally(() => this.inflight.delete(pr)); }
+        }
       }
     } catch (err) {
       console.error("[orc] tick error:", err);
@@ -240,7 +264,8 @@ export class Orchestrator {
     return resolve(this.opts.orcHome, "notes", `${key}.md`);
   }
 
-  private prepareWorktree(task: Task): Task {
+  /** Create the task worktree on first use (shared with the loop engine) */
+  prepareWorktree(task: Task): Task {
     if (task.worktree && existsSync(task.worktree)) return task;
     const path = wt.worktreePath(this.opts.orcHome, task.repo, task.id);
     const branch = wt.branchName(task.id);

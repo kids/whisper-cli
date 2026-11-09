@@ -6,7 +6,7 @@
 // retried with backoff, and re-queued on restart (001 §4.5).
 // =============================================================================
 import { DatabaseSync } from "node:sqlite";
-import type { Attempt, Effect, EffectKind, LaunchPayload, NotifyPayload, ResolvedPreset, Task } from "./types";
+import type { Attempt, Effect, EffectKind, LaunchPayload, LoopPayload, NotifyPayload, ResolvedPreset, Task } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
@@ -35,15 +35,28 @@ CREATE TABLE IF NOT EXISTS effects (
   error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS effects_due ON effects(status, next_at);
+CREATE TABLE IF NOT EXISTS ledgers (
+  task_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS loop_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL, n INTEGER NOT NULL, reason TEXT NOT NULL DEFAULT '',
+  action TEXT, accepted INTEGER NOT NULL DEFAULT 0, verdict TEXT NOT NULL DEFAULT '',
+  observation TEXT NOT NULL DEFAULT '', raw TEXT NOT NULL DEFAULT '', tokens INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER NOT NULL, ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS loop_steps_task ON loop_steps(task_id);
 `;
 
 const j = (s: string | null | undefined, d: any) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 
 function rowToTask(r: any): Task {
+  const preset = j(r.preset, null) as ResolvedPreset;
+  if (preset && !preset.kind) preset.kind = "pipeline"; // snapshots frozen before loop presets existed
   return {
-    id: r.id, parentId: r.parent_id ?? null, title: r.title, goal: r.goal, spec: r.spec,
+    id: r.id, kind: r.kind === "loop" ? "loop" : "pipeline", parentId: r.parent_id ?? null, title: r.title, goal: r.goal, spec: r.spec,
     repo: r.repo, baseRef: r.base_ref, branch: r.branch ?? null, worktree: r.worktree ?? null,
-    preset: j(r.preset, null) as ResolvedPreset, stageIdx: r.stage_idx, status: r.status,
+    preset, stageIdx: r.stage_idx, status: r.status,
     loops: j(r.loops, {}), deps: j(r.deps, []), feedback: r.feedback, inbox: j(r.inbox, []),
     chatId: r.chat_id ?? null, progress: r.progress, createdAt: r.created_at, updatedAt: r.updated_at,
   };
@@ -68,7 +81,7 @@ function rowToEffect(r: any): Effect {
 const TASK_COLS: Record<string, string> = {
   title: "title", spec: "spec", branch: "branch", worktree: "worktree", stageIdx: "stage_idx",
   status: "status", loops: "loops", deps: "deps", feedback: "feedback", inbox: "inbox",
-  chatId: "chat_id", progress: "progress", baseRef: "base_ref",
+  chatId: "chat_id", progress: "progress", baseRef: "base_ref", preset: "preset",
 };
 const ATTEMPT_COLS: Record<string, string> = {
   sessionId: "session_id", status: "status", output: "output", parsed: "parsed", error: "error",
@@ -83,6 +96,8 @@ export class OrcStore {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     this.db.exec(SCHEMA);
+    const cols = this.db.prepare("PRAGMA table_info(tasks)").all().map((c: any) => c.name);
+    if (!cols.includes("kind")) this.db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'pipeline'");
   }
 
   /** Run fn in one transaction (nested calls join the outer one) */
@@ -108,14 +123,15 @@ export class OrcStore {
   createTask(t: {
     parentId?: number | null; title: string; goal: string; spec?: string; repo: string; baseRef: string;
     preset: ResolvedPreset; stageIdx?: number; deps?: number[]; chatId?: string | null; status?: Task["status"];
+    kind?: Task["kind"];
   }): Task {
     const now = Date.now();
     const r = this.db.prepare(
-      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       t.parentId ?? null, t.title, t.goal, t.spec ?? "", t.repo, t.baseRef, JSON.stringify(t.preset),
-      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, now, now,
+      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", now, now,
     );
     return this.getTask(Number(r.lastInsertRowid))!;
   }
@@ -197,11 +213,42 @@ export class OrcStore {
 
   // ---- effects (durable outbox) -------------------------------------------
 
-  addEffect(kind: EffectKind, payload: LaunchPayload | NotifyPayload, delayMs = 0): number {
+  addEffect(kind: EffectKind, payload: LaunchPayload | NotifyPayload | LoopPayload, delayMs = 0): number {
     const now = Date.now();
     const r = this.db.prepare("INSERT INTO effects (kind,payload,next_at,created_at) VALUES (?,?,?,?)")
       .run(kind, JSON.stringify(payload), now + delayMs, now);
     return Number(r.lastInsertRowid);
+  }
+
+  /** Pending (not yet started) loop rounds of a task */
+  pendingLoopEffects(taskId: number): Effect[] {
+    return this.pendingEffects().filter((e) => e.kind === "loop" && e.status === "pending" && e.payload.taskId === taskId);
+  }
+
+  // ---- loop ledgers / steps -------------------------------------------------
+
+  getLedger<T = any>(taskId: number): T | undefined {
+    const r: any = this.db.prepare("SELECT data FROM ledgers WHERE task_id=?").get(taskId);
+    return r ? (j(r.data, undefined) as T) : undefined;
+  }
+
+  saveLedger(taskId: number, data: unknown): void {
+    this.db.prepare("INSERT INTO ledgers (task_id,data,updated_at) VALUES (?,?,?) ON CONFLICT(task_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at")
+      .run(taskId, JSON.stringify(data), Date.now());
+  }
+
+  addStep(s: { taskId: number; n: number; reason: string; action: unknown; accepted: boolean; verdict: string; observation: string; raw: string; tokens: number; startedAt: number }): number {
+    const r = this.db.prepare(
+      "INSERT INTO loop_steps (task_id,n,reason,action,accepted,verdict,observation,raw,tokens,started_at,ended_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ).run(s.taskId, s.n, s.reason, s.action == null ? null : JSON.stringify(s.action), s.accepted ? 1 : 0, s.verdict, s.observation.slice(0, 20_000), s.raw.slice(0, 50_000), s.tokens, s.startedAt, Date.now());
+    return Number(r.lastInsertRowid);
+  }
+
+  listSteps(taskId: number): { n: number; reason: string; action: any; accepted: boolean; verdict: string; observation: string; tokens: number; startedAt: number; endedAt: number }[] {
+    return this.db.prepare("SELECT * FROM loop_steps WHERE task_id=? ORDER BY id").all(taskId).map((r: any) => ({
+      n: r.n, reason: r.reason, action: j(r.action, null), accepted: !!r.accepted, verdict: r.verdict, observation: r.observation,
+      tokens: r.tokens, startedAt: r.started_at, endedAt: r.ended_at,
+    }));
   }
 
   /** Make still-pending effects due now (e.g. launches parked on a full role) */
@@ -229,11 +276,11 @@ export class OrcStore {
     );
   }
 
-  /** Drop not-yet-started launches of a task (stop / drop) */
+  /** Drop not-yet-started launches / loop rounds of a task (stop / drop) */
   cancelPendingLaunches(taskId: number): number {
     let n = 0;
     for (const e of this.pendingEffects()) {
-      if (e.kind === "launch" && e.status === "pending" && e.payload.taskId === taskId) {
+      if ((e.kind === "launch" || e.kind === "loop") && e.status === "pending" && e.payload.taskId === taskId) {
         this.markEffect(e.id, "done", { error: "cancelled" });
         n++;
       }

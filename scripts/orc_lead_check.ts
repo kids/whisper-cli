@@ -5,44 +5,71 @@ import { resolve } from "node:path";
 import { loadAllAgents } from "../src/config";
 import { runCodebuddy } from "../src/ai/codebuddy";
 import { buildLeadPrompt, parseLeadAction } from "../src/orc/chat";
-import { loadPresets, loadRoles } from "../src/orc/config";
+import { loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
+import { createLedger } from "../src/orc/ledger";
 import type { Task } from "../src/orc/types";
 
 const model = process.argv[2];
 const cfg = loadAllAgents(resolve(import.meta.dirname, "../.env")).find((a) => a.codebuddy)!.codebuddy!;
-const fakeTask = (id: number, title: string, status: Task["status"], progress: string) =>
-  ({ id, title, status, progress } as Task);
+const fakeTask = (id: number, title: string, status: Task["status"], progress: string, over: Partial<Task> = {}) =>
+  ({ id, title, status, progress, ...over } as Task);
+
+// a supervisor-loop task waiting on an irreversible question
+const loopPreset = resolvePreset(loadPresets().get("loop")!, loadRoles());
+const ledger = createLedger({ goal: "调优训练超参", criteria: ["val loss < 0.3"], head: "x", limits: loopPreset.loop!.budget, verbosity: "normal" });
+ledger.pendingAsk = {
+  step: 6, question: "实验结论已验证，要把改动推送到远端 main 吗？", why: "irreversible", askedAt: 0, default: "a",
+  options: [{ id: "a", label: "先不推，等我看完" }, { id: "b", label: "推送到远端", go: true }],
+};
+const store = { getLedger: (id: number) => (id === 15 ? ledger : undefined) } as any;
+
 const tasks = [
   fakeTask(12, "登录接口加限流", "running", "review · critic#1 运行中"),
   fakeTask(9, "修复导出 CSV 乱码", "blocked", "review 已退回 3 次仍未通过"),
+  fakeTask(15, "调优训练超参", "blocked", "等你决定：要推送吗", { kind: "loop", preset: loopPreset }),
 ];
-const cases: [string, string][] = [
-  ["给订单服务加一个按用户维度的幂等键校验，重复请求返回第一次的结果", "submit"],
-  ["限流那个改用 redis 的令牌桶，不要用内存计数", "attach"],
-  ["停一下！限流方向错了，先别做了马上改成网关层做", "attach"],
-  ["#12 现在到哪了", "status"],
-  ["csv 那个别管了，放弃吧", "stop"],
-  ["#9 再试一次，补充：评审意见里的编码问题用 utf-8-sig 解决", "retry"],
-  ["以后 critic 用 claude，测试只要一个就够了", "config"],
-  ["以后所有回复都先给一句话结论，再展开细节", "announce"],
-  ["令牌桶和漏桶有什么区别", "reply"],
-  ["帮我看看", "reply"],
+// want: action, optionally "#<task>" (and ":<option>" for answer)
+const cases: { msg: string; want: string; pending?: string }[] = [
+  { msg: "给订单服务加一个按用户维度的幂等键校验，重复请求返回第一次的结果", want: "submit" },
+  { msg: "限流那个改用 redis 的令牌桶，不要用内存计数", want: "attach#12" },
+  { msg: "停一下！限流方向错了，先别做了马上改成网关层做", want: "attach#12" },
+  { msg: "#12 现在到哪了", want: "status#12" },
+  { msg: "csv 那个别管了，放弃吧", want: "stop#9" },
+  { msg: "#9 再试一次，补充：评审意见里的编码问题用 utf-8-sig 解决", want: "retry#9" },
+  { msg: "以后 critic 用 claude，测试只要一个就够了", want: "config" },
+  { msg: "以后所有回复都先给一句话结论，再展开细节", want: "announce" },
+  { msg: "令牌桶和漏桶有什么区别", want: "reply" },
+  { msg: "帮我看看", want: "reply|status" },
+  // supervisor-loop steering, all in plain words
+  { msg: "超参那个可以推了", want: "answer#15:b" },
+  { msg: "训练那个先别推，我还要再看看曲线", want: "answer#15:a" },
+  { msg: "调参任务的执行者换成 claude 跑吧", want: "config#15" },
+  { msg: "15 别每轮都刷屏了，有结果再告诉我", want: "config#15" },
+  { msg: "记一下：我们的 GPU 机器只有 2 张卡", want: "remember" },
+  { msg: "好，就这么改", want: "confirm", pending: "调整编排 {\"roles\":{\"critic\":{\"cli\":\"claude\"}}}" },
 ];
+
+function hit(want: string, act: any): boolean {
+  return want.split("|").some((w) => {
+    const m = /^(\w+)(?:#(\d+))?(?::(\w+))?$/.exec(w)!;
+    return act.action === m[1] && (!m[2] || act.task === Number(m[2])) && (!m[3] || act.option === m[3]);
+  });
+}
 
 async function main() {
   let ok = 0;
   const t0 = Date.now();
-  await Promise.all(cases.map(async ([msg, want], i) => {
+  await Promise.all(cases.map(async ({ msg, want, pending }, i) => {
     const prompt = buildLeadPrompt({
       userText: msg, presetLine: "dev: plan → impl×3 → review(codex)×2 → test",
-      tasks, presets: [...loadPresets().keys()], roles: [...loadRoles().keys()],
+      tasks, presets: [...loadPresets().keys()], roles: [...loadRoles().keys()], store, pending,
     });
     const res = await runCodebuddy({ prompt, chatId: `lead-check-${i}`, config: cfg, workdir: "/tmp", model, resumeSession: false, disallowedTools: ["Write", "Edit", "MultiEdit", "Bash"] });
     const act: any = parseLeadAction(res.text);
+    const good = !("error" in act) && hit(want, act);
+    if (good) ok++;
     const got = "error" in act ? `ERR(${act.error})` : act.action;
-    const hit = got === want;
-    if (hit) ok++;
-    console.log(`${hit ? "✓" : "✗"} want=${want.padEnd(8)} got=${String(got).padEnd(8)} ${msg.slice(0, 30)}  ${"error" in act ? res.text.slice(0, 120) : JSON.stringify(act).slice(0, 160)}`);
+    console.log(`${good ? "✓" : "✗"} want=${want.padEnd(12)} got=${String(got).padEnd(8)} ${msg.slice(0, 30)}  ${"error" in act ? res.text.slice(0, 120) : JSON.stringify(act).slice(0, 180)}`);
   }));
   console.log(`\n${ok}/${cases.length} correct, ${Math.round((Date.now() - t0) / 1000)}s wall (parallel), model=${model || "default"}`);
 }
