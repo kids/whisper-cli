@@ -1,11 +1,6 @@
 // Shared helpers for AI CLI runners
-import { existsSync, statSync } from "node:fs";
-import { basename } from "node:path";
-import type { AgentFile, AgentImage, AiResult } from "../types";
-
-const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
-const IMG_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.(?:png|jpe?g|gif|webp|bmp))(?:[\s`'")]|$)/gi;
-const FILE_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.[\w.-]+)(?:[\s`'")]|$)/gi;
+// (reply-text paths → chat attachments live in src/outgoing.ts)
+import type { AiResult } from "../types";
 
 export function stripAnsi(s: string): string {
   return s
@@ -36,36 +31,6 @@ export function normalizeUsage(u: Record<string, unknown> | undefined): AiResult
     cacheWriteTokens: cacheWrite,
     totalTokens: input + output,
   };
-}
-
-function isRegularFile(path: string): boolean {
-  try {
-    return existsSync(path) && statSync(path).isFile();
-  } catch {
-    return false;
-  }
-}
-
-export function collectImagesFromText(text: string, seenPaths: Set<string>): AgentImage[] {
-  const out: AgentImage[] = [];
-  for (const m of text.matchAll(IMG_PATH_RE)) {
-    const p = m[1];
-    if (seenPaths.has(p) || !isRegularFile(p)) continue;
-    seenPaths.add(p);
-    out.push({ filePath: p });
-  }
-  return out;
-}
-
-export function collectFilesFromText(text: string, seenPaths: Set<string>): AgentFile[] {
-  const out: AgentFile[] = [];
-  for (const m of text.matchAll(FILE_PATH_RE)) {
-    const p = m[1];
-    if (seenPaths.has(p) || IMG_EXT.test(p) || !isRegularFile(p)) continue;
-    seenPaths.add(p);
-    out.push({ filePath: p, fileName: basename(p) });
-  }
-  return out;
 }
 
 export const STALL_TIMEOUT_MS = Number(process.env.AGENT_STALL_MS || 45 * 60 * 1000);

@@ -20,6 +20,8 @@ export interface FeishuMessageEvent {
   senderOpenId: string;
   content: string;         // raw JSON content
   attachments: IncomingAttachment[];
+  /** set when the message was posted inside a thread / reply chain (root message id) */
+  rootId?: string;
 }
 
 export type MessageHandler = (event: FeishuMessageEvent) => Promise<void> | void;
@@ -103,6 +105,7 @@ export class FeishuClient {
             senderOpenId,
             content,
             attachments,
+            rootId: (msg.root_id as string | undefined) || undefined,
           });
         }
       },
@@ -129,6 +132,21 @@ export class FeishuClient {
         content: JSON.stringify(post),
       },
     });
+  }
+
+  /** Reply inside the message's thread (话题); false if the API refused (caller falls back) */
+  async replyInThread(messageId: string, text: string): Promise<boolean> {
+    try {
+      const resp = await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: { msg_type: "interactive", content: FeishuClient.buildMarkdownCard(text.slice(0, 4000)), reply_in_thread: true } as any,
+      });
+      if (resp.code !== 0) console.error(`[feishu] replyInThread code=${resp.code} msg=${resp.msg}`);
+      return resp.code === 0;
+    } catch (e) {
+      console.error("[feishu] replyInThread exception:", (e as Error).message);
+      return false;
+    }
   }
 
   /** Send a markdown message to a chat */

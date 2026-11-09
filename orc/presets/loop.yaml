@@ -1,0 +1,17 @@
+name: loop
+description: 监督循环：监督者每轮选一个动作（下指令 / 验证 / 汇报 / 更新约束 / 审查 / 等待 / 问人 / 完成 / 放弃），代码把关；适合需要反复试错、长时间实验或目标会随讨论调整的任务
+kind: loop
+roles:
+  supervisor:  { count: 1 }
+  implementer: { count: 1 }
+  critic:      { count: 1 }
+loop:
+  supervisor: supervisor
+  worker: implementer
+  reviewer: critic
+  require_review: false
+  verbosity: normal
+  budget:
+    max_steps: 60
+    max_worker_runs: 25
+    max_active_hours: 8

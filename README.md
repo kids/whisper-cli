@@ -118,33 +118,14 @@ Send messages in the Feishu bot chat — all configured agent groups run simulta
 | `/model` | List available models |
 | `/model <id>` | Switch model (`/model default` to reset) |
 | `/new [name]` | Create a new Feishu group = fresh session |
-| `/team <task description>` | Create a multi-role team group (alias `/团队`); in-group `/team` manages roles and rounds |
+| `/mode [single\|orc [preset]]` | Single agent, or multi-agent orchestration driven by a lead agent |
+| `/task <goal>` `/tasks` `/orc` | Submit to / list / configure orc (multi-agent pipelines) |
+| `/记住 <text>` `/记忆` | Per-chat memory (or just tell the agent "remember …") |
+| `/watch [stop\|check <id>]` | Monitors for long-running jobs (ask the agent to "run it in the background and wake me when done") |
 | `/stop` or `/cancel` | Stop the current running task |
 | `/status` `/sys` | Agent status (CLI, model, workspace) + host resources (CPU/mem/GPU/disk) |
 
-**Team groups (`/team`):**
-
-Send from the admin p2p chat or any non-admin group:
-
-```bash
-/team evaluate these three approaches, focus on cost and maintainability
-```
-
-The group is created automatically: roster decomposition → roster card → first discussion round. In-group commands:
-
-| Command | Description |
-|---------|-------------|
-| `/team` `/team status` | Team state (roles, round cap) |
-| `/team 角色` | Show the roster and each role's focus |
-| `/team 轮次 <1-5>` | Max discussion rounds per user turn (default 2) |
-| `/team 加 <name>[:description]` | Add a role (max 5) |
-| `/team 收敛` | Converge immediately using the latest transcript |
-| `/team 重置` | Clear every role's session memory (roster kept) |
-
-How it works: each user message → roles speak in roster order (one streaming card each, one isolated CLI session per role) → the round stops early when no role but one has anything new → a moderator turn outputs "Conclusion / Disagreements / Next steps". If roster decomposition fails it falls back to Goal / Risk / Execution.
-
 **Features:**
-- 🧑‍🤝‍🧑 **Team groups** — multi-role discussion that converges into one answer
 - 📡 **Streaming output** — replies update in real-time as text is generated
 - 💾 **Session persistence** — survives restarts (stored in `state/state_<N>.json`)
 - 📊 **Token tracking** — per-turn + cumulative token usage in every reply

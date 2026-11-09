@@ -107,11 +107,24 @@ export interface RunCodexOptions {
   addDirs?: string[];
   model?: string;
   onStreamUpdate?: (text: string) => void;
+  /** No native flag: prepended to the prompt on every turn */
+  appendSystemPrompt?: string;
+  /** Run under codex's read-only sandbox instead of bypassing it */
+  readOnly?: boolean;
+  hardTimeoutMs?: number;
+  staleTimeoutMs?: number;
+  onEvent?: (ev: any) => void;
 }
 
 export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
-  const { prompt, chatId, workdir, codexBin } = opts;
+  const { chatId, workdir, codexBin } = opts;
+  const prompt = opts.appendSystemPrompt ? `${opts.appendSystemPrompt}\n\n---\n\n${opts.prompt}` : opts.prompt;
   const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
+  const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;
+  const staleMs = opts.staleTimeoutMs ?? STALL_TIMEOUT_MS;
+  const sandboxArgs = opts.readOnly
+    ? ["-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"']
+    : ["--dangerously-bypass-approvals-and-sandbox"];
 
   async function attempt(resume: boolean): Promise<AiResult | null> {
     const tid = resume ? threads.get(chatId) : undefined;
@@ -122,7 +135,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
       args = [
         "exec", "resume", tid,
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        ...sandboxArgs,
         "--dangerously-bypass-hook-trust",
       ];
       if (opts.model) args.push("-m", opts.model);
@@ -132,7 +145,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
       args = [
         "exec",
         "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
+        ...sandboxArgs,
         "--dangerously-bypass-hook-trust",
         "--skip-git-repo-check",
       ];
@@ -162,23 +175,23 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
         let out = "";
         let err = "";
 
-        const hardTimer: NodeJS.Timeout | null = HARD_TIMEOUT_MS > 0
+        const hardTimer: NodeJS.Timeout | null = hardMs > 0
           ? setTimeout(() => {
               child.kill("SIGKILL");
               clearRun();
               resolveP({ stdout: out, stderr: err + "\n[HARD TIMEOUT]" });
-            }, HARD_TIMEOUT_MS)
+            }, hardMs)
           : null;
 
         let staleTimer: ReturnType<typeof setTimeout> | null = null;
         const touch = () => {
-          if (STALL_TIMEOUT_MS <= 0) return;
+          if (staleMs <= 0) return;
           if (staleTimer) clearTimeout(staleTimer);
           staleTimer = setTimeout(() => {
             child.kill("SIGKILL");
             clearRun();
             resolveP({ stdout: out, stderr: err + "\n[STALE TIMEOUT]" });
-          }, STALL_TIMEOUT_MS);
+          }, staleMs);
         };
         touch();
 
@@ -204,6 +217,7 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
             if (!line.startsWith("{")) continue;
             try {
               const ev = JSON.parse(line) as CodexEvent;
+              try { opts.onEvent?.(ev); } catch { /* observer must not break the run */ }
               if (ev.type === "item.completed" && ev.item?.type === "agent_message" && ev.item.text) {
                 const t = ev.item.text;
                 if (t !== lastStreamText) {

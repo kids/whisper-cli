@@ -2,8 +2,6 @@
 // Cursor Agent CLI runner — spawns `agent` with session management
 // =============================================================================
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { basename } from "node:path";
 import type { AgentFile, AgentImage, AiResult, CursorConfig } from "../types";
 import { findBinary } from "../config";
 
@@ -74,6 +72,10 @@ interface StreamEvent {
   tool_call?: Record<string, unknown>;
 }
 
+function fmtDur(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)}min` : `${Math.round(ms / 1000)}s`;
+}
+
 function stripAnsi(s: string): string {
   return s
     .replace(/\x1b\][^\x07]*\x07/g, "")
@@ -99,18 +101,6 @@ function normalizeUsage(u: Record<string, unknown> | undefined): AiResult["usage
   return { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite, totalTokens: input + output };
 }
 
-const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
-const IMG_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.(?:png|jpe?g|gif|webp|bmp))(?:[\s`'")]|$)/gi;
-const FILE_PATH_RE = /(?:^|[\s`'"(])(\/[^\s`'"]+\.[\w.-]+)(?:[\s`'")]|$)/gi;
-
-function isRegularFile(path: string): boolean {
-  try {
-    return existsSync(path) && statSync(path).isFile();
-  } catch {
-    return false;
-  }
-}
-
 function extractGenerateImage(ev: StreamEvent): AgentImage | undefined {
   if (ev.type !== "tool_call" || ev.subtype !== "completed" || !ev.tool_call) return undefined;
   const gen = ev.tool_call.generateImageToolCall as Record<string, unknown> | undefined;
@@ -122,28 +112,6 @@ function extractGenerateImage(ev: StreamEvent): AgentImage | undefined {
   if (typeof success.filePath === "string") img.filePath = success.filePath;
   if (typeof success.imageData === "string") img.imageData = success.imageData;
   return img.filePath || img.imageData ? img : undefined;
-}
-
-function collectImagesFromText(text: string, seenPaths: Set<string>): AgentImage[] {
-  const out: AgentImage[] = [];
-  for (const m of text.matchAll(IMG_PATH_RE)) {
-    const p = m[1];
-    if (seenPaths.has(p) || !isRegularFile(p)) continue;
-    seenPaths.add(p);
-    out.push({ filePath: p });
-  }
-  return out;
-}
-
-function collectFilesFromText(text: string, seenPaths: Set<string>): AgentFile[] {
-  const out: AgentFile[] = [];
-  for (const m of text.matchAll(FILE_PATH_RE)) {
-    const p = m[1];
-    if (seenPaths.has(p) || IMG_EXT.test(p) || !isRegularFile(p)) continue;
-    seenPaths.add(p);
-    out.push({ filePath: p, fileName: basename(p) });
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,12 +144,22 @@ export interface RunCursorOptions {
   model?: string;
   onActivity?: (label: string) => void;
   onStreamUpdate?: (text: string) => void;
+  /** Raw stream-json events (tool calls etc.), for orc progress */
+  onEvent?: (ev: any) => void;
+  /** `--mode ask`: no edits (orc readonly roles, lead agent) */
+  readOnly?: boolean;
+  /** Override AGENT_MAX_MS / AGENT_STALL_MS for this run (0 = off) */
+  hardTimeoutMs?: number;
+  staleTimeoutMs?: number;
 }
 
 export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
   const { prompt, chatId, config, workspace, onActivity } = opts;
   const bin = opts.agentBin || DEFAULT_BIN;
-  const model = opts.model || "auto";
+  // Unset / "default" → auto: Cursor picks the model (same for the bot and orc workers)
+  const model = opts.model && opts.model !== "default" ? opts.model : "auto";
+  const stallMs = opts.staleTimeoutMs ?? STALL_TIMEOUT_MS;
+  const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;
   const sessionId = sessions.get(chatId);
   const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
 
@@ -199,6 +177,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       for (const dir of addDirs) {
         args.push("--add-dir", dir);
       }
+      if (opts.readOnly) args.push("--mode", "ask");
       if (sessionId) args.push("--resume", sessionId);
       args.push("--", prompt);
 
@@ -254,23 +233,24 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       const watchdog = setInterval(() => {
         if (settled || child.exitCode != null) return;
         const now = Date.now();
-        if (STALL_TIMEOUT_MS > 0 && now - lastOutputAt >= STALL_TIMEOUT_MS) {
+        if (stallMs > 0 && now - lastOutputAt >= stallMs) {
           try { child.kill("SIGTERM"); } catch {}
           setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
-          finish({ text: `⚠️ Cursor Agent stopped responding after ${Math.round((now - lastOutputAt) / 60000)}min.` });
+          finish({ text: `⏱️ Cursor Agent timed out: no output for ${fmtDur(now - lastOutputAt)}.` });
         }
-        if (HARD_TIMEOUT_MS > 0 && now - startedAt >= HARD_TIMEOUT_MS) {
+        if (hardMs > 0 && now - startedAt >= hardMs) {
           try { child.kill("SIGTERM"); } catch {}
           setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
-          finish({ text: `⚠️ Cursor Agent reached ${Math.round(HARD_TIMEOUT_MS / 60000)}min limit.` });
+          finish({ text: `⏱️ Cursor Agent timed out: reached ${fmtDur(hardMs)} limit.` });
         }
-      }, 60_000);
+      }, Math.min(60_000, Math.max(1_000, Math.min(stallMs || 60_000, hardMs || 60_000) / 4)));
 
       const processLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed.startsWith("{")) return;
         let ev: StreamEvent;
         try { ev = JSON.parse(trimmed); } catch { return; }
+        try { opts.onEvent?.(ev); } catch { /* observer must not break the run */ }
 
         if (ev.session_id && !outSessionId) outSessionId = ev.session_id;
         if (ev.model && !outModel) outModel = ev.model;
@@ -321,9 +301,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
           return;
         }
 
-        for (const img of collectImagesFromText(output, seenPaths)) pushImage(img);
-        for (const f of collectFilesFromText(output, seenPaths)) files.push(f);
-
+        // paths in the reply text are handled by agent-runner (src/outgoing.ts)
         finish({
           text: output,
           model: outModel,

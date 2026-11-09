@@ -1,0 +1,10 @@
+name: research
+description: 调研/方案对比：调研 → 对抗式审视 → 汇总
+roles:
+  researcher:  { count: 2 }
+  critic:      { count: 1 }
+  synthesizer: { count: 1 }
+stages:
+  - { id: research, role: researcher }
+  - { id: critique, role: critic, on_fail: research, max_loops: 2 }
+  - { id: summary,  role: synthesizer }

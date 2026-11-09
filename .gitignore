@@ -5,6 +5,8 @@ dist/
 state/
 debug/
 .tasks.json
-.teams.json
 projects.json
 .feishu-uploads/
+
+# generated design pages (docs/**/*.html are local-only)
+docs/**/*.html

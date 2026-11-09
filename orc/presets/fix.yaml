@@ -1,0 +1,12 @@
+name: fix
+description: 缺陷修复：先写失败用例复现 → 修复 → 回归测试 → 评审
+roles:
+  reproducer:  { count: 1 }
+  implementer: { count: 2 }
+  tester:      { count: 1 }
+  critic:      { count: 1 }
+stages:
+  - { id: repro,  role: reproducer }
+  - { id: fix,    role: implementer }
+  - { id: test,   role: tester, on_fail: fix, max_loops: 3 }
+  - { id: review, role: critic, on_fail: fix, max_loops: 2 }

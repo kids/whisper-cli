@@ -8,13 +8,15 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "capture-chat-id": "tsx scripts/capture-chat-id.ts"
+    "capture-chat-id": "tsx scripts/capture-chat-id.ts",
+    "orc": "tsx src/orc/cli.ts"
   },
   "keywords": ["chatops", "feishu", "wecom", "codebuddy", "cursor", "codex", "claude", "gemini", "ai-agent"],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.67.0"
+    "@larksuiteoapi/node-sdk": "^1.67.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",

@@ -54,6 +54,21 @@ import {
   getPiSession,
 } from "./ai/pi";
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
+import { getChatInstructions } from "./announcement";
+import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstructions, memoryCommand } from "./memory";
+import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
+import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks, taskForCard } from "./orc/chat";
+import { flushRecent, recordTurn } from "./recent";
+import { extractSendOps, formatSendHint, resolveOutgoing, sendRoots } from "./outgoing";
+import {
+  addWatch, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch, listWatches,
+  parseWatchSpec, registerWatchHost, renderWatchCard, startWatches, tickWatches, updateWatch, watchCommandKind,
+  type CheckResult, type Watch,
+} from "./watch";
+import { loadAllAgents } from "./config";
+
+/** Tools denied to read-only runs (orc lead agent); Bash too, since it can write */
+const READ_ONLY_DENY = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
 import {
   buildReviewPrompt,
   parseReviewCommand,
@@ -61,31 +76,6 @@ import {
   wrapWithWorkspaceHint,
 } from "./prompt";
 import { collectSysStatus } from "./sys-status";
-import {
-  DEFAULT_MAX_ROUNDS,
-  MAX_ROLES,
-  MAX_ROUNDS_CAP,
-  TEAM_USAGE,
-  buildRosterPrompt,
-  buildRolePrompt,
-  buildSynthesisPrompt,
-  buildTranscript,
-  fallbackRoster,
-  flushTeams,
-  getTeam,
-  isAgree,
-  metaSessionKey,
-  moderatorSessionKey,
-  parseRoster,
-  roleSessionKey,
-  setTeam,
-  slugifyRoleId,
-  stripSentinel,
-  touchTeam,
-  type Speech,
-  type TeamRole,
-  type TeamState,
-} from "./team";
 import {
   addTask,
   archiveTask,
@@ -248,28 +238,6 @@ function formatUsageFooter(
   return `\n\n---\n${parts.join("  ·  ")}`;
 }
 
-/** Sum per-speaker usage into one footer so a team round counts as a single turn */
-function sumUsage(list: (AiResult["usage"] | undefined)[]): AiResult["usage"] | undefined {
-  const acc = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    totalTokens: 0,
-  };
-  let any = false;
-  for (const u of list) {
-    if (!u) continue;
-    any = true;
-    acc.inputTokens += u.inputTokens;
-    acc.outputTokens += u.outputTokens;
-    acc.cacheReadTokens += u.cacheReadTokens || 0;
-    acc.cacheWriteTokens += u.cacheWriteTokens || 0;
-    acc.totalTokens += u.totalTokens;
-  }
-  return any ? acc : undefined;
-}
-
 function isStopCommand(text: string): boolean {
   return /^\/(stop|cancel|停止|终止|中止|abort)\s*$/i.test(text.trim());
 }
@@ -293,8 +261,6 @@ export class AgentRunner {
   private workdir: string;
   private bins: AgentBins;
   private statePath: string;
-  /** Chats whose team round the user asked to abort (checked between speakers) */
-  private teamCancel = new Set<string>();
 
   constructor(
     config: AgentConfig,
@@ -341,6 +307,19 @@ export class AgentRunner {
       this.feishu.onMessage(this.handleMessage.bind(this));
       this.feishu.start();
       console.log(`[${this.label}] Feishu started (appId=${this.config.feishu.appId.slice(0, 10)}..., adminMode=${!!this.config.adminMode})`);
+      // orc: let cards/notifications reach chats after a restart, and resume left-over tasks
+      // without waiting for someone to touch orc first
+      registerBot(this.config.name, this.feishu);
+      // long-running work: probe on a timer, update cards, wake the agent when something happens
+      registerWatchHost(this.config.name, {
+        card: async (w) => { if (w.cardId) await this.feishu?.updateCardMessage(w.cardId, renderWatchCard(w)); },
+        fire: (w, r) => this.onWatchFire(w, r),
+      });
+      startWatches();
+      if (hasOrcState()) {
+        const h = this.orcHost();
+        try { getOrc(h.agents, h.bins); } catch (e) { console.warn(`[orc] resume failed: ${(e as Error).message}`); }
+      }
 
       if (this.config.adminMode) {
         const adminChat = this.config.adminChatId || getStore().adminChatId;
@@ -365,7 +344,7 @@ export class AgentRunner {
       process.on(sig, () => {
         if (this.statePath === currentStatePath) {
           flushState();
-          flushTeams();
+          flushRecent();
         }
       });
     }
@@ -431,9 +410,9 @@ export class AgentRunner {
     const handled = await this.handleCommand(ev);
     if (handled) return;
 
-    // Team groups: every user message drives a multi-role discussion round
-    if (getTeam(ev.chatId)) {
-      await this.runTeamRound(ev);
+    // orc mode: the lead agent picks an action, orc executes it (docs/orc/002 §2)
+    if (getProfile(ev.chatId).mode === "orc") {
+      await runLeadTurn(this.orcHost(), ev);
       return;
     }
 
@@ -459,7 +438,6 @@ export class AgentRunner {
         "",
         "- `/新任务 标题` — 建群并开始新 session",
         "- `/新任务 finch:首条指令` — 建群并立即执行",
-        "- `/team 任务描述` — 建多角色团队群，自动发言并收敛总结",
         "- `/列表` — 活跃任务群",
         "- `/归档 编号` — 归档任务（群保留，不再响应）",
         "- `/状态` — 服务状态",
@@ -487,11 +465,6 @@ export class AgentRunner {
 
     if (/^\/(新任务|new|task)\s*$/i.test(trimmed)) {
       await feishu.sendToChat(ev.chatId, "请提供任务标题，例如：`/新任务 重构 auth`");
-      return;
-    }
-
-    if (/^\/(team|团队)(\s|$)/i.test(trimmed)) {
-      await this.handleTeamCommand(ev);
       return;
     }
 
@@ -625,20 +598,16 @@ export class AgentRunner {
   // -----------------------------------------------------------------------
 
   private handleStop(ev: FeishuMessageEvent): void {
-    let stopped = this.stopRunByKey(ev.chatId);
+    const stopped = this.stopRunByKey(ev.chatId);
 
-    // Team rounds run under per-role session keys, so /stop must sweep them all
-    const team = getTeam(ev.chatId);
-    if (team) {
-      this.teamCancel.add(ev.chatId);
-      for (const role of team.roles) {
-        if (this.stopRunByKey(roleSessionKey(ev.chatId, role.id))) stopped = true;
-      }
-      if (this.stopRunByKey(moderatorSessionKey(ev.chatId))) stopped = true;
+    const orcStopped = getProfile(ev.chatId).mode === "orc" ? stopChatTasks(ev.chatId) : [];
+    if (orcStopped.length) {
+      this.feishu?.sendToChat(ev.chatId, `⏹️ 已终止 orc 任务 ${orcStopped.map((i) => "#" + i).join(" ")}`);
+      if (!stopped) return;
     }
 
     if (stopped) {
-      this.feishu?.sendToChat(ev.chatId, team ? "⏹️ 正在停止团队讨论…" : "⏹️ 正在停止…");
+      this.feishu?.sendToChat(ev.chatId, "⏹️ 正在停止…");
     } else {
       this.feishu?.sendToChat(ev.chatId, "当前没有运行中的任务。");
     }
@@ -665,10 +634,22 @@ export class AgentRunner {
     const feishu = this.feishu!;
     const chatId = ev.chatId;
 
-    // /team — create a team group, or manage the one we are in
-    if (/^\/(team|团队)(\s|$)/i.test(text)) {
-      return this.handleTeamCommand(ev);
+    // /记住 /记忆 — per-chat memory (src/memory.ts)
+    const memReply = memoryCommand(chatId, text);
+    if (memReply) {
+      await feishu.sendMarkdown(chatId, memReply);
+      return true;
     }
+
+    // /watch — long-running job monitors (src/watch.ts)
+    const wc = watchCommandKind(text);
+    if (wc) {
+      await feishu.sendMarkdown(chatId, await this.handleWatchCommand(chatId, wc));
+      return true;
+    }
+
+    // /mode /orc /task /tasks — orc scheduling layer
+    if (await handleOrcCommand(this.orcHost(), ev)) return true;
 
     // /review — critique previous reply (feishu-cursor)
     const reviewCmd = parseReviewCommand(text);
@@ -704,8 +685,11 @@ export class AgentRunner {
         "• `/reset` — 重置会话 + 清零累计 token",
         "• `/model [id]` — 查看/切换模型（`/model default` 恢复默认）",
         "• `/new [name]` — 创建新飞书群 = 全新独立会话",
-        "• `/team <任务描述>` — 建多角色团队群；群内 `/team` 管理角色与轮次",
         "• `/review [焦点]` — 审视上一轮回复（别名 `/审视` `/critique`）",
+        "• `/mode [single|orc [组合]]` — 切换单 agent / 多 agent 编排（主 agent 分派）",
+        "• `/task <目标>` — 交给多 agent 编排；`/tasks` 列表；`/orc` 查看/切换编排",
+        "• `/记住 <内容>` · `/记忆 [forget <编号> | clear]` — 本群记忆（也可直接说「记住…」）",
+        "• `/watch [stop|check <编号>]` — 长任务监控（让 agent「后台跑训练，跑完/出错叫我」即可登记）",
         "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
         "• `/status` — 查看当前状态 + 机器资源",
         "• `/help` — 显示此帮助",
@@ -743,6 +727,61 @@ export class AgentRunner {
     }
 
     return false;
+  }
+
+  // -----------------------------------------------------------------------
+  // Watches (src/watch.ts)
+  // -----------------------------------------------------------------------
+
+  private async handleWatchCommand(chatId: string, c: NonNullable<ReturnType<typeof watchCommandKind>>): Promise<string> {
+    const mine = (id: number) => { const w = getWatch(id); return w && w.chatId === chatId ? w : undefined; };
+    if (c.kind === "usage") return "用法：`/watch` 列出；`/watch stop <编号…>` 停止；`/watch check <编号>` 立即检查一次";
+    if (c.kind === "stop") {
+      return c.ids.map((id) => {
+        if (!cancelWatch(id, chatId)) return `监控 #${id} 不存在或已结束`;
+        const w = getWatch(id)!;
+        if (w.cardId) void this.feishu?.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+        return `🛑 已停止监控 #${id}（被监控的进程不受影响）`;
+      }).join("\n");
+    }
+    if (c.kind === "check") {
+      const out: string[] = [];
+      for (const id of c.ids) {
+        const w = mine(id);
+        if (!w) { out.push(`没有监控 #${id}`); continue; }
+        if (w.status === "active") await tickWatches(Date.now(), id);
+        out.push(renderWatchCard(getWatch(id)!));
+      }
+      return out.join("\n\n---\n\n");
+    }
+    const active = listWatches({ chatId, status: ["active"] });
+    const done = listWatches({ chatId }).filter((w) => w.status !== "active").slice(-5);
+    if (!active.length && !done.length) return "本群没有监控。让 agent「后台跑起来，跑完或出错叫我」，它会自己登记。";
+    return [...active, ...done].map((w) => renderWatchCard(w)).join("\n\n---\n\n");
+  }
+
+  /** A watch hit its condition: tell the chat, then (if the agent left instructions) wake it */
+  private async onWatchFire(w: Watch, r: CheckResult): Promise<void> {
+    const feishu = this.feishu;
+    if (!feishu) return;
+    const loopTask = w.sessionKey.match(/^orc-loop:(\d+)$/)?.[1];
+    const tail = r.evidence ? `\n\n\`\`\`\n${r.evidence.split("\n").slice(-15).join("\n").slice(-2500)}\n\`\`\`` : "";
+    const next = loopTask ? `\n\n交回 orc 任务 #${loopTask} 的监督者接着处理…` : w.spec.onWake ? "\n\n正在唤醒 agent 接着处理…" : "";
+    await feishu.sendMarkdown(w.chatId, `**${w.status === "expired" ? "⌛" : "🔔"} 监控 #${w.id} ${w.spec.title}**\n${w.fired?.reason ?? ""}${tail}${next}`);
+    // a supervisor-loop task parked on this watch: hand the result to its ledger, not to a chat agent
+    if (loopTask) {
+      const h = this.orcHost();
+      try { getOrc(h.agents, h.bins).loop.onWatchFired(Number(loopTask), w, r); }
+      catch (e) { console.warn(`[orc] watch #${w.id} → task #${loopTask} failed: ${(e as Error).message}`); }
+      return;
+    }
+    if (!w.spec.onWake) return;
+    const ev: FeishuMessageEvent = {
+      messageId: `watch-${w.id}`, chatId: w.chatId, chatType: "group", messageType: "text",
+      text: buildWakePrompt(w, r), senderOpenId: "", content: "", attachments: [],
+    };
+    // through the chat's serial queue: never overlaps a turn the user started
+    enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "wake" }));
   }
 
   private async handleModelCommand(ev: FeishuMessageEvent): Promise<boolean> {
@@ -823,7 +862,7 @@ export class AgentRunner {
 
   private async runAiAndReply(
     ev: FeishuMessageEvent,
-    opts?: { kind?: "normal" | "review"; rawPrompt?: boolean },
+    opts?: { kind?: "normal" | "review" | "wake"; rawPrompt?: boolean },
   ): Promise<void> {
     const feishu = this.feishu!;
     const chatId = ev.chatId;
@@ -867,6 +906,8 @@ export class AgentRunner {
 
       // Wrap with project system prompt (unless review)
       if (!isReview) {
+        const bg = activeTaskSummary(chatId);
+        if (bg) promptText = `${bg}\n\n---\n\n${promptText}`;
         const project = getProjects().projects[label];
         promptText = wrapWithProjectPrompt(workspace, project?.systemPromptFile, promptText);
         promptText = wrapWithWorkspaceHint(workspace, promptText);
@@ -898,10 +939,54 @@ export class AgentRunner {
 
     let result: AiResult;
     try {
-      result = await this.dispatchAi(promptText, chatId, workspace, label, onStreamUpdate);
+      result = await this.dispatchAi(promptText, chatId, workspace, label, onStreamUpdate, isReview ? "ro" : "rw");
     } catch (err) {
       result = { text: `⚠️ Error: ${(err as Error).message}` };
     }
+
+    // `[[remember]]` / `[[forget]]` lines → per-chat memory (stripped from the reply)
+    let memoryFooter = "";
+    if (!isReview) {
+      const ops = extractMemoryOps(result.text || "");
+      if (ops.remember.length || ops.forget.length) {
+        result = { ...result, text: ops.text };
+        memoryFooter = applyMemoryOps(chatId, ops, "agent");
+      }
+    }
+
+    // `[[watch]]` / `[[unwatch]]` lines → durable monitors (src/watch.ts)
+    const watchNotes: string[] = [];
+    const newWatches: Watch[] = [];
+    if (!isReview) {
+      const wops = extractWatchOps(result.text || "");
+      if (wops.add.length || wops.remove.length) {
+        result = { ...result, text: wops.text };
+        for (const a of wops.add) {
+          try {
+            if (a.error) throw new Error(a.error);
+            const w = addWatch({ chatId, bot: this.config.name, sessionKey: chatId, cwd: workspace, spec: parseWatchSpec(a.raw, workspace) });
+            newWatches.push(w);
+            watchNotes.push(`👀 已登记监控 #${w.id}「${w.spec.title}」：${describeSpec(w.spec)}`);
+          } catch (e) {
+            watchNotes.push(`⚠️ 监控没有登记成功：${(e as Error).message}`);
+          }
+        }
+        for (const id of wops.remove) watchNotes.push(cancelWatch(id, chatId) ? `🛑 已停止监控 #${id}` : `监控 #${id} 不存在或已结束`);
+      }
+      // shared short transcript: the orc lead reads it when the chat switches modes
+      recordTurn(chatId, "user", opts?.kind === "wake" ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
+      recordTurn(chatId, "agent", result.text || "");
+    }
+
+    // `[[image]]` / `[[file]]` lines (+ bare image paths) → attachments sent by code (src/outgoing.ts)
+    const sendOps = extractSendOps(result.text || "");
+    if (sendOps.ops.length) result = { ...result, text: sendOps.text };
+    const project = getProjects().projects[label];
+    const outgoing = resolveOutgoing(sendOps.ops, {
+      cwd: workspace,
+      roots: sendRoots([workspace, this.workdir, project?.path, ...(project?.addDirs ?? []), ...Object.values(getProjects().projects).map((p) => p.path)]),
+      fallbackText: result.text,
+    });
 
     if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
 
@@ -913,11 +998,14 @@ export class AgentRunner {
 
     const usage = result.usage && result.usage.totalTokens > 0 ? result.usage : undefined;
     const header = isReview ? `**🔍 审视 [${label}]**\n\n` : "";
-    let body = header + (result.text || "(empty)");
+    let body = header + (result.text || (sendOps.ops.length ? `📎 附件 ×${sendOps.ops.length}` : "(empty)"));
     if (usage) {
       const displayModel = result.model || this.getDefaultModelName() || null;
       body += formatUsageFooter(chatId, displayModel, usage);
     }
+    if (memoryFooter) body += `\n\n${memoryFooter}`;
+    if (watchNotes.length) body += `\n\n${watchNotes.join("\n")}`;
+    if (outgoing.notes.length) body += `\n\n${outgoing.notes.join("\n")}`;
 
     // Cards reject some markdown (e.g. too many tables → ErrCode 11310) and truncate
     // poorly when oversized. Never put the full reply on both card and post.
@@ -934,12 +1022,50 @@ export class AgentRunner {
       await feishu.sendPostMarkdown(chatId, body);
     }
 
+    // one in-place progress card per new watch
+    for (const w of newWatches) {
+      const id = await feishu.sendCardAndGetId(chatId, renderWatchCard(w)).catch(() => undefined);
+      if (id) updateWatch(w.id, { cardId: id });
+    }
+
     if (result.images && result.images.length > 0) {
       await feishu.sendAgentImages(chatId, result.images);
     }
     if (result.files && result.files.length > 0) {
       await feishu.sendAgentFiles(chatId, result.files);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // orc host (chat side of the scheduler; see src/orc/commands.ts)
+  // -----------------------------------------------------------------------
+
+  private _orcHost?: OrcChatHost;
+  private orcHost(): OrcChatHost {
+    if (this._orcHost) return this._orcHost;
+    let agents: AgentConfig[] = [this.config];
+    try { agents = [this.config, ...loadAllAgents().filter((a) => a.name !== this.config.name)]; } catch { /* keep own config */ }
+    this._orcHost = {
+      feishu: this.feishu!,
+      agents,
+      bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin, cursorAgentBin: this.bins.cursorAgentBin },
+      workspaceFor: (chatId) => chatWorkspace.get(chatId)?.workspace || this.workdir,
+      // Lead agent (002 §2.3): stateless (fresh session; recent turns come in the prompt),
+      // read-only, short timeouts, optional cheaper model via ORC_LEAD_MODEL.
+      runLead: async (prompt, sessionKey) => {
+        const ws = chatWorkspace.get(chatOf(sessionKey));
+        this.clearAiKey(sessionKey);
+        const res = await this.dispatchAi(prompt, sessionKey, ws?.workspace || this.workdir, ws?.label || "default", undefined, "ro", {
+          readOnly: true,
+          hardTimeoutMs: Number(process.env.ORC_LEAD_HARD_MS || 4 * 60_000),
+          staleTimeoutMs: Number(process.env.ORC_LEAD_STALE_MS || 2 * 60_000),
+          model: process.env.ORC_LEAD_MODEL || undefined,
+        });
+        this.clearAiKey(sessionKey);
+        return res.text;
+      },
+    };
+    return this._orcHost;
   }
 
   // -----------------------------------------------------------------------
@@ -952,10 +1078,31 @@ export class AgentRunner {
     workspace: string,
     label: string,
     onStreamUpdate?: (text: string) => void,
+    /** "rw": the agent may emit [[remember]] lines (single-agent replies only) */
+    memoryMode: "rw" | "ro" = "ro",
+    /** Per-call overrides (orc lead agent): no writes, short timeouts, own model */
+    run: { readOnly?: boolean; hardTimeoutMs?: number; staleTimeoutMs?: number; model?: string } = {},
   ): Promise<AiResult> {
     const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig } = this.config;
-    const model = models.get(chatId);
+    const model = run.model || models.get(chatId);
+    const { hardTimeoutMs, staleTimeoutMs } = run;
+    const roTools = run.readOnly ? READ_ONLY_DENY : undefined;
     const addDirs = this.resolveAddDirs(workspace, label);
+
+    // Group announcement (= this chat's rules, revision-cached) + per-chat memory, every turn.
+    // Session keys look like "<chatId>" or "<chatId>#role:x" - the chat is the prefix.
+    const chat = chatOf(chatId);
+    const announcement = this.feishu
+      ? await getChatInstructions(this.feishu.getClient(), chat)
+      : undefined;
+    const instructions = joinInstructions(
+      announcement,
+      chat.startsWith("oc_") ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
+      memoryMode === "rw" && process.env.WHISPER_WATCH_HINT !== "0" ? formatWatchContext(chat) : undefined,
+      memoryMode === "rw" ? formatSendHint() : undefined,
+    );
+    // CLIs without an append-system-prompt flag get it as a prompt prefix
+    const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;
 
     if (aiCli === "codebuddy" && cbConfig) {
       const result = await runCodebuddy({
@@ -966,13 +1113,19 @@ export class AgentRunner {
         codebuddyBin: this.bins.codebuddyBin,
         model,
         onStreamUpdate,
+        appendSystemPrompt: instructions,
+        // per-chat memory replaces the cwd-keyed Auto Memory; WHISPER_CB_AUTO_MEMORY=1 keeps it on
+        disableAutoMemory: process.env.WHISPER_CB_AUTO_MEMORY !== "1",
+        disallowedTools: roTools,
+        hardTimeoutMs,
+        staleTimeoutMs,
       });
       return result;
     }
 
     if (aiCli === "cursor" && curConfig) {
       const result = await runCursor({
-        prompt,
+        prompt: prefixed,
         chatId,
         config: curConfig,
         workspace,
@@ -980,6 +1133,9 @@ export class AgentRunner {
         agentBin: this.bins.cursorAgentBin,
         model,
         onStreamUpdate,
+        readOnly: run.readOnly,
+        hardTimeoutMs,
+        staleTimeoutMs,
       });
       return result;
     }
@@ -994,6 +1150,10 @@ export class AgentRunner {
         codexBin: this.bins.codexBin,
         model,
         onStreamUpdate,
+        appendSystemPrompt: instructions,
+        readOnly: run.readOnly,
+        hardTimeoutMs,
+        staleTimeoutMs,
       });
       return result;
     }
@@ -1008,13 +1168,15 @@ export class AgentRunner {
         claudeBin: this.bins.claudeBin,
         model,
         onStreamUpdate,
+        appendSystemPrompt: instructions,
+        disallowedTools: roTools,
       });
       return result;
     }
 
     if (aiCli === "gemini" && geminiConfig) {
       const result = await runGemini({
-        prompt,
+        prompt: prefixed,
         chatId,
         config: geminiConfig,
         workspace,
@@ -1028,7 +1190,7 @@ export class AgentRunner {
 
     if (aiCli === "pi" && piConfig && this.bins.piBin) {
       const result = await runPi({
-        prompt,
+        prompt: prefixed,
         chatId,
         config: piConfig,
         workdir: workspace,
@@ -1092,13 +1254,6 @@ export class AgentRunner {
 
   private clearSession(chatId: string): void {
     this.clearAiKey(chatId);
-    // Team groups keep one session per role (+ moderator + roster); reset them all
-    const team = getTeam(chatId);
-    if (team) {
-      for (const role of team.roles) this.clearAiKey(roleSessionKey(chatId, role.id));
-      this.clearAiKey(moderatorSessionKey(chatId));
-      this.clearAiKey(metaSessionKey(chatId));
-    }
     cumUsage.delete(chatId);
     scheduleSave();
   }
@@ -1124,450 +1279,6 @@ export class AgentRunner {
     if (this.config.aiCli === "gemini") return getGeminiSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "pi") return getPiSession(chatId) || sessions.get(chatId);
     return sessions.get(chatId);
-  }
-
-  // -----------------------------------------------------------------------
-  // Team mode (/team) — multi-role orchestrated discussion
-  // -----------------------------------------------------------------------
-
-  private async handleTeamCommand(ev: FeishuMessageEvent): Promise<boolean> {
-    const feishu = this.feishu!;
-    const raw = ev.text.trim().replace(/^\/(team|团队)/i, "").trim();
-    const existing = getTeam(ev.chatId);
-
-    // Inside a team group the argument is a management sub-command; anywhere
-    // else it is the topic description for a brand new team group.
-    if (existing) return this.handleTeamManage(ev, existing, raw);
-
-    const isP2p = ev.chatType === "p2p" || isAdminChat(ev.chatId, this.config.adminChatId);
-    if (this.config.adminMode && !isP2p) {
-      await feishu.sendToChat(ev.chatId, "请在 Bot 私聊发 `/team <任务描述>` 创建团队群。");
-      return true;
-    }
-
-    if (!raw) {
-      await feishu.sendMarkdown(ev.chatId, [
-        "**创建多角色团队群**",
-        "",
-        "`/team <任务描述>` — 按描述拆解出多个互补角色，建群后立即开跑第一轮讨论",
-        "",
-        TEAM_USAGE,
-      ].join("\n"));
-      return true;
-    }
-
-    await this.createTeamGroup(ev, raw);
-    return true;
-  }
-
-  private async handleTeamManage(
-    ev: FeishuMessageEvent,
-    team: TeamState,
-    raw: string,
-  ): Promise<boolean> {
-    const feishu = this.feishu!;
-    const chatId = ev.chatId;
-
-    if (!raw || /^(帮助|help|状态|status)$/i.test(raw)) {
-      await feishu.sendMarkdown(chatId, [
-        `**团队 · ${team.topic.slice(0, 60)}**`,
-        `角色: ${team.roles.map((r) => r.name).join("、")}`,
-        `轮次上限: ${team.maxRounds}`,
-        "",
-        TEAM_USAGE,
-      ].join("\n"));
-      return true;
-    }
-
-    if (/^(角色|成员|roster)$/i.test(raw)) {
-      await feishu.sendMarkdown(chatId, [
-        "**花名册**",
-        "",
-        ...team.roles.map((r, i) => `**${i + 1}. ${r.name}**（\`${r.id}\`）\n${r.prompt}`),
-      ].join("\n"));
-      return true;
-    }
-
-    const rounds = raw.match(/^(?:轮次|rounds?)\s*(\d+)$/i);
-    if (rounds) {
-      const n = Math.min(Math.max(Number.parseInt(rounds[1], 10), 1), MAX_ROUNDS_CAP);
-      team.maxRounds = n;
-      setTeam(team);
-      await feishu.sendToChat(chatId, `✅ 每轮讨论上限已设为 ${n} 轮（1~${MAX_ROUNDS_CAP}）。`);
-      return true;
-    }
-
-    const add = raw.match(/^(?:加|add)\s+(\S+?)(?:\s*[:：]\s*([\s\S]+))?$/i);
-    if (add) {
-      const name = add[1].trim().slice(0, 20);
-      if (!name) {
-        await feishu.sendToChat(chatId, "用法：`/team 加 <角色名>[:角色描述]`");
-        return true;
-      }
-      if (team.roles.length >= MAX_ROLES) {
-        await feishu.sendToChat(chatId, `角色已达上限（${MAX_ROLES} 个）。`);
-        return true;
-      }
-      const base = slugifyRoleId(name, team.roles.length + 1);
-      let id = base;
-      let n = 2;
-      while (team.roles.some((r) => r.id === id)) id = `${base}-${n++}`;
-
-      const role: TeamRole = {
-        id,
-        name,
-        prompt:
-          (add[2] || "").trim() ||
-          `${name} 视角：只从该角色的立场与关注点发言，提出其他角色容易忽略的问题。`,
-      };
-      team.roles.push(role);
-      setTeam(team);
-      await feishu.sendMarkdown(chatId, [
-        `✅ 已加入 **${name}**（\`${role.id}\`）`,
-        "",
-        role.prompt,
-        "",
-        `当前角色: ${team.roles.map((r) => r.name).join("、")}`,
-      ].join("\n"));
-      return true;
-    }
-
-    if (/^(收敛|总结|summar|summarize|converge)$/i.test(raw)) {
-      if (!team.lastTranscript) {
-        await feishu.sendToChat(chatId, "还没有可收敛的讨论记录。先在本群发一条问题或观点。");
-        return true;
-      }
-      const ws = this.resolveTeamWorkspace(chatId);
-      await this.runTeamSynthesis({
-        chatId,
-        topic: team.topic,
-        userText: team.lastUserText || team.topic,
-        transcript: team.lastTranscript,
-        workspace: ws.workspace,
-        label: ws.label,
-      });
-      return true;
-    }
-
-    if (/^(重置|reset)$/i.test(raw)) {
-      this.clearSession(chatId);
-      await feishu.sendToChat(chatId, "🔄 已清空所有角色的会话记忆（花名册与轮次设置保留）。");
-      return true;
-    }
-
-    await feishu.sendToChat(chatId, `未知的团队指令：\`${raw}\`\n\n${TEAM_USAGE}`);
-    return true;
-  }
-
-  private async createTeamGroup(ev: FeishuMessageEvent, topic: string): Promise<void> {
-    const feishu = this.feishu!;
-    const title = titleFromPrompt(topic);
-    const groupName = `🧑‍🤝‍🧑 team · ${title}`.slice(0, 50);
-
-    try {
-      await feishu.sendToChat(ev.chatId, `正在组建团队「${groupName}」…`);
-      const openId = ev.senderOpenId || getStore().adminOpenId;
-      if (!openId) {
-        await feishu.sendToChat(ev.chatId, "未知用户 open_id，请先在私聊发一条消息。");
-        return;
-      }
-
-      const routed = routePrompt("", {
-        workspace: this.workdir,
-        label: getProjects().default_project || "default",
-      });
-      const { chatId, message } = await feishu.createSessionChat(
-        groupName,
-        openId,
-        `team 群 · 主题：${topic}`.slice(0, 200),
-      );
-      if (!chatId) {
-        await feishu.sendToChat(ev.chatId, `❌ 创建失败\n${message}`);
-        return;
-      }
-
-      addTask({ chatId, title, workspace: routed.workspace, projectLabel: routed.label });
-      chatWorkspace.set(chatId, { workspace: routed.workspace, label: routed.label });
-
-      // Roster: one AI turn decomposes the topic into complementary roles
-      const cardId = await feishu.sendCardAndGetId(chatId, "🧑‍🤝‍🧑 正在拆解任务、组建团队…");
-      let roster: TeamRole[] | null = null;
-      try {
-        const res = await this.dispatchAi(
-          buildRosterPrompt(topic),
-          metaSessionKey(chatId),
-          routed.workspace,
-          routed.label,
-        );
-        roster = parseRoster(res.text);
-      } catch (err) {
-        console.warn(`[team] roster generation failed: ${(err as Error).message}`);
-      }
-      const usedFallback = !roster;
-      const roles = roster ?? fallbackRoster();
-
-      setTeam({
-        chatId,
-        topic,
-        roles,
-        maxRounds: DEFAULT_MAX_ROUNDS,
-        createdAt: Date.now(),
-        lastActiveAt: Date.now(),
-      });
-
-      const rosterCard = [
-        `**团队已就绪 · ${title}**`,
-        "",
-        ...roles.map((r, i) => `**${i + 1}. ${r.name}**\n${r.prompt}`),
-        "",
-        "---",
-        `主题：${topic}`,
-        "直接把问题或观点发在本群，团队会按顺序发言并自动收敛总结。",
-        "`/team 角色` · `/team 轮次 3` · `/team 加 法务:描述` · `/team 收敛` · `/stop` 中止",
-      ].join("\n");
-      if (cardId) await feishu.updateCardMessage(cardId, rosterCard).catch(() => {});
-      else await feishu.sendPostMarkdown(chatId, rosterCard);
-
-      if (usedFallback) {
-        await feishu.sendToChat(
-          chatId,
-          "（角色拆解未产出有效 JSON，已使用通用三角色兜底；可用 `/team 加 角色名:描述` 自定义）",
-        );
-      }
-
-      await feishu.sendMarkdown(ev.chatId, [
-        "✅ 已创建团队群",
-        `- 主题: **${title}**`,
-        `- 角色: ${roles.map((r) => r.name).join("、")}`,
-        `- chat_id: \`${chatId}\``,
-        "- 正在群内跑第一轮讨论…",
-      ].join("\n"));
-
-      await this.runTeamRound({
-        ...ev,
-        chatId,
-        chatType: "group",
-        text: topic,
-        attachments: [],
-        messageType: "text",
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await feishu.sendToChat(ev.chatId, `❌ 创建团队群失败\n\n${msg.slice(0, 1500)}`);
-    }
-  }
-
-  /** One user message = up to `maxRounds` rounds of role speeches + convergence */
-  private async runTeamRound(ev: FeishuMessageEvent): Promise<void> {
-    const feishu = this.feishu!;
-    const chatId = ev.chatId;
-    const team = getTeam(chatId);
-    if (!team) return;
-
-    const ws = this.resolveTeamWorkspace(chatId);
-    let userText = ev.text.trim();
-    if (ev.attachments.length > 0) {
-      try {
-        const paths = await feishu.downloadAttachments(ev.messageId, ws.workspace, ev.attachments);
-        userText = buildPromptWithAttachments(userText, paths);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        await feishu.sendToChat(chatId, `❌ 附件下载失败\n\n${msg.slice(0, 1000)}`);
-        return;
-      }
-    }
-    if (!userText) return;
-
-    this.teamCancel.delete(chatId);
-    const speeches: Speech[] = [];
-    const usages: (AiResult["usage"] | undefined)[] = [];
-    let model: string | undefined;
-
-    for (let round = 1; round <= team.maxRounds; round++) {
-      for (const role of team.roles) {
-        if (this.teamCancel.has(chatId)) break;
-        const speech = await this.runRoleSpeech({
-          chatId,
-          role,
-          topic: team.topic,
-          userText,
-          transcript: buildTranscript(speeches),
-          round,
-          maxRounds: team.maxRounds,
-          workspace: ws.workspace,
-          label: ws.label,
-        });
-        if (!speech) continue;
-        speeches.push(speech);
-        usages.push(speech.usage);
-        model = speech.model || model;
-      }
-      if (this.teamCancel.has(chatId)) break;
-      // Converge early: a round in which every role but at most one had
-      // nothing new to add means the discussion has already settled.
-      const fresh = speeches.filter((s) => s.round === round && !s.agreed).length;
-      if (fresh <= 1) break;
-    }
-
-    touchTeam(chatId, {
-      lastUserText: userText,
-      lastTranscript: buildTranscript(speeches, 4000),
-    });
-
-    if (this.teamCancel.has(chatId)) {
-      await feishu.sendToChat(chatId, "⏹️ 团队讨论已中止，已发言内容保留在上方卡片。");
-      return;
-    }
-    if (speeches.length === 0) return;
-
-    await this.runTeamSynthesis({
-      chatId,
-      topic: team.topic,
-      userText,
-      transcript: buildTranscript(speeches, 4000),
-      workspace: ws.workspace,
-      label: ws.label,
-      usage: sumUsage(usages),
-      model,
-    });
-  }
-
-  private async runRoleSpeech(opts: {
-    chatId: string;
-    role: TeamRole;
-    topic: string;
-    userText: string;
-    transcript: string;
-    round: number;
-    maxRounds: number;
-    workspace: string;
-    label: string;
-  }): Promise<Speech | null> {
-    const { chatId, role, topic, userText, transcript, round, maxRounds, workspace, label } = opts;
-    const header = `**🎤 ${role.name}** · R${round}/${maxRounds}`;
-    const prompt = buildRolePrompt({ role, topic, userText, transcript, round, maxRounds });
-
-    const res = await this.runStreamingCard({
-      chatId,
-      header,
-      prompt,
-      sessionKey: roleSessionKey(chatId, role.id),
-      workspace,
-      label,
-      finalHeader: (r) => (isAgree(r.text) ? `${header} · 无新增观点` : header),
-      // The agreement sentinel is an internal protocol token — never show it
-      renderText: (t) => stripSentinel(t),
-    });
-
-    return {
-      roleId: role.id,
-      name: role.name,
-      text: stripSentinel(res.text) || "(空)",
-      agreed: isAgree(res.text),
-      round,
-      usage: res.usage,
-      model: res.model,
-    };
-  }
-
-  private async runTeamSynthesis(opts: {
-    chatId: string;
-    topic: string;
-    userText: string;
-    transcript: string;
-    workspace: string;
-    label: string;
-    usage?: AiResult["usage"];
-    model?: string;
-  }): Promise<void> {
-    const team = getTeam(opts.chatId);
-    const prompt = buildSynthesisPrompt({
-      topic: opts.topic,
-      userText: opts.userText,
-      transcript: opts.transcript,
-      roleNames: team ? team.roles.map((r) => r.name) : [],
-    });
-
-    // Token footer is aggregated once per user turn (all roles + moderator),
-    // so the discussion does not spam one stats block per speaker.
-    const footer = opts.usage
-      ? formatUsageFooter(opts.chatId, opts.model || this.getDefaultModelName() || null, opts.usage)
-      : "";
-
-    const res = await this.runStreamingCard({
-      chatId: opts.chatId,
-      header: "**🎯 收口结论**",
-      prompt,
-      sessionKey: moderatorSessionKey(opts.chatId),
-      workspace: opts.workspace,
-      label: opts.label,
-      footer,
-    });
-
-    if (res.images && res.images.length > 0) {
-      await this.feishu?.sendAgentImages(opts.chatId, res.images);
-    }
-    if (res.files && res.files.length > 0) {
-      await this.feishu?.sendAgentFiles(opts.chatId, res.files);
-    }
-  }
-
-  /** Stream one AI turn into a dedicated card; shared by roles and moderator */
-  private async runStreamingCard(args: {
-    chatId: string;
-    header: string;
-    prompt: string;
-    sessionKey: string;
-    workspace: string;
-    label: string;
-    footer?: string;
-    finalHeader?: (res: AiResult) => string;
-    /** Map raw CLI output to what the user sees (e.g. drop protocol sentinels) */
-    renderText?: (text: string) => string;
-  }): Promise<AiResult> {
-    const feishu = this.feishu!;
-    const render = args.renderText ?? ((t: string) => t);
-
-    let cardId: string | undefined;
-    try {
-      cardId = await feishu.sendCardAndGetId(args.chatId, `${args.header}\n\n…`);
-    } catch { /* fall back to a plain post below */ }
-
-    let pendingText = "";
-    let updateTimer: ReturnType<typeof setTimeout> | null = null;
-    const onStreamUpdate = (text: string) => {
-      pendingText = text;
-      if (!cardId || updateTimer) return;
-      updateTimer = setTimeout(() => {
-        updateTimer = null;
-        feishu.updateCardMessage(cardId!, `${args.header}\n\n${render(pendingText)}`).catch(() => {});
-      }, 500);
-    };
-
-    let res: AiResult;
-    try {
-      res = await this.dispatchAi(args.prompt, args.sessionKey, args.workspace, args.label, onStreamUpdate);
-    } catch (err) {
-      res = { text: `⚠️ Error: ${(err as Error).message}` };
-    }
-    if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
-
-    // Each voice keeps its own CLI session so it remembers what it said before
-    if (res.sessionId) rememberSession(this.config.aiCli, args.sessionKey, res.sessionId);
-
-    const header = args.finalHeader ? args.finalHeader(res) : args.header;
-    const body = `${header}\n\n${render(res.text) || "(empty)"}${args.footer ?? ""}`;
-    if (cardId) await feishu.updateCardMessage(cardId, body).catch(() => {});
-    else await feishu.sendPostMarkdown(args.chatId, body);
-
-    return res;
-  }
-
-  private resolveTeamWorkspace(chatId: string): { workspace: string; label: string } {
-    return chatWorkspace.get(chatId) || {
-      workspace: this.workdir,
-      label: getProjects().default_project || "default",
-    };
   }
 
   private get label(): string {
