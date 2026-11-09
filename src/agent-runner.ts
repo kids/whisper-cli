@@ -59,6 +59,11 @@ import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstruction
 import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
 import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks } from "./orc/chat";
 import { flushRecent, recordTurn } from "./recent";
+import {
+  addWatch, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch, listWatches,
+  parseWatchSpec, registerWatchHost, renderWatchCard, startWatches, tickWatches, updateWatch, watchCommandKind,
+  type CheckResult, type Watch,
+} from "./watch";
 import { loadAllAgents } from "./config";
 
 /** Tools denied to read-only runs (orc lead agent); Bash too, since it can write */
@@ -350,6 +355,19 @@ export class AgentRunner {
       this.feishu.onMessage(this.handleMessage.bind(this));
       this.feishu.start();
       console.log(`[${this.label}] Feishu started (appId=${this.config.feishu.appId.slice(0, 10)}..., adminMode=${!!this.config.adminMode})`);
+      // orc: let cards/notifications reach chats after a restart, and resume left-over tasks
+      // without waiting for someone to touch orc first
+      registerBot(this.config.name, this.feishu);
+      // long-running work: probe on a timer, update cards, wake the agent when something happens
+      registerWatchHost(this.config.name, {
+        card: async (w) => { if (w.cardId) await this.feishu?.updateCardMessage(w.cardId, renderWatchCard(w)); },
+        fire: (w, r) => this.onWatchFire(w, r),
+      });
+      startWatches();
+      if (hasOrcState()) {
+        const h = this.orcHost();
+        try { getOrc(h.agents, h.bins); } catch (e) { console.warn(`[orc] resume failed: ${(e as Error).message}`); }
+      }
 
       if (this.config.adminMode) {
         const adminChat = this.config.adminChatId || getStore().adminChatId;
@@ -694,6 +712,13 @@ export class AgentRunner {
       return true;
     }
 
+    // /watch — long-running job monitors (src/watch.ts)
+    const wc = watchCommandKind(text);
+    if (wc) {
+      await feishu.sendMarkdown(chatId, await this.handleWatchCommand(chatId, wc));
+      return true;
+    }
+
     // /mode /orc /task /tasks — orc scheduling layer
     if (await handleOrcCommand(this.orcHost(), ev)) return true;
 
@@ -741,6 +766,7 @@ export class AgentRunner {
         "• `/mode [single|orc [组合]]` — 切换单 agent / 多 agent 编排（主 agent 分派）",
         "• `/task <目标>` — 交给多 agent 编排；`/tasks` 列表；`/orc` 查看/切换编排",
         "• `/记住 <内容>` · `/记忆 [forget <编号> | clear]` — 本群记忆（也可直接说「记住…」）",
+        "• `/watch [stop|check <编号>]` — 长任务监控（让 agent「后台跑训练，跑完/出错叫我」即可登记）",
         "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
         "• `/status` — 查看当前状态 + 机器资源",
         "• `/help` — 显示此帮助",
@@ -778,6 +804,53 @@ export class AgentRunner {
     }
 
     return false;
+  }
+
+  // -----------------------------------------------------------------------
+  // Watches (src/watch.ts)
+  // -----------------------------------------------------------------------
+
+  private async handleWatchCommand(chatId: string, c: NonNullable<ReturnType<typeof watchCommandKind>>): Promise<string> {
+    const mine = (id: number) => { const w = getWatch(id); return w && w.chatId === chatId ? w : undefined; };
+    if (c.kind === "usage") return "用法：`/watch` 列出；`/watch stop <编号…>` 停止；`/watch check <编号>` 立即检查一次";
+    if (c.kind === "stop") {
+      return c.ids.map((id) => {
+        if (!cancelWatch(id, chatId)) return `监控 #${id} 不存在或已结束`;
+        const w = getWatch(id)!;
+        if (w.cardId) void this.feishu?.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+        return `🛑 已停止监控 #${id}（被监控的进程不受影响）`;
+      }).join("\n");
+    }
+    if (c.kind === "check") {
+      const out: string[] = [];
+      for (const id of c.ids) {
+        const w = mine(id);
+        if (!w) { out.push(`没有监控 #${id}`); continue; }
+        if (w.status === "active") await tickWatches(Date.now(), id);
+        out.push(renderWatchCard(getWatch(id)!));
+      }
+      return out.join("\n\n---\n\n");
+    }
+    const active = listWatches({ chatId, status: ["active"] });
+    const done = listWatches({ chatId }).filter((w) => w.status !== "active").slice(-5);
+    if (!active.length && !done.length) return "本群没有监控。让 agent「后台跑起来，跑完或出错叫我」，它会自己登记。";
+    return [...active, ...done].map((w) => renderWatchCard(w)).join("\n\n---\n\n");
+  }
+
+  /** A watch hit its condition: tell the chat, then (if the agent left instructions) wake it */
+  private async onWatchFire(w: Watch, r: CheckResult): Promise<void> {
+    const feishu = this.feishu;
+    if (!feishu) return;
+    const tail = r.evidence ? `\n\n\`\`\`\n${r.evidence.split("\n").slice(-15).join("\n").slice(-2500)}\n\`\`\`` : "";
+    const next = w.spec.onWake ? "\n\n正在唤醒 agent 接着处理…" : "";
+    await feishu.sendMarkdown(w.chatId, `**${w.status === "expired" ? "⌛" : "🔔"} 监控 #${w.id} ${w.spec.title}**\n${w.fired?.reason ?? ""}${tail}${next}`);
+    if (!w.spec.onWake) return;
+    const ev: FeishuMessageEvent = {
+      messageId: `watch-${w.id}`, chatId: w.chatId, chatType: "group", messageType: "text",
+      text: buildWakePrompt(w, r), senderOpenId: "", content: "", attachments: [],
+    };
+    // through the chat's serial queue: never overlaps a turn the user started
+    enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "wake" }));
   }
 
   private async handleModelCommand(ev: FeishuMessageEvent): Promise<boolean> {
@@ -858,7 +931,7 @@ export class AgentRunner {
 
   private async runAiAndReply(
     ev: FeishuMessageEvent,
-    opts?: { kind?: "normal" | "review"; rawPrompt?: boolean },
+    opts?: { kind?: "normal" | "review" | "wake"; rawPrompt?: boolean },
   ): Promise<void> {
     const feishu = this.feishu!;
     const chatId = ev.chatId;
@@ -948,8 +1021,29 @@ export class AgentRunner {
         result = { ...result, text: ops.text };
         memoryFooter = applyMemoryOps(chatId, ops, "agent");
       }
+    }
+
+    // `[[watch]]` / `[[unwatch]]` lines → durable monitors (src/watch.ts)
+    const watchNotes: string[] = [];
+    const newWatches: Watch[] = [];
+    if (!isReview) {
+      const wops = extractWatchOps(result.text || "");
+      if (wops.add.length || wops.remove.length) {
+        result = { ...result, text: wops.text };
+        for (const a of wops.add) {
+          try {
+            if (a.error) throw new Error(a.error);
+            const w = addWatch({ chatId, bot: this.config.name, sessionKey: chatId, cwd: workspace, spec: parseWatchSpec(a.raw, workspace) });
+            newWatches.push(w);
+            watchNotes.push(`👀 已登记监控 #${w.id}「${w.spec.title}」：${describeSpec(w.spec)}`);
+          } catch (e) {
+            watchNotes.push(`⚠️ 监控没有登记成功：${(e as Error).message}`);
+          }
+        }
+        for (const id of wops.remove) watchNotes.push(cancelWatch(id, chatId) ? `🛑 已停止监控 #${id}` : `监控 #${id} 不存在或已结束`);
+      }
       // shared short transcript: the orc lead reads it when the chat switches modes
-      recordTurn(chatId, "user", ev.text);
+      recordTurn(chatId, "user", opts?.kind === "wake" ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
       recordTurn(chatId, "agent", result.text || "");
     }
 
@@ -969,6 +1063,7 @@ export class AgentRunner {
       body += formatUsageFooter(chatId, displayModel, usage);
     }
     if (memoryFooter) body += `\n\n${memoryFooter}`;
+    if (watchNotes.length) body += `\n\n${watchNotes.join("\n")}`;
 
     if (cardId) {
       await feishu.updateCardMessage(cardId, body).catch(() => {});
@@ -977,6 +1072,12 @@ export class AgentRunner {
       }
     } else {
       await feishu.sendPostMarkdown(chatId, body);
+    }
+
+    // one in-place progress card per new watch
+    for (const w of newWatches) {
+      const id = await feishu.sendCardAndGetId(chatId, renderWatchCard(w)).catch(() => undefined);
+      if (id) updateWatch(w.id, { cardId: id });
     }
 
     if (result.images && result.images.length > 0) {
@@ -1049,6 +1150,7 @@ export class AgentRunner {
     const instructions = joinInstructions(
       announcement,
       chat.startsWith("oc_") ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
+      memoryMode === "rw" && process.env.WHISPER_WATCH_HINT !== "0" ? formatWatchContext(chat) : undefined,
     );
     // CLIs without an append-system-prompt flag get it as a prompt prefix
     const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;
