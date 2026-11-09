@@ -57,8 +57,12 @@ import { getProjects, loadProjects, routePrompt, watchProjects } from "./project
 import { getChatInstructions } from "./announcement";
 import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstructions, memoryCommand } from "./memory";
 import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
-import { activeTaskSummary, getProfile, stopChatTasks } from "./orc/chat";
+import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks } from "./orc/chat";
+import { flushRecent, recordTurn } from "./recent";
 import { loadAllAgents } from "./config";
+
+/** Tools denied to read-only runs (orc lead agent); Bash too, since it can write */
+const READ_ONLY_DENY = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
 import {
   buildReviewPrompt,
   parseReviewCommand,
@@ -371,6 +375,7 @@ export class AgentRunner {
         if (this.statePath === currentStatePath) {
           flushState();
           flushTeams();
+          flushRecent();
         }
       });
     }
@@ -943,6 +948,9 @@ export class AgentRunner {
         result = { ...result, text: ops.text };
         memoryFooter = applyMemoryOps(chatId, ops, "agent");
       }
+      // shared short transcript: the orc lead reads it when the chat switches modes
+      recordTurn(chatId, "user", ev.text);
+      recordTurn(chatId, "agent", result.text || "");
     }
 
     if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
@@ -991,12 +999,20 @@ export class AgentRunner {
     this._orcHost = {
       feishu: this.feishu!,
       agents,
-      bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin },
+      bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin, cursorAgentBin: this.bins.cursorAgentBin },
       workspaceFor: (chatId) => chatWorkspace.get(chatId)?.workspace || this.workdir,
+      // Lead agent (002 §2.3): stateless (fresh session; recent turns come in the prompt),
+      // read-only, short timeouts, optional cheaper model via ORC_LEAD_MODEL.
       runLead: async (prompt, sessionKey) => {
-        const ws = chatWorkspace.get(sessionKey.split("#")[0]);
-        const res = await this.dispatchAi(prompt, sessionKey, ws?.workspace || this.workdir, ws?.label || "default");
-        if (res.sessionId) rememberSession(this.config.aiCli, sessionKey, res.sessionId);
+        const ws = chatWorkspace.get(chatOf(sessionKey));
+        this.clearAiKey(sessionKey);
+        const res = await this.dispatchAi(prompt, sessionKey, ws?.workspace || this.workdir, ws?.label || "default", undefined, "ro", {
+          readOnly: true,
+          hardTimeoutMs: Number(process.env.ORC_LEAD_HARD_MS || 4 * 60_000),
+          staleTimeoutMs: Number(process.env.ORC_LEAD_STALE_MS || 2 * 60_000),
+          model: process.env.ORC_LEAD_MODEL || undefined,
+        });
+        this.clearAiKey(sessionKey);
         return res.text;
       },
     };
@@ -1015,9 +1031,13 @@ export class AgentRunner {
     onStreamUpdate?: (text: string) => void,
     /** "rw": the agent may emit [[remember]] lines (single-agent replies only) */
     memoryMode: "rw" | "ro" = "ro",
+    /** Per-call overrides (orc lead agent): no writes, short timeouts, own model */
+    run: { readOnly?: boolean; hardTimeoutMs?: number; staleTimeoutMs?: number; model?: string } = {},
   ): Promise<AiResult> {
     const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig } = this.config;
-    const model = models.get(chatId);
+    const model = run.model || models.get(chatId);
+    const { hardTimeoutMs, staleTimeoutMs } = run;
+    const roTools = run.readOnly ? READ_ONLY_DENY : undefined;
     const addDirs = this.resolveAddDirs(workspace, label);
 
     // Group announcement (= this chat's rules, revision-cached) + per-chat memory, every turn.
@@ -1045,6 +1065,9 @@ export class AgentRunner {
         appendSystemPrompt: instructions,
         // per-chat memory replaces the cwd-keyed Auto Memory; WHISPER_CB_AUTO_MEMORY=1 keeps it on
         disableAutoMemory: process.env.WHISPER_CB_AUTO_MEMORY !== "1",
+        disallowedTools: roTools,
+        hardTimeoutMs,
+        staleTimeoutMs,
       });
       return result;
     }
@@ -1059,6 +1082,9 @@ export class AgentRunner {
         agentBin: this.bins.cursorAgentBin,
         model,
         onStreamUpdate,
+        readOnly: run.readOnly,
+        hardTimeoutMs,
+        staleTimeoutMs,
       });
       return result;
     }
@@ -1074,6 +1100,9 @@ export class AgentRunner {
         model,
         onStreamUpdate,
         appendSystemPrompt: instructions,
+        readOnly: run.readOnly,
+        hardTimeoutMs,
+        staleTimeoutMs,
       });
       return result;
     }
@@ -1089,6 +1118,7 @@ export class AgentRunner {
         model,
         onStreamUpdate,
         appendSystemPrompt: instructions,
+        disallowedTools: roTools,
       });
       return result;
     }

@@ -204,6 +204,13 @@ export class OrcStore {
     return Number(r.lastInsertRowid);
   }
 
+  /** Make still-pending effects due now (e.g. launches parked on a full role) */
+  wakeEffects(ids: number[]): void {
+    const now = Date.now();
+    const st = this.db.prepare("UPDATE effects SET next_at=? WHERE id=? AND status='pending' AND next_at>?");
+    for (const id of ids) st.run(now, id, now);
+  }
+
   dueEffects(limit = 100): Effect[] {
     return this.db.prepare("SELECT * FROM effects WHERE status='pending' AND next_at<=? ORDER BY id LIMIT ?")
       .all(Date.now(), limit).map(rowToEffect);

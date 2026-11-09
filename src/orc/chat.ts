@@ -17,7 +17,7 @@ import type { PresetPatch, ResolvedPreset, Task } from "./types";
 import { TERMINAL } from "./types";
 
 export const ORC_HOME = process.env.ORC_HOME || resolve(process.env.HOME || "/root", ".orc");
-const PROFILES_PATH = resolve(import.meta.dirname, "../../state/orc-chats.json");
+const PROFILES_PATH = process.env.ORC_CHATS_PATH || resolve(import.meta.dirname, "../../state/orc-chats.json");
 
 // ---- chat profiles ----------------------------------------------------------
 
@@ -28,6 +28,8 @@ export interface ChatProfile {
   version: number;
   /** Proposed by the lead agent, applied only after `/orc confirm` */
   pending?: { kind: "config"; patch: PresetPatch } | { kind: "announce"; paragraphs: string[]; revision: number };
+  /** Bot group that serves this chat — lets cards/notifications resume after a restart */
+  bot?: string;
 }
 
 let profiles: Record<string, ChatProfile> | null = null;
@@ -73,14 +75,55 @@ export function listPresetSummaries(): string[] {
 // ---- shared orchestrator ----------------------------------------------------
 
 const chatClients = new Map<string, FeishuClient>();
-const cards = new Map<number, string>();          // taskId → progress card message id
+const bots = new Map<string, FeishuClient>();     // bot group name → client (registered at startup)
 const cardTouched = new Map<number, number>();
 const CARD_THROTTLE_MS = Number(process.env.ORC_CARD_THROTTLE_MS || 30_000);
 let orc: Orchestrator | null = null;
 let executor: CliExecutor | null = null;
 
+// taskId → progress card message id; persisted so cards keep updating after a restart
+let cards: Map<number, string> | null = null;
+const cardsPath = () => resolve(ORC_HOME, "cards.json");
+function cardMap(): Map<number, string> {
+  if (cards) return cards;
+  try { cards = new Map(Object.entries(JSON.parse(readFileSync(cardsPath(), "utf8"))).map(([k, v]) => [Number(k), String(v)])); }
+  catch { cards = new Map(); }
+  return cards;
+}
+function setCard(taskId: number, messageId: string): void {
+  const m = cardMap();
+  m.set(taskId, messageId);
+  const keep = [...m.entries()].sort((a, b) => a[0] - b[0]).slice(-500);
+  mkdirSync(ORC_HOME, { recursive: true });
+  writeFileSync(cardsPath() + ".tmp", JSON.stringify(Object.fromEntries(keep)));
+  renameSync(cardsPath() + ".tmp", cardsPath());
+}
+
+/** Called once per bot group at startup */
+export function registerBot(name: string, feishu: FeishuClient): void {
+  bots.set(name, feishu);
+}
+
 export function bindChat(chatId: string, feishu: FeishuClient): void {
   chatClients.set(chatId, feishu);
+  const name = [...bots.entries()].find(([, f]) => f === feishu)?.[0];
+  if (name && getProfile(chatId).bot !== name) setProfile(chatId, { ...getProfile(chatId), bot: name });
+}
+
+/** Client for a chat: bound this process, else the bot recorded in its profile, else the only bot */
+function clientFor(chatId: string | null): FeishuClient | undefined {
+  if (!chatId) return undefined;
+  const hit = chatClients.get(chatId);
+  if (hit) return hit;
+  const bot = getProfile(chatId).bot;
+  const f = (bot && bots.get(bot)) || (bots.size === 1 ? [...bots.values()][0] : undefined);
+  if (f) chatClients.set(chatId, f);
+  return f;
+}
+
+/** True when a previous process left orc work behind (start the scheduler eagerly) */
+export function hasOrcState(): boolean {
+  return existsSync(resolve(ORC_HOME, "orc.db"));
 }
 
 export function renderCard(t: Task, store: OrcStore): string {
@@ -106,8 +149,8 @@ export function renderCard(t: Task, store: OrcStore): string {
 }
 
 async function refreshCard(t: Task, force = false): Promise<void> {
-  const feishu = t.chatId ? chatClients.get(t.chatId) : undefined;
-  const cardId = cards.get(t.id);
+  const feishu = clientFor(t.chatId);
+  const cardId = cardMap().get(t.id);
   if (!feishu || !cardId || !orc) return;
   const now = Date.now();
   if (!force && now - (cardTouched.get(t.id) ?? 0) < CARD_THROTTLE_MS) return;
@@ -123,14 +166,16 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
     orcHome: ORC_HOME,
     instructionsFor: async (t) => {
       if (!t.chatId) return undefined;
-      const f = chatClients.get(t.chatId);
+      const f = clientFor(t.chatId);
       const ann = f ? await getChatInstructions(f.getClient(), t.chatId) : undefined;
       return joinInstructions(ann, formatMemory(t.chatId)); // workers read group memory, never write it
     },
     onProgress: (t) => void refreshCard(t, TERMINAL.includes(t.status)),
     notify: async (t, n) => {
-      const f = t.chatId ? chatClients.get(t.chatId) : undefined;
-      if (!f || !t.chatId) return; // CLI-submitted task: nothing to deliver
+      if (!t.chatId) return; // CLI-submitted task: nothing to deliver
+      const f = clientFor(t.chatId);
+      // bot not registered yet (startup race) → throw so the notify effect is retried with backoff
+      if (!f) throw new Error(`no Feishu client for chat ${t.chatId}`);
       await refreshCard(t, true);
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️" }[n.kind];
       const tail = n.kind === "decision" ? `\n\n回复 \`/task retry ${t.id} [补充说明]\` 重试，或 \`/task stop ${t.id}\` 放弃。` : "";
@@ -150,7 +195,7 @@ export async function submitFromChat(o: Orchestrator, feishu: FeishuClient, chat
   bindChat(chatId, feishu);
   const task = o.submit({ goal, repo, preset, chatId });
   const cardId = await feishu.sendCardAndGetId(chatId, renderCard(task, o.store)).catch(() => undefined);
-  if (cardId) cards.set(task.id, cardId);
+  if (cardId) setCard(task.id, cardId);
   return task;
 }
 
@@ -193,7 +238,7 @@ export function buildLeadPrompt(c: {
     `用户消息：\n${c.userText}`,
     "",
     "从下列动作中选**一个**，只输出一个 JSON 对象（不要别的文字）：",
-    '- {"action":"submit","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选，组合名"}  —— 用户要团队去做一件新事情',
+    '- {"action":"submit","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选，组合名"}  —— 用户要团队去做一件新事情；用户说「把刚才这个交给团队」时，从「最近对话」里总结出目标、约束和已有结论写进 goal',
     '- {"action":"attach","task":12,"text":"给该任务的补充信息","urgent":false}  —— 对进行中任务的补充/纠偏；urgent=true 表示要立刻打断改方向',
     '- {"action":"status","task":12}  —— 问进展（task 可省略=全部）',
     '- {"action":"stop","task":12} / {"action":"retry","task":12,"note":"补充说明"}',

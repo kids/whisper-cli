@@ -108,7 +108,9 @@ export function applyPatch(base: PresetDef, patch: PresetPatch, presets: Map<str
       continue;
     }
     const cur = out.roles[role] ?? { count: 1 };
-    out.roles[role] = { ...cur, ...edit, count: Number(edit.count ?? cur.count) };
+    const next = { ...cur, ...edit, count: Number(edit.count ?? cur.count) };
+    if (edit.cli && edit.cli !== cur.cli && edit.model === undefined) delete next.model; // model ids are per-CLI
+    out.roles[role] = next;
   }
   for (const id of patch.enable ?? []) {
     if (!out.stages.some((s) => s.id === id && s.optional)) throw new Error(`"${id}" is not an optional stage of ${out.name}`);
@@ -140,7 +142,10 @@ export function resolvePreset(
     if (!(Number.isInteger(slot.count) && slot.count >= 1 && slot.count <= MAX_ROLE_COUNT)) {
       errs.push(`role "${name}": count must be 1..${MAX_ROLE_COUNT}`);
     }
-    resolvedRoles[name] = { ...role, cli, model: slot.model ?? role.model, count: slot.count };
+    // A role's default model belongs to its default CLI: switching CLI without naming a
+    // model means "that CLI's default" (cursor → auto), not e.g. a codebuddy model id.
+    const model = slot.model ?? (cli === role.cli ? role.model : undefined);
+    resolvedRoles[name] = { ...role, cli, model, count: slot.count };
   }
   const enabled = new Set(def.enabled ?? []);
   const stages = def.stages.filter((s) => !s.optional || enabled.has(s.id));

@@ -74,6 +74,10 @@ interface StreamEvent {
   tool_call?: Record<string, unknown>;
 }
 
+function fmtDur(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)}min` : `${Math.round(ms / 1000)}s`;
+}
+
 function stripAnsi(s: string): string {
   return s
     .replace(/\x1b\][^\x07]*\x07/g, "")
@@ -176,12 +180,22 @@ export interface RunCursorOptions {
   model?: string;
   onActivity?: (label: string) => void;
   onStreamUpdate?: (text: string) => void;
+  /** Raw stream-json events (tool calls etc.), for orc progress */
+  onEvent?: (ev: any) => void;
+  /** `--mode ask`: no edits (orc readonly roles, lead agent) */
+  readOnly?: boolean;
+  /** Override AGENT_MAX_MS / AGENT_STALL_MS for this run (0 = off) */
+  hardTimeoutMs?: number;
+  staleTimeoutMs?: number;
 }
 
 export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
   const { prompt, chatId, config, workspace, onActivity } = opts;
   const bin = opts.agentBin || DEFAULT_BIN;
-  const model = opts.model || "auto";
+  // Unset / "default" → auto: Cursor picks the model (same for bot, team roles and orc workers)
+  const model = opts.model && opts.model !== "default" ? opts.model : "auto";
+  const stallMs = opts.staleTimeoutMs ?? STALL_TIMEOUT_MS;
+  const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;
   const sessionId = sessions.get(chatId);
   const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
 
@@ -199,6 +213,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       for (const dir of addDirs) {
         args.push("--add-dir", dir);
       }
+      if (opts.readOnly) args.push("--mode", "ask");
       if (sessionId) args.push("--resume", sessionId);
       args.push("--", prompt);
 
@@ -254,23 +269,24 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       const watchdog = setInterval(() => {
         if (settled || child.exitCode != null) return;
         const now = Date.now();
-        if (STALL_TIMEOUT_MS > 0 && now - lastOutputAt >= STALL_TIMEOUT_MS) {
+        if (stallMs > 0 && now - lastOutputAt >= stallMs) {
           try { child.kill("SIGTERM"); } catch {}
           setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
-          finish({ text: `⚠️ Cursor Agent stopped responding after ${Math.round((now - lastOutputAt) / 60000)}min.` });
+          finish({ text: `⏱️ Cursor Agent timed out: no output for ${fmtDur(now - lastOutputAt)}.` });
         }
-        if (HARD_TIMEOUT_MS > 0 && now - startedAt >= HARD_TIMEOUT_MS) {
+        if (hardMs > 0 && now - startedAt >= hardMs) {
           try { child.kill("SIGTERM"); } catch {}
           setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
-          finish({ text: `⚠️ Cursor Agent reached ${Math.round(HARD_TIMEOUT_MS / 60000)}min limit.` });
+          finish({ text: `⏱️ Cursor Agent timed out: reached ${fmtDur(hardMs)} limit.` });
         }
-      }, 60_000);
+      }, Math.min(60_000, Math.max(1_000, Math.min(stallMs || 60_000, hardMs || 60_000) / 4)));
 
       const processLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed.startsWith("{")) return;
         let ev: StreamEvent;
         try { ev = JSON.parse(trimmed); } catch { return; }
+        try { opts.onEvent?.(ev); } catch { /* observer must not break the run */ }
 
         if (ev.session_id && !outSessionId) outSessionId = ev.session_id;
         if (ev.model && !outModel) outModel = ev.model;

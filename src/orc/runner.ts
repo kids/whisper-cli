@@ -9,6 +9,7 @@ import type { AgentConfig } from "../types";
 import { runCodebuddy, setCodebuddySession, clearCodebuddySession, getCodebuddySession, stopCodebuddyRun } from "../ai/codebuddy";
 import { runCodex, setCodexSession, clearCodexSession, getCodexSession, stopCodexRun } from "../ai/codex";
 import { runClaude, setClaudeSession, clearClaudeSession, getClaudeSession, stopClaudeRun } from "../ai/claude";
+import { runCursor, setCursorSession, clearCursorSession, getCursorSession, stopCursorRun } from "../ai/cursor";
 import type { CliName } from "./types";
 
 export interface RunRequest {
@@ -60,6 +61,15 @@ export function eventToProgress(ev: any): string | undefined {
     return clip(`shell: ${ev.item.command ?? ""}`);
   }
   if (ev?.type === "item.completed" && ev.item?.type === "file_change") return clip(`edit: ${JSON.stringify(ev.item.changes ?? "").slice(0, 120)}`);
+  // cursor-agent: {"type":"tool_call","subtype":"started","tool_call":{"shellToolCall":{"args":{"command":"…"}}}}
+  if (ev?.type === "tool_call" && ev.subtype === "started" && ev.tool_call && typeof ev.tool_call === "object") {
+    const [kind, body] = Object.entries<any>(ev.tool_call)[0] ?? [];
+    if (kind) {
+      const a = body?.args ?? {};
+      const arg = a.command ?? a.path ?? a.pattern ?? a.globPattern ?? a.query ?? a.url ?? "";
+      return clip(`${kind.replace(/ToolCall$/, "")}${arg ? ": " + String(arg) : ""}`);
+    }
+  }
   return undefined;
 }
 
@@ -67,17 +77,17 @@ export function eventToProgress(ev: any): string | undefined {
 export function classifyResult(text: string): Pick<RunResult, "timedOut" | "cancelled" | "error"> {
   const t = (text || "").trimStart();
   if (t.startsWith("⏱️") || /timed out/i.test(t.slice(0, 80))) return { timedOut: true, cancelled: false, error: t.slice(0, 300) };
-  if (t.startsWith("🛑")) return { timedOut: false, cancelled: true };
+  if (t.startsWith("🛑") || t.startsWith("⏹️")) return { timedOut: false, cancelled: true };
   if (t.startsWith("⚠️")) return { timedOut: false, cancelled: false, error: t.slice(0, 500) };
   return { timedOut: false, cancelled: false };
 }
 
-export interface ExecutorBins { codebuddyBin?: string; codexBin?: string; claudeBin?: string }
+export interface ExecutorBins { codebuddyBin?: string; codexBin?: string; claudeBin?: string; cursorAgentBin?: string }
 
 export class CliExecutor implements Executor {
   constructor(private agents: AgentConfig[], private bins: ExecutorBins) {}
 
-  private cfg<K extends "codebuddy" | "claude" | "codex">(k: K): AgentConfig[K] | undefined {
+  private cfg<K extends "codebuddy" | "claude" | "codex" | "cursor">(k: K): AgentConfig[K] | undefined {
     return this.agents.find((a) => a[k])?.[k];
   }
 
@@ -86,13 +96,20 @@ export class CliExecutor implements Executor {
     if (this.cfg("codebuddy")) out.push("codebuddy");
     if (this.bins.codexBin && existsSync(this.bins.codexBin)) out.push("codex");
     if (this.bins.claudeBin && existsSync(this.bins.claudeBin)) out.push("claude");
+    // cursor-agent needs an API key (a bot group with AGENT_<N>_CURSOR_API_KEY, or CURSOR_API_KEY)
+    if (this.cursorKey() && (!this.bins.cursorAgentBin || existsSync(this.bins.cursorAgentBin))) out.push("cursor");
     return out;
+  }
+
+  private cursorKey(): string | undefined {
+    return this.cfg("cursor")?.apiKey || process.env.CURSOR_API_KEY || undefined;
   }
 
   stop(sessionKey: string, cli: CliName): boolean {
     if (cli === "codebuddy") return stopCodebuddyRun(sessionKey);
     if (cli === "codex") return stopCodexRun(sessionKey);
     if (cli === "claude") return stopClaudeRun(sessionKey);
+    if (cli === "cursor") return stopCursorRun(sessionKey);
     return false;
   }
 
@@ -130,6 +147,18 @@ export class CliExecutor implements Executor {
         disallowedTools: req.readOnly ? [...WRITE_TOOLS, ...(req.disallowedTools ?? [])] : req.disallowedTools,
       });
       res.sessionId ||= getClaudeSession(key);
+    } else if (req.cli === "cursor") {
+      const apiKey = this.cursorKey();
+      if (!apiKey) throw new Error("cursor is not configured (no AGENT_<N>_CURSOR_API_KEY / CURSOR_API_KEY)");
+      if (req.resumeSessionId) setCursorSession(key, req.resumeSessionId); else clearCursorSession(key);
+      res = await runCursor({
+        // no append-system-prompt flag: instructions go first in the prompt
+        prompt: req.appendSystemPrompt ? `${req.appendSystemPrompt}\n\n---\n\n${req.prompt}` : req.prompt,
+        chatId: key, config: { ...(this.cfg("cursor") ?? {}), apiKey } as any, workspace: req.cwd, agentBin: this.bins.cursorAgentBin,
+        model: req.model, onStreamUpdate, onEvent, readOnly: req.readOnly,
+        hardTimeoutMs: req.hardTimeoutMs, staleTimeoutMs: req.staleTimeoutMs,
+      });
+      res.sessionId ||= getCursorSession(key);
     } else {
       throw new Error(`orc executor: cli "${req.cli}" not supported yet`);
     }

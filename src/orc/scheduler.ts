@@ -42,6 +42,8 @@ export class Orchestrator {
   private inflight = new Set<Promise<void>>();
   /** role → busy slot indices; reserved synchronously at launch so one tick can't over-commit */
   private busy = new Map<string, Set<number>>();
+  /** role → launch effect ids parked because every slot was busy */
+  private slotWaiters = new Map<string, Set<number>>();
 
   constructor(readonly store: OrcStore, private exec: Executor, private opts: OrchestratorOptions) {
     mkdirSync(resolve(opts.orcHome, "notes"), { recursive: true });
@@ -198,14 +200,25 @@ export class Orchestrator {
     const used = this.busy.get(role.name) ?? new Set<number>();
     let slot = -1;
     for (let i = 0; i < role.count; i++) if (!used.has(i)) { slot = i; break; }
-    if (slot < 0) { this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 2000 }); return; }
+    if (slot < 0) {
+      // slots full: park it; a freed slot wakes it at once (the 2s retry is only a fallback)
+      this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 2000 });
+      (this.slotWaiters.get(role.name) ?? this.slotWaiters.set(role.name, new Set()).get(role.name)!).add(e.id);
+      return;
+    }
     used.add(slot);
     this.busy.set(role.name, used);
+    this.slotWaiters.get(role.name)?.delete(e.id);
 
     this.store.markEffect(e.id, "running");
     const pr = this.runAttempt(e, task, p, slot)
       .catch((err) => this.failLaunch(e, task, err))
-      .finally(() => { used.delete(slot); this.inflight.delete(pr); });
+      .finally(() => {
+        used.delete(slot);
+        this.inflight.delete(pr);
+        const waiting = this.slotWaiters.get(role.name);
+        if (waiting?.size) { this.store.wakeEffects([...waiting]); waiting.clear(); }
+      });
     this.inflight.add(pr);
   }
 

@@ -15,6 +15,7 @@ import type { FeishuClient, FeishuMessageEvent } from "../platform/feishu";
 import type { AgentConfig } from "../types";
 import { appendAnnouncementText, fetchAnnouncement } from "../announcement";
 import { applyMemoryOps } from "../memory";
+import { formatRecent, recordTurn } from "../recent";
 import { loadPresets, loadRoles, presetSummary } from "./config";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
@@ -167,14 +168,34 @@ export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent): Promi
     tasks: o.store.listTasks({ chatId, limit: 8 }),
     presets: [...loadPresets().keys()],
     roles: [...loadRoles().keys()],
+    history: formatRecent(chatId), // the lead is stateless; this is its only conversational context
   });
+  recordTurn(chatId, "user", ev.text);
   const raw = await h.runLead(prompt, `${chatId}#lead`);
   const act = parseLeadAction(raw);
   if ("error" in act) {
+    recordTurn(chatId, "lead", raw);
     await say(`🧭 ${raw.trim().slice(0, 1500) || act.error}`);
     return;
   }
+  recordTurn(chatId, "lead", describeAction(act));
   await executeLeadAction(h, chatId, act);
+}
+
+/** One line for the shared transcript */
+export function describeAction(a: LeadAction): string {
+  switch (a.action) {
+    case "reply": return a.text;
+    case "submit": return `（提交任务）${a.goal}`;
+    case "attach": return `（补充给 #${a.task}${a.urgent ? "，打断" : ""}）${a.text}`;
+    case "status": return `（查询状态${a.task ? " #" + a.task : ""}）`;
+    case "stop": return `（终止 #${a.task}）`;
+    case "retry": return `（重试 #${a.task}）${a.note ?? ""}`;
+    case "config": return `（拟调整编排）${JSON.stringify(a.patch)}`;
+    case "announce": return `（拟改群公告）${a.paragraphs.join(" / ")}`;
+    case "remember": return `（记入记忆）${a.items.join(" / ")}`;
+    case "forget": return `（删除记忆）${a.ids.join(",")}`;
+  }
 }
 
 export async function executeLeadAction(h: OrcChatHost, chatId: string, act: LeadAction): Promise<void> {
