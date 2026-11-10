@@ -56,9 +56,16 @@ import {
   setPiSession,
   getPiSession,
 } from "./ai/pi";
-import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
+import { getProjects, loadProjects, matchProjectPrefix, routePrompt, watchProjects } from "./projects";
 import { getChatInstructions } from "./announcement";
-import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstructions, memoryCommand } from "./memory";
+import {
+  applyMemoryOps, chatOf, extractMemoryOps, forgetMemory, formatMemory, isWorkspaceMemory, joinInstructions, listMemory, memoryCommand,
+} from "./memory";
+import {
+  RESET_ARGS, formatWorkspaceHint, getSavedWorkspace, parseSwitchWorkspaceIntent, resolveWorkspaceTarget, saveWorkspace,
+  savedWorkspaces, workspaceCommandArg, type ChatWorkspace,
+} from "./workspace";
+import { repoRoot } from "./orc/worktree";
 import { handleOrcCommand, runLeadTurn, submitTaskOp, type OrcChatHost } from "./orc/commands";
 import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, routeContext, stopChatTasks, taskForCard } from "./orc/chat";
 import { extractTaskOps, formatTaskHint, routeMessage } from "./orc/route";
@@ -123,8 +130,8 @@ function enqueue(chatId: string, task: () => Promise<void>): void {
 const sessions = new Map<string, string>();
 const models = new Map<string, string>();
 const cumUsage = new Map<string, CumulativeUsage>();
-/** Per-chat workspace override from projects.json routing / task registration */
-const chatWorkspace = new Map<string, { workspace: string; label: string }>();
+/** Per-chat workspace: explicit setting (src/workspace.ts, persisted) > registered task > WORKDIR */
+const chatWorkspace = new Map<string, ChatWorkspace>();
 
 // ---------------------------------------------------------------------------
 // Agent state persistence
@@ -301,6 +308,8 @@ export class AgentRunner {
         rememberSession(config.aiCli, t.chatId, t.cursorSessionId, { persist: false });
       }
     }
+    // Explicit per-chat settings (/工作区, 「把工作目录切到 …」, `项目名:指令`) win over task defaults
+    for (const [chatId, ws] of Object.entries(savedWorkspaces())) chatWorkspace.set(chatId, ws);
   }
 
   async start(): Promise<void> {
@@ -423,6 +432,13 @@ export class AgentRunner {
 
     const handled = await this.handleCommand(ev);
     if (handled) return;
+
+    // 「把工作目录切到 …」/ `项目名:指令`: switched by code (persisted); a trailing instruction goes on as the message
+    if (ev.attachments.length === 0) {
+      const rest = await this.switchWorkspaceByWords(ev);
+      if (rest === null) return;
+      if (rest !== undefined) ev = { ...ev, text: rest };
+    }
 
     // 「停掉监控」「别盯了」: short, unambiguous → handled by code, no model turn
     if (ev.attachments.length === 0 && await this.stopWatchesByWords(ev)) return;
@@ -671,6 +687,13 @@ export class AgentRunner {
       return true;
     }
 
+    // /工作区 — per-chat workspace (src/workspace.ts)
+    const wsArg = workspaceCommandArg(text);
+    if (wsArg !== undefined) {
+      await im.sendMarkdown(chatId, this.handleWorkspaceCommand(chatId, wsArg));
+      return true;
+    }
+
     // /watch — long-running job monitors (src/watch.ts)
     const wc = watchCommandKind(text);
     if (wc) {
@@ -726,6 +749,7 @@ export class AgentRunner {
         ...(this.config.platform === "feishu" ? ["• `/new [name]` — 创建新飞书群 = 全新独立会话"] : []),
         "• `/review [焦点]` — 审视上一轮回复",
         "• `/status` — 当前状态 + 机器资源",
+        "• `/工作区 [路径|项目名|默认]` — 查看/切换本群工作区（也可以说「把工作目录切到 …」）",
         "• `/mode [auto|single|orc]` — 消息怎么分派（默认 auto，一般不用改）",
         "• `/tasks` `/watch` `/记忆` — 查看团队任务 / 监控 / 本群记忆",
         ...extra,
@@ -735,13 +759,13 @@ export class AgentRunner {
 
     if (text === "/status" || text === "/状态" || text === "/sys") {
       const model = this.getEffectiveModel(chatId);
-      const ws = chatWorkspace.get(chatId);
+      const ws = this.workspaceOf(chatId);
       await im.sendMarkdown(chatId, [
         `**${this.config.name}**`,
         `平台: \`${this.config.platform}\``,
         `AI CLI: \`${this.config.aiCli}\``,
         `当前模型: \`${model}\``,
-        ws ? `工作区: \`${ws.label}\` → ${ws.workspace}` : `工作区: ${this.workdir}`,
+        `工作区: \`${ws.label}\` → ${ws.workspace}`,
         "",
         "---",
         "",
@@ -760,6 +784,99 @@ export class AgentRunner {
     }
 
     return false;
+  }
+
+  // -----------------------------------------------------------------------
+  // Workspace (src/workspace.ts)
+  // -----------------------------------------------------------------------
+
+  private workspaceOf(chatId: string): ChatWorkspace {
+    return chatWorkspace.get(chatId) || { workspace: this.workdir, label: getProjects().default_project || "default" };
+  }
+
+  /**
+   * Set (or reset to WORKDIR with `undefined`) a chat's workspace, persisted.
+   * A real change drops the single-agent session (CLI transcripts are cwd-bound);
+   * memory items claiming a workdir are removed either way.
+   */
+  private setWorkspace(chatId: string, next: ChatWorkspace | undefined): { changed: boolean; forgot: number[] } {
+    const before = this.workspaceOf(chatId).workspace;
+    if (next) chatWorkspace.set(chatId, next);
+    else chatWorkspace.delete(chatId);
+    saveWorkspace(chatId, next);
+    const now = this.workspaceOf(chatId);
+    const task = getTaskByChatId(chatId);
+    if (task) { task.workspace = now.workspace; task.projectLabel = now.label; }
+    const changed = before !== now.workspace;
+    if (changed) { this.clearAiKey(chatId); scheduleSave(); }
+    const stale = listMemory(chatId).filter((i) => isWorkspaceMemory(i.text)).map((i) => i.id);
+    const forgot = stale.length ? forgetMemory(chatId, stale) : [];
+    return { changed, forgot };
+  }
+
+  private describeWorkspace(ws: ChatWorkspace): string {
+    const repo = repoRoot(ws.workspace);
+    return repo
+      ? `是 git 仓库${repo !== ws.workspace ? `（仓库根 ${repo}）` : ""}，团队任务可以用`
+      : "不是 git 仓库：普通对话可以用；团队任务需要 git 仓库，用不了";
+  }
+
+  private switchReply(ws: ChatWorkspace, r: { changed: boolean; forgot: number[] }): string {
+    return [
+      r.changed ? `📂 本群工作区已切到 \`${ws.label}\` → ${ws.workspace}` : `📂 本群工作区本来就是 \`${ws.label}\` → ${ws.workspace}`,
+      `- ${this.describeWorkspace(ws)}`,
+      r.changed ? "- 对话上下文从头开始（token 累计保留）" : "",
+      r.forgot.length ? `- 记忆里旧的工作目录说法已删掉：${r.forgot.map((i) => `[${i}]`).join(" ")}` : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  /** `/工作区` (show) · `/工作区 <路径|项目名>` · `/工作区 默认` */
+  private handleWorkspaceCommand(chatId: string, arg: string): string {
+    if (!arg) {
+      const ws = this.workspaceOf(chatId);
+      const saved = getSavedWorkspace(chatId);
+      const names = Object.keys(getProjects().projects);
+      return [
+        `**本群工作区**：\`${ws.label}\` → ${ws.workspace}${saved ? "" : "（默认）"}`,
+        `- ${this.describeWorkspace(ws)}`,
+        "",
+        "切换：`/工作区 <绝对路径或项目名>`，或直接说「把工作目录切到 …」；`/工作区 默认` 恢复默认。",
+        names.length ? `项目：${names.map((n) => `\`${n}\``).join(" ")}` : "（projects.json 里还没有配置项目，只能给绝对路径）",
+      ].join("\n");
+    }
+    if (RESET_ARGS.test(arg)) {
+      const r = this.setWorkspace(chatId, undefined);
+      return this.switchReply(this.workspaceOf(chatId), r);
+    }
+    const res = resolveWorkspaceTarget(arg);
+    if (!res.ok) return `❌ ${res.reason}`;
+    return this.switchReply(res.ws, this.setWorkspace(chatId, res.ws));
+  }
+
+  /**
+   * 「把工作目录切到 X」「切到 worldout 项目」「worldout: 跑测试」.
+   * undefined = not a switch; null = fully handled; string = switched, continue with this text.
+   */
+  private async switchWorkspaceByWords(ev: ChatEvent): Promise<string | null | undefined> {
+    const chatId = ev.chatId;
+    const pre = matchProjectPrefix(ev.text);
+    if (pre) {
+      const res = resolveWorkspaceTarget(pre.key);
+      if (!res.ok) { await this.im!.sendMarkdown(chatId, `❌ ${res.reason}`); return null; }
+      const r = this.setWorkspace(chatId, res.ws);
+      if (r.changed || r.forgot.length) await this.im!.sendMarkdown(chatId, this.switchReply(res.ws, r));
+      return pre.prompt;
+    }
+    const intent = parseSwitchWorkspaceIntent(ev.text);
+    if (!intent) return undefined;
+    const res = resolveWorkspaceTarget(intent.target);
+    if (!res.ok) {
+      if (!intent.explicit) return undefined;
+      await this.im!.sendMarkdown(chatId, `❌ ${res.reason}\n\n工作区没有变，还是 \`${this.workspaceOf(chatId).workspace}\`。`);
+      return null;
+    }
+    await this.im!.sendMarkdown(chatId, this.switchReply(res.ws, this.setWorkspace(chatId, res.ws)));
+    return intent.rest ? intent.rest : null;
   }
 
   // -----------------------------------------------------------------------
@@ -946,10 +1063,7 @@ export class AgentRunner {
     const isReview = opts?.kind === "review";
 
     // Resolve workspace via projects.json routing
-    const fallback = chatWorkspace.get(chatId) || {
-      workspace: this.workdir,
-      label: getProjects().default_project || "default",
-    };
+    const fallback = this.workspaceOf(chatId);
     let promptText = ev.text;
     let workspace = fallback.workspace;
     let label = fallback.label;
@@ -973,13 +1087,8 @@ export class AgentRunner {
       promptText = buildPromptWithAttachments(routed.prompt, localPaths);
       if (!promptText) return;
 
-      // Persist workspace for this chat
-      chatWorkspace.set(chatId, { workspace, label });
-      const task = getTaskByChatId(chatId);
-      if (task && (task.workspace !== workspace || task.projectLabel !== label)) {
-        task.workspace = workspace;
-        task.projectLabel = label;
-      }
+      // A `项目名:` prefix that reached here (wake/new-task paths) switches the chat, persisted
+      if (workspace !== fallback.workspace) this.setWorkspace(chatId, { workspace, label });
 
       // Wrap with project system prompt (unless review)
       if (!isReview) {
@@ -1143,13 +1252,13 @@ export class AgentRunner {
       im: this.im!,
       agents,
       bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin, cursorAgentBin: this.bins.cursorAgentBin },
-      workspaceFor: (chatId) => chatWorkspace.get(chatId)?.workspace || this.workdir,
+      workspaceFor: (chatId) => this.workspaceOf(chatId).workspace,
       // Lead agent (002 §2.3): stateless (fresh session; recent turns come in the prompt),
       // read-only, short timeouts, optional cheaper model via ORC_LEAD_MODEL.
       runLead: async (prompt, sessionKey) => {
-        const ws = chatWorkspace.get(chatOf(sessionKey));
+        const ws = this.workspaceOf(chatOf(sessionKey));
         this.clearAiKey(sessionKey);
-        const res = await this.dispatchAi(prompt, sessionKey, ws?.workspace || this.workdir, ws?.label || "default", undefined, "ro", {
+        const res = await this.dispatchAi(prompt, sessionKey, ws.workspace, ws.label, undefined, "ro", {
           readOnly: true,
           hardTimeoutMs: Number(process.env.ORC_LEAD_HARD_MS || 4 * 60_000),
           staleTimeoutMs: Number(process.env.ORC_LEAD_STALE_MS || 2 * 60_000),
@@ -1192,6 +1301,7 @@ export class AgentRunner {
     const announcement = lark ? await getChatInstructions(lark, chat) : undefined;
     const instructions = joinInstructions(
       announcement,
+      isChatKey(chat) ? formatWorkspaceHint({ workspace, label }) : undefined,
       isChatKey(chat) ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
       memoryMode === "rw" && process.env.WHISPER_WATCH_HINT !== "0" ? formatWatchContext(chat) : undefined,
       memoryMode === "rw" ? formatSendHint() : undefined,

@@ -74,7 +74,7 @@ async function submit(
 ): Promise<string> {
   const o = orcOf(h);
   const repo = repoRoot(h.workspaceFor(chatId));
-  if (!repo) return `❌ 当前工作区 \`${h.workspaceFor(chatId)}\` 不是 git 仓库，orc 需要 git worktree 做隔离。先用 \`项目名:指令\` 切到一个仓库。`;
+  if (!repo) return `❌ 当前工作区 \`${h.workspaceFor(chatId)}\` 不是 git 仓库，团队任务要用 git worktree 隔离各人的改动。先用 \`/工作区 <路径或项目名>\` 切到一个 git 仓库（也可以说「把工作目录切到 …」）。`;
   const profile = getProfile(chatId);
   let preset;
   try {

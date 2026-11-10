@@ -158,14 +158,26 @@ export function extractMemoryOps(text: string): MemoryOps {
   return { text: out, remember, forget };
 }
 
+/**
+ * "本群工作目录是 /data/x" style items. The real workspace lives in src/workspace.ts;
+ * such memory only makes the model believe a switch that never happened.
+ */
+export function isWorkspaceMemory(text: string): boolean {
+  return /(工作目录|工作区|工作路径|工作空间|根目录|根路径|workspace|cwd)/i.test(text) && /(^|[\s`'"“「（(：:])[~\/][\w.\-\/]+/.test(text);
+}
+
 /** Apply ops from an agent reply; returns a short footer for the reply ("" if nothing changed) */
 export function applyMemoryOps(chatId: string, ops: MemoryOps, source: MemoryItem["source"]): string {
-  const added = ops.remember.map((t) => addMemory(chatId, t, source)).filter((x): x is MemoryItem => !!x);
+  const refused = source === "user" ? [] : ops.remember.filter(isWorkspaceMemory);
+  const added = ops.remember.filter((t) => !refused.includes(t))
+    .map((t) => addMemory(chatId, t, source)).filter((x): x is MemoryItem => !!x);
   const gone = ops.forget.length ? forgetMemory(chatId, ops.forget) : [];
   const parts: string[] = [];
   if (added.length) parts.push(`📌 已记入本群记忆：${added.map((i) => `[${i.id}] ${i.text}`).join("；")}`);
   if (gone.length) parts.push(`🗑 已忘记：${gone.map((i) => `[${i}]`).join(" ")}`);
-  return parts.length ? parts.join("\n") + "\n（`/记忆` 查看，`/记忆 forget <编号>` 删除）" : "";
+  const tail = parts.length ? "（`/记忆` 查看，`/记忆 forget <编号>` 删除）" : "";
+  if (refused.length) parts.push("ℹ️ 工作目录不记在记忆里，记了也不会生效。要换工作区请发 `/工作区 <路径或项目名>`，或说「把工作目录切到 …」。");
+  return parts.length ? parts.join("\n") + (tail ? "\n" + tail : "") : "";
 }
 
 /**

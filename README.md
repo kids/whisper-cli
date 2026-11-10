@@ -193,6 +193,7 @@ Wrong guesses recover on their own: the lead hands plain questions back to the s
 | `/new [name]` | Create a new Feishu group = fresh session (Feishu only, non-admin mode) |
 | `/review [focus]` | Critique the previous bot reply |
 | `/status` `/sys` | Agent status (CLI, model, workspace) + host resources |
+| `/workspace [path\|project\|default]` | Show / switch this chat's workspace (also 「把工作目录切到 …」); persisted, starts a fresh session |
 | `/help` | Help |
 
 Other commands (`/mode`, `/task`, `/tasks`, `/orc`, `/watch`, `/记忆` …) still work; full list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

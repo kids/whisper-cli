@@ -24,7 +24,7 @@
 
 📋 管理台模式：私聊 = `/新任务` `/列表` `/归档`；每个工作群 = 独立 AI session
 
-🗂 工作区路由：`projects.json` 支持 `项目名:指令` 路由到不同 workspace，可配 `systemPromptFile`
+🗂 工作区：每个群单独设置、重启不丢（`/工作区 <路径或项目名>`，或说「把工作目录切到 …」）；`projects.json` 登记项目名后可用 `项目名:指令`，可配 `systemPromptFile`
 
 🔍 `/review`：以 reviewer 视角审视上一轮回复（别名 `/审视` `/critique`）
 
@@ -191,6 +191,7 @@ sudo systemctl enable --now whisper-cli
 | `/new [name]` | 创建新飞书群 = 全新独立会话（仅飞书，非管理台模式） |
 | `/review [焦点]` | 审视上一轮 bot 回复 |
 | `/status` `/sys` | 当前状态（CLI、模型、工作区）+ 机器资源 |
+| `/工作区 [路径\|项目名\|默认]` | 查看 / 切换本群工作区（也可以说「把工作目录切到 …」）；持久化，切换后对话上下文重开 |
 | `/help` | 帮助 |
 
 其他命令（`/mode`、`/task`、`/tasks`、`/orc`、`/watch`、`/记忆` 等）都还能用，完整列表见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
@@ -207,7 +208,7 @@ sudo systemctl enable --now whisper-cli
 | `/列表` | 活跃任务群 |
 | `/归档 编号` | 归档任务 |
 
-工作群内直接发自然语言；支持 `项目名:指令` 路由（见 `projects.json`）。
+工作群内直接发自然语言；支持 `项目名:指令` 路由（见 `projects.json`），路由后本群工作区随之切换并保存。
 
 **特性：**
 - 📡 **流式输出** — 回复以卡片形式实时逐字更新，不用等完成

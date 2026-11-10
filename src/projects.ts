@@ -37,6 +37,15 @@ export function getProjects(): ProjectsConfig {
   return cached ?? loadProjects();
 }
 
+/** `worldout: 跑一下测试` → project key + the rest; undefined if the prefix is not a known project */
+export function matchProjectPrefix(text: string): { key: string; project: ProjectEntry; prompt: string } | undefined {
+  const m = text.trim().match(/^(\S+?)[:\uff1a]\s*(.+)/s);
+  if (!m) return undefined;
+  const projects = getProjects().projects;
+  const key = projects[m[1].toLowerCase()] ? m[1].toLowerCase() : projects[m[1]] ? m[1] : undefined;
+  return key ? { key, project: projects[key], prompt: m[2].trim() } : undefined;
+}
+
 /** Route `project:prompt` or fall back to default / provided fallback */
 export function routePrompt(
   text: string,
