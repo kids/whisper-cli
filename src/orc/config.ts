@@ -145,7 +145,12 @@ export function applyPatch(base: PresetDef, patch: PresetPatch, presets: Map<str
   return out;
 }
 
-/** Validate and freeze a preset into a task snapshot. Throws listing every problem found. */
+/**
+ * Validate and freeze a preset into a task snapshot. Throws listing every problem found.
+ * `availableClis` is also the fallback order: a role whose *default* CLI (from orc/roles) is
+ * not configured here runs on the first available one instead, with that CLI's default model
+ * (see `fallbacks`). A CLI chosen explicitly (preset slot / patch) is never swapped — that errors.
+ */
 export function resolvePreset(
   def: PresetDef,
   roles: Map<string, RoleDef>,
@@ -153,12 +158,21 @@ export function resolvePreset(
 ): ResolvedPreset {
   const errs: string[] = [];
   const resolvedRoles: ResolvedPreset["roles"] = {};
+  const fallbacks: NonNullable<ResolvedPreset["fallbacks"]> = [];
+  const avail = opts.availableClis;
   for (const [name, slot] of Object.entries(def.roles)) {
     const role = roles.get(name);
     if (!role) { errs.push(`role "${name}" is not in the role library (orc/roles)`); continue; }
-    const cli = (slot.cli ?? role.cli) as CliName;
+    let cli = (slot.cli ?? role.cli) as CliName;
     if (!CLIS.includes(cli)) errs.push(`role "${name}": unknown cli "${cli}"`);
-    if (opts.availableClis && !opts.availableClis.includes(cli)) errs.push(`role "${name}": cli "${cli}" is not configured`);
+    if (avail && !avail.includes(cli)) {
+      if (!slot.cli && avail.length) {
+        fallbacks.push({ role: name, from: cli, to: avail[0] });
+        cli = avail[0];
+      } else {
+        errs.push(`role "${name}": cli "${cli}" is not configured${avail.length ? ` (available: ${avail.join(", ")})` : " (no CLI is configured)"}`);
+      }
+    }
     if (!(Number.isInteger(slot.count) && slot.count >= 1 && slot.count <= MAX_ROLE_COUNT)) {
       errs.push(`role "${name}": count must be 1..${MAX_ROLE_COUNT}`);
     }
@@ -183,7 +197,10 @@ export function resolvePreset(
       if (l.requireReview && !l.reviewer) errs.push("loop.require_review needs loop.reviewer");
     }
     if (errs.length) throw new Error(`invalid preset "${def.name}":\n- ${errs.join("\n- ")}`);
-    return { name: def.name, version: opts.version ?? 1, kind: "loop", roles: resolvedRoles, stages: [], loop: structuredClone(l) };
+    return {
+      name: def.name, version: opts.version ?? 1, kind: "loop", roles: resolvedRoles, stages: [], loop: structuredClone(l),
+      ...(fallbacks.length ? { fallbacks } : {}),
+    };
   }
   const stages = def.stages.filter((s) => !s.optional || enabled.has(s.id));
   if (!stages.length) errs.push("preset has no active stages");
@@ -202,7 +219,21 @@ export function resolvePreset(
     }
   });
   if (errs.length) throw new Error(`invalid preset "${def.name}":\n- ${errs.join("\n- ")}`);
-  return { name: def.name, version: opts.version ?? 1, kind: "pipeline", roles: resolvedRoles, stages };
+  return { name: def.name, version: opts.version ?? 1, kind: "pipeline", roles: resolvedRoles, stages, ...(fallbacks.length ? { fallbacks } : {}) };
+}
+
+/** 「本机没有 codebuddy：critic、implementer 改用 codex（默认模型）」; "" when nothing fell back */
+export function fallbackNote(p: ResolvedPreset): string {
+  if (!p.fallbacks?.length) return "";
+  const groups = new Map<string, string[]>();
+  for (const f of p.fallbacks) {
+    const k = `${f.from}→${f.to}`;
+    groups.set(k, [...(groups.get(k) ?? []), f.role]);
+  }
+  return [...groups].map(([k, rs]) => {
+    const [from, to] = k.split("→");
+    return `本机没有配置 ${from}：${rs.join("、")} 改用 ${to}（${to === "cursor" ? "auto" : "默认模型"}）`;
+  }).join("；");
 }
 
 /** One-line summary for cards / announcement, e.g. "dev: plan[planner/codebuddy] → impl[implementer/codebuddy]×3 → …" */

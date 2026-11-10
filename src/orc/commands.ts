@@ -18,7 +18,7 @@ import type { AgentConfig } from "../types";
 import { appendAnnouncementText, fetchAnnouncement } from "../announcement";
 import { applyMemoryOps } from "../memory";
 import { formatRecent, recordTurn } from "../recent";
-import { loadPresets, loadRoles, presetSummary } from "./config";
+import { fallbackNote, loadPresets, loadRoles, presetSummary } from "./config";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
   renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, type ChatProfile, type LeadAction,
@@ -41,6 +41,14 @@ export interface OrcChatHost {
 
 const orcOf = (h: OrcChatHost) => getOrc(h.agents, h.bins);
 
+/** Configured CLIs, this bot's own CLI first: the order roles fall back in (config.ts resolvePreset) */
+function clisFor(h: OrcChatHost): string[] | undefined {
+  const all = availableClis();
+  if (!all.length) return undefined;
+  const own = h.agents[0]?.aiCli;
+  return own && all.includes(own) ? [own, ...all.filter((c) => c !== own)] : all;
+}
+
 const MODE_DESC: Record<ChatMode, string> = {
   auto: "自动：普通对话交给单 agent，需要团队的事（或说到进行中的任务）交给主 agent",
   single: "单 agent：只用单 agent；任务卡片回复串和待你回答的问题仍会交给主 agent",
@@ -51,7 +59,7 @@ const MODE_DESC: Record<ChatMode, string> = {
 function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMode, preset?: string): string {
   const next: ChatProfile = { ...p, mode: want, ...(preset ? { preset, patch: {} } : {}) };
   if (want !== "single" || preset) {
-    try { resolveChatPreset(next, undefined, availableClis().length ? availableClis() : undefined); }
+    try { resolveChatPreset(next, undefined, clisFor(h)); }
     catch (e) { return `❌ ${(e as Error).message}`; }
     orcOf(h); bindChat(chatId, h.im);
   }
@@ -78,13 +86,14 @@ async function submit(
   const profile = getProfile(chatId);
   let preset;
   try {
-    preset = resolveChatPreset(presetName ? { ...profile, preset: presetName, patch: {} } : profile, undefined, availableClis());
+    preset = resolveChatPreset(presetName ? { ...profile, preset: presetName, patch: {} } : profile, undefined, clisFor(h));
   } catch (e) {
     return `❌ 编排无效：${(e as Error).message}`;
   }
   const t = await submitFromChat(o, h.im, chatId, goal, repo, preset, extra);
   const crit = preset.kind === "loop" && extra.criteria?.length ? `\n验收标准：${extra.criteria.map((c, i) => `C${i + 1} ${c}`).join("；")}` : "";
-  return `已提交 #${t.id} → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`${crit}`;
+  const fb = fallbackNote(preset);
+  return `已提交 #${t.id} → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`${crit}${fb ? `\nℹ️ ${fb}` : ""}`;
 }
 
 export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<boolean> {
@@ -110,14 +119,14 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
     const p = getProfile(chatId);
     const sub = (m[1] || "").toLowerCase();
     if (!sub) {
-      let cur = "";
-      try { cur = presetSummary(resolveChatPreset(p)); } catch (e) { cur = `⚠️ ${(e as Error).message}`; }
-      await say([`**当前编排**（v${p.version}）：\`${cur}\``, p.pending ? `\n有待确认的变更：回复「确认」生效，「算了」放弃` : "", "", "**可选组合：**", ...listPresetSummaries(), "", "想换组合或调整角色，直接说即可（例如「以后评审用 claude」）"].join("\n"));
+      let cur = "", fb = "";
+      try { const r = resolveChatPreset(p, undefined, clisFor(h)); fb = fallbackNote(r); cur = presetSummary(r); } catch (e) { cur = `⚠️ ${(e as Error).message}`; }
+      await say([`**当前编排**（v${p.version}）：\`${cur}\``, fb ? `ℹ️ ${fb}` : "", p.pending ? `\n有待确认的变更：回复「确认」生效，「算了」放弃` : "", "", "**可选组合：**", ...listPresetSummaries(clisFor(h)), "", "想换组合或调整角色，直接说即可（例如「以后评审用 claude」）"].join("\n"));
       return true;
     }
     if (sub === "preset" && m[2]) {
       const next = { ...p, preset: m[2], patch: {}, version: p.version + 1, pending: undefined };
-      try { const r = resolveChatPreset(next); setProfile(chatId, next); await say(`已切换编排：\`${presetSummary(r)}\`（只影响之后的新任务）`); }
+      try { const r = resolveChatPreset(next, undefined, clisFor(h)); setProfile(chatId, next); const fb = fallbackNote(r); await say(`已切换编排：\`${presetSummary(r)}\`（只影响之后的新任务）${fb ? `\nℹ️ ${fb}` : ""}`); }
       catch (e) { await say(`❌ ${(e as Error).message}`); }
       return true;
     }
@@ -167,7 +176,7 @@ async function confirmPending(h: OrcChatHost, chatId: string): Promise<void> {
     const nextPreset = patch.preset ?? p.preset;
     const merged = patch.preset && patch.preset !== p.preset ? { ...patch, preset: undefined } : { ...p.patch, ...patch, roles: { ...(p.patch.roles ?? {}), ...(patch.roles ?? {}) } };
     const next = { ...p, preset: nextPreset, patch: merged, version: p.version + 1, pending: undefined };
-    try { const r = resolveChatPreset(next, undefined, availableClis()); setProfile(chatId, next); await say(`✅ 编排已更新（v${next.version}，只影响新任务）：\`${presetSummary(r)}\``); }
+    try { const r = resolveChatPreset(next, undefined, clisFor(h)); setProfile(chatId, next); const fb = fallbackNote(r); await say(`✅ 编排已更新（v${next.version}，只影响新任务）：\`${presetSummary(r)}\`${fb ? `\nℹ️ ${fb}` : ""}`); }
     catch (e) { await say(`❌ 校验未通过，未生效：${(e as Error).message}`); }
     return;
   }
@@ -191,7 +200,7 @@ export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): 
   bindChat(chatId, h.im);
   const p = getProfile(chatId);
   let presetLine = "";
-  try { presetLine = presetSummary(resolveChatPreset(p)); } catch (e) { presetLine = `（无效：${(e as Error).message}）`; }
+  try { const r = resolveChatPreset(p, undefined, clisFor(h)); const fb = fallbackNote(r); presetLine = presetSummary(r) + (fb ? `（${fb}）` : ""); } catch (e) { presetLine = `（无效：${(e as Error).message}）`; }
   const threadTask = ev.rootId ? taskForCard(ev.rootId) : undefined;
   const pending = !p.pending ? undefined
     : p.pending.kind === "config" ? `调整编排 ${JSON.stringify(p.pending.patch)}`
@@ -311,8 +320,8 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
     case "config": {
       if (act.task) { await say(configTask(h, chatId, act)); return; }
       try {
-        const before = resolveChatPreset(p);
-        const after = resolveChatPreset(p, act.patch, availableClis());
+        const before = resolveChatPreset(p, undefined, clisFor(h));
+        const after = resolveChatPreset(p, act.patch, clisFor(h));
         setProfile(chatId, { ...p, pending: { kind: "config", patch: act.patch } });
         await say(`🧭 拟调整编排${act.reason ? `（${act.reason}）` : ""}：\n${describePresetChange(before, after)}\n\n回复「确认」生效（只影响新任务），「算了」放弃。`);
       } catch (e) {

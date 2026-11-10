@@ -116,7 +116,7 @@
 | `single` | 只用单 agent；第 2–4 条（回复串、待回答的问题、待确认的提议）仍交给主 agent |
 | `orc` | 每条消息都先经过主 agent，要动手的事都交给团队 |
 
-离线用例在 `scripts/route_check.ts`（53 条）；主 agent 在 auto 模式下把误分派的消息交回、切换模式的能力在 `scripts/orc_lead_check.ts`（真实模型）里验证。
+离线用例在 `scripts/route_check.ts`（65 条分派用例）；主 agent 在 auto 模式下把误分派的消息交回、切换模式的能力在 `scripts/orc_lead_check.ts`（真实模型）里验证。
 
 ### 2.2 工作区
 
@@ -211,6 +211,8 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | critic_alt | codebuddy / claude-opus-5.5 | verdict | 只读 |
 
 模型写在 `orc/roles/<角色>.md` 文件头。把角色换到别的 CLI 而不指定模型时，用那个 CLI 的默认模型；换到 cursor 一律是 `auto`。主 agent 默认：codebuddy bot 用 claude-sonnet-5.5，cursor bot 用 auto，其他 CLI 用各自默认；`ORC_LEAD_MODEL` 优先。
+
+本机没有某个角色的默认 CLI 时（比如没装 codebuddy），这个角色自动改用本机已配置的 CLI：优先用本群 bot 自己的 CLI，模型用那个 CLI 的默认值（cursor 为 `auto`）。提交任务、`/orc` 和主 agent 看到的编排都会说明改用了什么。人明确指定的 CLI 不会被替换，没配置就报错。
 
 通用机制：每个任务一个 git worktree 和分支，写入角色每轮自动提交；只读角色越权写入会被回滚；角色并发名额限制；所有副作用（启动、通知、轮次）都是持久化 effect，崩溃恢复后重放。
 

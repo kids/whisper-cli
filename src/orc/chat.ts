@@ -69,10 +69,10 @@ export function resolveChatPreset(p: ChatProfile, extra?: PresetPatch, available
   return resolvePreset(def, roles, { version: p.version + (extra ? 1 : 0), availableClis: available as any });
 }
 
-export function listPresetSummaries(): string[] {
+export function listPresetSummaries(available?: string[]): string[] {
   const roles = loadRoles();
   return [...loadPresets().values()].map((p) => {
-    try { return `• \`${p.name}\` ${p.description}\n  ${presetSummary(resolvePreset(p, roles))}`; }
+    try { return `• \`${p.name}\` ${p.description}\n  ${presetSummary(resolvePreset(p, roles, { availableClis: available as any }))}`; }
     catch (e) { return `• \`${p.name}\` ⚠️ ${(e as Error).message}`; }
   });
 }

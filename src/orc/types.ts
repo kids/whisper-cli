@@ -101,6 +101,8 @@ export interface ResolvedPreset {
   /** Only active stages (optional ones not enabled are dropped); empty for loop presets */
   stages: StageDef[];
   loop?: LoopConfig;
+  /** Roles whose default CLI was not configured and ran on another one (config.ts resolvePreset) */
+  fallbacks?: { role: string; from: string; to: string }[];
 }
 
 export type TaskStatus =

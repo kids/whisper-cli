@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyPatch, loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
+import { applyPatch, fallbackNote, loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
 import { decideAfterAttempt, decideParent } from "../src/orc/core";
 import { findJsonObjects, parseRoleOutput } from "../src/orc/output";
 import type { Executor, RunRequest, RunResult } from "../src/orc/runner";
@@ -60,7 +60,18 @@ const presets = loadPresets();
   check("reject unknown role", throws(() => resolvePreset(applyPatch(dev, { roles: { wizard: { count: 1 } } }, presets), roles), /not in the role library/));
   check("reject count", throws(() => resolvePreset(applyPatch(dev, { roles: { implementer: { count: 99 } } }, presets), roles), /count must be/));
   check("reject unbounded loop", throws(() => resolvePreset(applyPatch(dev, { maxLoops: { review: 0 } }, presets), roles), /max_loops/));
-  check("reject unavailable cli", throws(() => resolvePreset(dev, roles, { availableClis: ["codex"] }), /not configured/));
+  // a role's *default* CLI missing → falls back to the first available one, with that CLI's default model
+  const fb = resolvePreset(presets.get("loop")!, roles, { availableClis: ["codex", "claude"] });
+  check("default cli missing → fallback to first available",
+    Object.values(fb.roles).every((r) => r.cli === "codex" && r.model === undefined) && fb.fallbacks?.length === 3, fb.roles);
+  check("fallback note", fallbackNote(fb) === "本机没有配置 codebuddy：supervisor、implementer、critic 改用 codex（默认模型）", fallbackNote(fb));
+  const fbc = resolvePreset(dev, roles, { availableClis: ["cursor"] });
+  check("fallback to cursor → auto", Object.values(fbc.roles).every((r) => r.cli === "cursor" && r.model === "auto"));
+  const ok = resolvePreset(dev, roles, { availableClis: ["codebuddy", "codex"] });
+  check("no fallback when default cli present", !ok.fallbacks && fallbackNote(ok) === "" && ok.roles.critic.model === "gpt-6.1-sol");
+  // an explicitly chosen CLI is never swapped
+  check("reject unavailable explicit cli", throws(() => resolvePreset(applyPatch(dev, { roles: { critic: { cli: "claude" } } }, presets), roles, { availableClis: ["codebuddy", "codex"] }), /critic.*"claude" is not configured \(available: codebuddy, codex\)/));
+  check("reject when nothing configured", throws(() => resolvePreset(dev, roles, { availableClis: [] }), /no CLI is configured/));
   check("reject non-optional enable", throws(() => applyPatch(dev, { enable: ["review"] }, presets), /not an optional stage/));
   const bad = structuredClone(dev); bad.stages[2].onFail = "test"; bad.stages[2].maxLoops = 1;
   check("reject forward on_fail", throws(() => resolvePreset(bad, roles), /must point backwards/));

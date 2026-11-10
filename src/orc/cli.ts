@@ -11,7 +11,7 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadAllAgents, loadGlobalConfig, parseEnvFile } from "../config";
-import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
+import { applyPatch, fallbackNote, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { CliExecutor } from "./runner";
 import { Orchestrator } from "./scheduler";
 import { OrcStore } from "./store";
@@ -76,7 +76,8 @@ async function main() {
     const patch: PresetPatch = flags.patch ? JSON.parse(flags.patch) : {};
     const preset = resolvePreset(applyPatch(base, patch, presets), roles, { availableClis: exec.available() });
     const task = orc.submit({ goal, title: flags.title, repo: resolve(flags.repo || process.cwd()), preset });
-    console.log(`submitted ${fmtTask(task)}\n    ${presetSummary(preset)}`);
+    const fb = fallbackNote(preset);
+    console.log(`submitted ${fmtTask(task)}\n    ${presetSummary(preset)}${fb ? `\n    ${fb}` : ""}`);
     return;
   }
 
