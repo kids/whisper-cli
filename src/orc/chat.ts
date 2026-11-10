@@ -15,6 +15,7 @@ import { findJsonObjects } from "./output";
 import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
 import { OrcStore } from "./store";
+import { MODE_LABEL, type ChatMode, type RouteTask } from "./route";
 import type { CliName, PresetPatch, ResolvedPreset, Task, Verbosity } from "./types";
 import { TERMINAL } from "./types";
 
@@ -24,11 +25,12 @@ const PROFILES_PATH = process.env.ORC_CHATS_PATH || resolve(import.meta.dirname,
 // ---- chat profiles ----------------------------------------------------------
 
 export interface ChatProfile {
-  mode: "single" | "orc";
+  /** auto (default): code routes each message; single: one agent; orc: everything via the lead (src/orc/route.ts) */
+  mode: ChatMode;
   preset: string;
   patch: PresetPatch;
   version: number;
-  /** Proposed by the lead agent, applied only after `/orc confirm` */
+  /** Proposed by the lead agent, applied only after the human says 确认 */
   pending?: { kind: "config"; patch: PresetPatch } | { kind: "announce"; paragraphs: string[]; revision: number };
   /** Bot group that serves this chat — lets cards/notifications resume after a restart */
   bot?: string;
@@ -48,7 +50,7 @@ function saveProfiles(): void {
   renameSync(tmp, PROFILES_PATH);
 }
 export function getProfile(chatId: string): ChatProfile {
-  return loadProfiles()[chatId] ?? { mode: "single", preset: "dev", patch: {}, version: 1 };
+  return loadProfiles()[chatId] ?? { mode: "auto", preset: "dev", patch: {}, version: 1 };
 }
 export function setProfile(chatId: string, p: ChatProfile): void {
   loadProfiles()[chatId] = p;
@@ -227,7 +229,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       }
       await refreshCard(t, true);
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
-      const tail = n.kind === "decision" && t.kind !== "loop" ? `\n\n回复 \`/task retry ${t.id} [补充说明]\` 重试，或 \`/task stop ${t.id}\` 放弃。` : "";
+      const tail = n.kind === "decision" && t.kind !== "loop" ? `\n\n要重试就直接说「再试一次」，可以顺带补充要改的地方；不需要了就说「放弃」。` : "";
       await f.sendMarkdown(t.chatId, `**${head} · #${t.id} ${t.title}**\n\n${n.text}${tail}`);
     },
     loop: {
@@ -271,6 +273,18 @@ export function activeTaskSummary(chatId: string): string | undefined {
   return "【本群后台 orc 任务】\n" + ts.map((t) => `- #${t.id} [${t.status}] ${t.title}：${t.progress}`).join("\n");
 }
 
+/** What the router needs about this chat: recent tasks (+ open questions) and a pending proposal */
+export function routeContext(chatId: string): { tasks: RouteTask[]; pendingProposal: boolean } {
+  const pendingProposal = !!loadProfiles()[chatId]?.pending;
+  if (!orc) return { tasks: [], pendingProposal };
+  const store = orc.store;
+  const tasks = store.listTasks({ chatId, limit: 10 }).filter((t) => !t.parentId).map((t) => ({
+    id: t.id, title: t.title, status: t.status, updatedAt: t.updatedAt,
+    asking: t.kind === "loop" && t.status === "blocked" && !!store.getLedger<Ledger>(t.id)?.pendingAsk,
+  }));
+  return { tasks, pendingProposal };
+}
+
 // ---- lead agent (intent → structured action; code executes) -----------------
 
 export type LeadAction =
@@ -286,9 +300,11 @@ export type LeadAction =
   | { action: "announce"; paragraphs: string[]; reason?: string }
   | { action: "remember"; items: string[] }
   | { action: "forget"; ids: number[] }
+  | { action: "chat" }
+  | { action: "mode"; mode: ChatMode }
   | { action: "reply"; text: string };
 
-const ACTIONS = ["submit", "attach", "answer", "status", "stop", "retry", "config", "confirm", "cancel", "announce", "remember", "forget", "reply"];
+const ACTIONS = ["submit", "attach", "answer", "status", "stop", "retry", "config", "confirm", "cancel", "announce", "remember", "forget", "chat", "mode", "reply"];
 
 /** One task line for the lead; loop tasks carry their open question so the lead can map a reply onto it */
 function leadTaskLine(t: Task, store?: OrcStore): string {
@@ -305,11 +321,16 @@ function leadTaskLine(t: Task, store?: OrcStore): string {
 
 export function buildLeadPrompt(c: {
   userText: string; presetLine: string; tasks: Task[]; presets: string[]; roles: string[]; history?: string;
-  store?: OrcStore; pending?: string; threadTask?: number;
+  store?: OrcStore; pending?: string; threadTask?: number; mode?: ChatMode; routeWhy?: string;
 }): string {
   const tasks = c.tasks.length ? c.tasks.map((t) => leadTaskLine(t, c.store)).join("\n") : "（无）";
+  const mode = c.mode ?? "orc";
+  const modeLine = mode === "orc"
+    ? "本群是编排模式：所有消息都先到你这里。要动手做的事一律 submit 交给团队；chat 只用于闲聊、问答。"
+    : `本群是${MODE_LABEL[mode]}模式：这条消息转给你，是因为它看起来和团队任务有关（${c.routeWhy || "规则命中"}）。如果其实只是普通对话、问答，或一个 agent 一轮就能做完的事，用 chat 交回给单 agent。`;
   return [
     "你是本群的 orc 主 agent，只负责**理解意图并选择动作**，不亲自写代码、不改文件。",
+    modeLine,
     `当前编排：${c.presetLine}`,
     `可选组合：${c.presets.join(" / ")}（loop = 监督循环：监督者反复下指令、取证、汇报，适合要反复试错、长时间实验、目标可能随讨论调整的任务）；角色库：${c.roles.join(" / ")}`,
     `本群任务：\n${tasks}`,
@@ -329,7 +350,9 @@ export function buildLeadPrompt(c: {
     '- {"action":"confirm"} / {"action":"cancel"}  —— 用户同意 / 拒绝「待用户确认的提议」（如“好的”“确认”“算了”）',
     '- {"action":"announce","paragraphs":["要追加到群公告（=本群长期指令）的规则，每段一句"],"reason":"…"}  —— 用户想修改本群的长期约束/规则（人人可见、约束所有 agent 的硬规则）',
     '- {"action":"remember","items":["一句话"]} / {"action":"forget","ids":[3]}  —— 用户要你记住/忘掉本群的背景信息、偏好（软信息，编号见【本群记忆】）；分不清是规则还是记忆时，用 remember',
-    '- {"action":"reply","text":"直接回答"}  —— 闲聊、简单问题、或意图不清时向用户澄清（宁可问，不要猜）',
+    '- {"action":"mode","mode":"auto|single|orc"}  —— 用户要切换本群的工作方式：auto=自动判断（默认）；single=只用单 agent；orc=所有消息先经过你、干活都交给团队',
+    '- {"action":"chat"}  —— 把这条消息原样交给本群的单 agent（它能读写工作区、续接本群对话）：普通问答、讨论、一轮就能做完的改动或查询',
+    '- {"action":"reply","text":"直接回答"}  —— 关于任务 / 编排的简单问题，或意图不清时向用户澄清（宁可问，不要猜）',
   ].filter(Boolean).join("\n");
 }
 
@@ -372,6 +395,11 @@ export function parseLeadAction(text: string): LeadAction | { error: string } {
     case "forget": {
       const ids = (Array.isArray(a.ids) ? a.ids : [a.ids ?? a.id]).map(num).filter((x: number | undefined): x is number => !!x);
       return ids.length ? { action: "forget", ids } : { error: "forget 缺少 ids" };
+    }
+    case "chat": return { action: "chat" };
+    case "mode": {
+      const m = String(a.mode ?? "").toLowerCase();
+      return m === "auto" || m === "single" || m === "orc" ? { action: "mode", mode: m } : { error: "mode 必须是 auto / single / orc" };
     }
     default: return { action: "reply", text: String(a.text ?? "") };
   }

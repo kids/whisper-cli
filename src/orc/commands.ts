@@ -1,15 +1,16 @@
 // =============================================================================
 // orc chat commands + lead-agent turn (kept out of agent-runner.ts)
 // =============================================================================
-//   /mode [single | orc [preset]]     switch this chat's agent mode
+// Users normally just talk: src/orc/route.ts decides per message whether the
+// single agent or the lead agent handles it. These commands are the fallback:
+//   /mode [auto | single | orc [preset]]  how this chat routes messages
 //   /orc                              current orchestration + presets
 //   /orc preset <name> | reset        change / clear this chat's orchestration
 //   /orc confirm | cancel             apply / drop the lead agent's pending proposal
 //   /task <goal>                      submit to orc (any mode)
 //   /task <id> | stop|retry|attach <id> …
 //   /tasks                            this chat's tasks
-// In mode=orc every other message goes to the lead agent, which only picks an
-// action; the code below executes it (002 §2.3).
+// A lead turn only picks an action; the code below executes it (002 §2.3).
 // =============================================================================
 import type { FeishuClient, FeishuMessageEvent } from "../platform/feishu";
 import type { AgentConfig } from "../types";
@@ -19,8 +20,9 @@ import { formatRecent, recordTurn } from "../recent";
 import { loadPresets, loadRoles, presetSummary } from "./config";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
-  renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, type LeadAction,
+  renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, type ChatProfile, type LeadAction,
 } from "./chat";
+import { MODE_LABEL, type ChatMode, type TaskOp } from "./route";
 import type { ExecutorBins } from "./runner";
 import type { CliName } from "./types";
 import { repoRoot } from "./worktree";
@@ -32,9 +34,38 @@ export interface OrcChatHost {
   workspaceFor(chatId: string): string;
   /** One LLM turn for the lead agent (goes through the bot's own CLI + group announcement) */
   runLead(prompt: string, sessionKey: string): Promise<string>;
+  /** Hand the message to the chat's single agent (lead `chat` action) */
+  runSingle(ev: FeishuMessageEvent): Promise<void>;
 }
 
 const orcOf = (h: OrcChatHost) => getOrc(h.agents, h.bins);
+
+const MODE_DESC: Record<ChatMode, string> = {
+  auto: "自动：普通对话交给单 agent，需要团队的事（或说到进行中的任务）交给主 agent",
+  single: "单 agent：只用单 agent；任务卡片回复串和待你回答的问题仍会交给主 agent",
+  orc: "编排：每条消息都先经过主 agent，要动手的事都交给团队",
+};
+
+/** Switch the chat's mode; returns the message to post */
+function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMode, preset?: string): string {
+  const next: ChatProfile = { ...p, mode: want, ...(preset ? { preset, patch: {} } : {}) };
+  if (want !== "single" || preset) {
+    try { resolveChatPreset(next, undefined, availableClis().length ? availableClis() : undefined); }
+    catch (e) { return `❌ ${(e as Error).message}`; }
+    orcOf(h); bindChat(chatId, h.feishu);
+  }
+  setProfile(chatId, next);
+  const tail = want === "single" ? "后台的团队任务会继续跑，结果照常通知。" : want === "orc" ? `默认编排 \`${next.preset}\`。说「回到自动模式」即可切回。` : "";
+  return `🧭 已切到${MODE_LABEL[want]}模式 —— ${MODE_DESC[want]}。${tail}`;
+}
+
+/** Submit a team task from a single-agent `[[task]]` line; returns a note for the reply */
+export async function submitTaskOp(h: OrcChatHost, chatId: string, op: TaskOp, sourceText: string): Promise<string> {
+  if (op.error || !op.goal) return `⚠️ 没有转交团队：${op.error ?? "缺少目标"}`;
+  orcOf(h);
+  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText });
+  return r.startsWith("❌") ? `⚠️ 没有转交团队：${r.replace(/^❌\s*/, "")}` : `🧭 ${r}`;
+}
 
 async function submit(
   h: OrcChatHost, chatId: string, goal: string, presetName?: string,
@@ -65,20 +96,11 @@ export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): 
     const p = getProfile(chatId);
     const want = (m[2] || "").toLowerCase();
     if (!want) {
-      await say(`当前模式：\`${p.mode}\`${p.mode === "orc" ? `（${p.preset}）` : ""}\n用法：\`/mode single\` 单 agent；\`/mode orc [组合]\` 由主 agent 分派给多 agent 编排`);
+      await say(`当前：${MODE_LABEL[p.mode] ?? p.mode}模式 —— ${MODE_DESC[p.mode] ?? ""}\n平时不用管它，直接说话即可；要切换也可以直接说「切到编排模式」「回到自动模式」。\n命令：\`/mode auto\` · \`/mode single\` · \`/mode orc [组合]\``);
       return true;
     }
-    if (want !== "single" && want !== "orc") { await say("用法：`/mode single` 或 `/mode orc [组合]`"); return true; }
-    const next = { ...p, mode: want as "single" | "orc", ...(m[3] ? { preset: m[3], patch: {} } : {}) };
-    if (want === "orc") {
-      try { resolveChatPreset(next, undefined, availableClis().length ? availableClis() : undefined); }
-      catch (e) { await say(`❌ ${(e as Error).message}`); return true; }
-      orcOf(h); bindChat(chatId, h.feishu);
-    }
-    setProfile(chatId, next);
-    await say(want === "orc"
-      ? `🧭 已切到 orc 模式（\`${next.preset}\`）。直接说要做什么，主 agent 会分派；进行中的任务有进展卡片。\`/mode single\` 切回。`
-      : `💬 已切回单 agent 模式。后台 orc 任务会继续跑，结果照常通知。`);
+    if (want !== "auto" && want !== "single" && want !== "orc") { await say("用法：`/mode auto`、`/mode single` 或 `/mode orc [组合]`"); return true; }
+    await say(switchMode(h, chatId, p, want, m[3]));
     return true;
   }
 
@@ -89,7 +111,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): 
     if (!sub) {
       let cur = "";
       try { cur = presetSummary(resolveChatPreset(p)); } catch (e) { cur = `⚠️ ${(e as Error).message}`; }
-      await say([`**当前编排**（v${p.version}）：\`${cur}\``, p.pending ? `\n有待确认的变更：\`/orc confirm\` 生效，\`/orc cancel\` 放弃` : "", "", "**可选组合：**", ...listPresetSummaries(), "", "`/orc preset <名>` 切换；`/orc reset` 清除本群调整"].join("\n"));
+      await say([`**当前编排**（v${p.version}）：\`${cur}\``, p.pending ? `\n有待确认的变更：回复「确认」生效，「算了」放弃` : "", "", "**可选组合：**", ...listPresetSummaries(), "", "想换组合或调整角色，直接说即可（例如「以后评审用 claude」）"].join("\n"));
       return true;
     }
     if (sub === "preset" && m[2]) {
@@ -106,7 +128,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): 
 
   if (/^\/tasks\s*$/i.test(text)) {
     const ts = orcOf(h).store.listTasks({ chatId, limit: 15 });
-    await say(ts.length ? ts.map((t) => `- #${t.id} [${t.status}] ${t.title} —— ${t.progress}`).join("\n") : "本群还没有 orc 任务。`/task <目标>` 提交。");
+    await say(ts.length ? ts.map((t) => `- #${t.id} [${t.status}] ${t.title} —— ${t.progress}`).join("\n") : "本群还没有团队任务。想交给团队做，直接说「这个交给团队做」即可。");
     return true;
   }
 
@@ -158,8 +180,8 @@ async function confirmPending(h: OrcChatHost, chatId: string): Promise<void> {
   }
 }
 
-/** mode=orc: one lead-agent turn → structured action → executed by code */
-export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent): Promise<void> {
+/** One lead-agent turn → structured action → executed by code (`why`: the router's reason) */
+export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent, why?: string): Promise<void> {
   const chatId = ev.chatId;
   const say = (md: string) => h.feishu.sendMarkdown(chatId, md);
   const o = orcOf(h);
@@ -181,10 +203,14 @@ export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent): Promi
     store: o.store,
     pending,
     threadTask,
+    mode: p.mode,
+    routeWhy: why,
   });
-  recordTurn(chatId, "user", ev.text);
   const raw = await h.runLead(prompt, `${chatId}#lead`);
   const act = parseLeadAction(raw);
+  // not team business after all → the single agent takes the message (it records its own turns)
+  if (!("error" in act) && act.action === "chat") { await h.runSingle(ev); return; }
+  recordTurn(chatId, "user", ev.text);
   if ("error" in act) {
     recordTurn(chatId, "lead", raw);
     await say(`🧭 ${raw.trim().slice(0, 1500) || act.error}`);
@@ -210,6 +236,8 @@ export function describeAction(a: LeadAction): string {
     case "announce": return `（拟改群公告）${a.paragraphs.join(" / ")}`;
     case "remember": return `（记入记忆）${a.items.join(" / ")}`;
     case "forget": return `（删除记忆）${a.ids.join(",")}`;
+    case "mode": return `（切到${MODE_LABEL[a.mode]}模式）`;
+    case "chat": return "（交给单 agent）";
   }
 }
 
@@ -218,7 +246,7 @@ function configTask(h: OrcChatHost, chatId: string, act: Extract<LeadAction, { a
   const o = orcOf(h);
   const t = o.store.getTask(act.task!);
   if (!t || t.chatId !== chatId) return `本群没有任务 #${act.task}`;
-  if (t.kind !== "loop") return `#${t.id} 是流水线任务，运行中不能换角色；可以 \`/task stop ${t.id}\` 后用新编排重新提交`;
+  if (t.kind !== "loop") return `#${t.id} 是流水线任务，运行中不能换角色；可以让我先停掉它，再用新的安排重新提交`;
   const out: string[] = [];
   const roles = act.patch.roles ?? {};
   const ignored = Object.keys(act.patch).filter((k) => k !== "roles");
@@ -245,6 +273,8 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
   const own = (id: number) => o.store.getTask(id)?.chatId === chatId;
   switch (act.action) {
     case "reply": await say(act.text || "（空）"); return;
+    case "chat": return; // handled in runLeadTurn
+    case "mode": await say(switchMode(h, chatId, p, act.mode)); return;
     case "remember":
     case "forget": {
       const ops = act.action === "remember" ? { text: "", remember: act.items, forget: [] } : { text: "", remember: [], forget: act.ids };
@@ -281,7 +311,7 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
         const before = resolveChatPreset(p);
         const after = resolveChatPreset(p, act.patch, availableClis());
         setProfile(chatId, { ...p, pending: { kind: "config", patch: act.patch } });
-        await say(`🧭 拟调整编排${act.reason ? `（${act.reason}）` : ""}：\n${describePresetChange(before, after)}\n\n回复 \`/orc confirm\` 生效（只影响新任务），\`/orc cancel\` 放弃。`);
+        await say(`🧭 拟调整编排${act.reason ? `（${act.reason}）` : ""}：\n${describePresetChange(before, after)}\n\n回复「确认」生效（只影响新任务），「算了」放弃。`);
       } catch (e) {
         await say(`🧭 这个调整不合法，没有采纳：${(e as Error).message}`);
       }
@@ -291,7 +321,7 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       try {
         const snap = await fetchAnnouncement(h.feishu.getClient(), chatId);
         setProfile(chatId, { ...p, pending: { kind: "announce", paragraphs: act.paragraphs, revision: snap.revisionId } });
-        await say(`🧭 拟在群公告（=本群长期指令）末尾追加${act.reason ? `（${act.reason}）` : ""}：\n${act.paragraphs.map((x) => `> ${x}`).join("\n")}\n\n回复 \`/orc confirm\` 写入，\`/orc cancel\` 放弃。`);
+        await say(`🧭 拟在群公告（=本群长期指令）末尾追加${act.reason ? `（${act.reason}）` : ""}：\n${act.paragraphs.map((x) => `> ${x}`).join("\n")}\n\n回复「确认」写入，「算了」放弃。`);
       } catch (e) {
         await say(`🧭 读不到本群公告，无法修改：${(e as Error).message}`);
       }

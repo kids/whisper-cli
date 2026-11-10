@@ -29,7 +29,7 @@ const tasks = [
   fakeTask(15, "调优训练超参", "blocked", "等你决定：要推送吗", { kind: "loop", preset: loopPreset }),
 ];
 // want: action, optionally "#<task>" (and ":<option>" for answer)
-const cases: { msg: string; want: string; pending?: string }[] = [
+const cases: { msg: string; want: string; pending?: string; mode?: "auto" | "orc"; why?: string }[] = [
   { msg: "给订单服务加一个按用户维度的幂等键校验，重复请求返回第一次的结果", want: "submit" },
   { msg: "限流那个改用 redis 的令牌桶，不要用内存计数", want: "attach#12" },
   { msg: "停一下！限流方向错了，先别做了马上改成网关层做", want: "attach#12" },
@@ -38,7 +38,7 @@ const cases: { msg: string; want: string; pending?: string }[] = [
   { msg: "#9 再试一次，补充：评审意见里的编码问题用 utf-8-sig 解决", want: "retry#9" },
   { msg: "以后 critic 用 claude，测试只要一个就够了", want: "config" },
   { msg: "以后所有回复都先给一句话结论，再展开细节", want: "announce" },
-  { msg: "令牌桶和漏桶有什么区别", want: "reply" },
+  { msg: "令牌桶和漏桶有什么区别", want: "reply|chat" },
   { msg: "帮我看看", want: "reply|status" },
   // supervisor-loop steering, all in plain words
   { msg: "超参那个可以推了", want: "answer#15:b" },
@@ -47,6 +47,13 @@ const cases: { msg: string; want: string; pending?: string }[] = [
   { msg: "15 别每轮都刷屏了，有结果再告诉我", want: "config#15" },
   { msg: "记一下：我们的 GPU 机器只有 2 张卡", want: "remember" },
   { msg: "好，就这么改", want: "confirm", pending: "调整编排 {\"roles\":{\"critic\":{\"cli\":\"claude\"}}}" },
+  // auto mode: the router sent it here; misrouted chat goes back (chat), mode switches, real team work stays
+  { msg: "帮我把 utils 里的 sleep 换成 promise 版本", want: "chat", mode: "auto", why: "调整进行中的任务" },
+  { msg: "这个任务调度器的 bug 是什么原因，帮我看下 scheduler.ts", want: "chat", mode: "auto", why: "调整进行中的任务" },
+  { msg: "进展如何？顺便问下 Python 的 GIL 是什么", want: "status|reply", mode: "auto", why: "调整进行中的任务" },
+  { msg: "回到单聊模式吧，团队先不用了", want: "mode", mode: "auto", why: "切换模式" },
+  { msg: "以后都走团队编排模式", want: "mode", mode: "auto", why: "切换模式" },
+  { msg: "这个交给团队做：给订单服务加幂等校验，测试全过为止", want: "submit", mode: "auto", why: "交给团队" },
 ];
 
 function hit(want: string, act: any): boolean {
@@ -59,10 +66,10 @@ function hit(want: string, act: any): boolean {
 async function main() {
   let ok = 0;
   const t0 = Date.now();
-  await Promise.all(cases.map(async ({ msg, want, pending }, i) => {
+  await Promise.all(cases.map(async ({ msg, want, pending, mode, why }, i) => {
     const prompt = buildLeadPrompt({
       userText: msg, presetLine: "dev: plan → impl×3 → review(codex)×2 → test",
-      tasks, presets: [...loadPresets().keys()], roles: [...loadRoles().keys()], store, pending,
+      tasks, presets: [...loadPresets().keys()], roles: [...loadRoles().keys()], store, pending, mode, routeWhy: why,
     });
     const res = await runCodebuddy({ prompt, chatId: `lead-check-${i}`, config: cfg, workdir: "/tmp", model, resumeSession: false, disallowedTools: ["Write", "Edit", "MultiEdit", "Bash"] });
     const act: any = parseLeadAction(res.text);

@@ -1,6 +1,6 @@
 # whisper-cli 整体设计
 
-> 更新：2026-11-10　对应代码：`main`（18edcfc 之后）
+> 更新：2026-11-10　对应代码：`main`
 >
 > 本文是**当前实现**的总览，以它为准。历史设计和选型理由见 [orc/001](orc/001-selection-and-architecture.md)（调度层选型）、[orc/002](orc/002-chat-integration.md)（群模式、群公告、预制组合）；两者写于监督循环、附件发送之前，部分内容已被本文取代。
 > `docs/orc/architecture.html` 是讨论用的图文版，不入库。
@@ -27,14 +27,15 @@
           │
 路由层   AgentRunner（src/agent-runner.ts）：一个 bot 一个实例
           ├─ 斜杠命令：/help /reset /model /new /status /记住 /记忆 /watch /mode /orc /task /tasks /stop
-          ├─ 单 agent 模式 → 直接跑 CLI
-          └─ orc 模式，或在任务卡片的回复串里说话 → 主 agent（lead）选动作
+          └─ 消息分派（src/orc/route.ts，纯代码规则，§2.1）
+               ├─ 普通对话 → 单 agent：直接跑 CLI
+               └─ 要团队 / 说到进行中的任务 / 待回答的问题 / 任务卡片回复串 → 主 agent（lead）选动作
           │
 上下文层 群公告（announcement.ts）· 群记忆（memory.ts）· 最近对话（recent.ts）· 监控 / 发送提示
           │
 执行层   各 CLI 适配（src/ai/*.ts）：每轮一个子进程，-p 模式，可续接会话
           │
-后处理   回复里的 [[remember]] / [[forget]] / [[watch]] / [[unwatch]] / [[image]] / [[file]] 行
+后处理   回复里的 [[remember]] / [[forget]] / [[watch]] / [[unwatch]] / [[task]] / [[image]] / [[file]] 行
           → 由代码执行并从回复中去掉
           │
 编排层   orc（src/orc/*）：流水线引擎（core.ts）+ 监督循环引擎（loop.ts）+ 调度器（scheduler.ts）
@@ -42,17 +43,63 @@
 持久层   state/*.json · ~/.orc/orc.db（SQLite）· ~/.orc/worktrees · ~/.orc/tasks/<id>/
 ```
 
-## 2. 一条消息的路径（单 agent 模式）
+## 2. 一条消息的路径
 
-1. 飞书事件进入 `AgentRunner`，按群串行排队；`/stop` 绕过队列直接终止当前运行。
+1. 飞书事件进入 `AgentRunner`，按群串行排队；`/stop` 绕过队列直接终止当前运行。斜杠命令直接处理，其余消息先分派（§2.1），交给单 agent 的走下面 2–5 步，交给主 agent 的见 §6.1。
 2. 组装系统提示（`--append-system-prompt` 或前缀，不写进工作区，避免共用仓库的群互相串）：
    - 群公告（按 revision 缓存，变了才重新拉取）；
    - 群记忆；
    - 进行中的监控摘要和 `[[watch]]` 用法（可用 `WHISPER_WATCH_HINT=0` 关掉）；
-   - 附件发送用法（`[[image]]` / `[[file]]`）。
+   - 附件发送用法（`[[image]]` / `[[file]]`）；
+   - 转交团队的用法（`[[task]]`，可用 `WHISPER_TASK_HINT=0` 关掉）。
 3. 在该群绑定的工作区里运行 CLI，流式更新回复卡片；超时由 `AGENT_STALL_MS`（默认 45 分钟无输出）和 `AGENT_MAX_MS` 控制。
 4. 后处理回复：抽出 `[[...]]` 行交给对应模块，余下文本发回群里；长回复、表格多的回复发一条 post，卡片改成提示"见下方"，避免重复。
 5. 记录到最近对话（`state/recent-turns.json`，每群最多 10 轮），供 orc 主 agent 读取。
+
+### 2.1 消息分派：单 agent 还是主 agent
+
+用户不需要知道有两种 agent，也不需要命令。每条消息先由 `src/orc/route.ts` 的规则判断（纯代码，不调模型、没有延迟），两边都能纠正误判，所以规则只需要在常见情况下对：
+
+- **主 agent → 单 agent**：主 agent 判断其实只是普通问答、讨论、一轮能做完的事时，用 `chat` 动作把消息原样交给单 agent。
+- **单 agent → 团队**：单 agent 判断一件事需要团队时，在回复里写一行 `[[task]] {"goal":…,"preset":"loop","criteria":[…],"constraints":[…]}`，代码提交任务、发进展卡片（这一行不显示给人）。
+
+分派顺序（命中即停）：
+
+| # | 条件 | 去向 |
+|---|---|---|
+| 1 | 本群是编排模式（orc） | 主 agent |
+| 2 | 在任务卡片的回复串里说话 | 主 agent |
+| 3 | 有监督循环任务在等人回答，且消息较短（≤40 字）、像是在调整任务、点名了任务或说到"任务 / 执行者"等 | 主 agent |
+| 4 | 主 agent 有待确认的提议，且消息只是"好 / 确认 / 算了 / 就这么改"之类 | 主 agent |
+| 5 | 本群是单 agent 模式（single） | 单 agent |
+| 6 | 要切换模式（"切到编排模式""回到单聊模式""退出团队模式"） | 主 agent |
+| 7 | 消息带图片 / 文件（主 agent 看不到附件） | 单 agent |
+| 8 | 命中"要团队"关键词 | 主 agent |
+| 9 | 本群有进行中的任务（或 24 小时内失败 / 卡住的），且消息点名了任务（`#12`、"12 号那个"、标题里连续 4 个字），或是在调整任务（"先别 / 停一下 / 再试 / 放弃 / 换成 / 进展 / 刷屏"等，短消息或带"任务 / 执行者"字样） | 主 agent |
+| 10 | 其他 | 单 agent |
+
+"要团队"关键词（参考，完整正则见 `TEAM_PATTERNS`）：
+
+| 类别 | 例子 |
+|---|---|
+| 交给团队 | 交给团队、让团队、团队来做、派个团队 |
+| 多 agent | 多 agent、多个模型一起、多智能体、分工协作 |
+| 编排 / 监督 | 编排、监督循环、监督者 |
+| 开任务 | 开个任务、建个后台任务、提交任务 |
+| 换模型评审 | 交叉评审、换个模型再审一遍、两个模型分别看 |
+| 迭代到达标 | 一直调参直到 loss 低于 0.3、反复修直到测试全部通过为止、自动迭代、帮我盯着跑 |
+
+刻意**不**算团队信号的：普通的"修一下 / 跑一下测试 / 改成异步"（单 agent 一轮能做）、"后台跑训练、跑完叫我"（单 agent 用 `[[watch]]`）、"记住…"（单 agent 用 `[[remember]]`）。
+
+本群模式（一般不用改；说"回到单聊模式""以后都走团队"也能切）：
+
+| 模式 | 行为 |
+|---|---|
+| `auto`（默认） | 按上表分派 |
+| `single` | 只用单 agent；第 2–4 条（回复串、待回答的问题、待确认的提议）仍交给主 agent |
+| `orc` | 每条消息都先经过主 agent，要动手的事都交给团队 |
+
+离线用例在 `scripts/route_check.ts`（53 条）；主 agent 在 auto 模式下把误分派的消息交回、切换模式的能力在 `scripts/orc_lead_check.ts`（真实模型）里验证。
 
 ## 3. 群级上下文：谁读、谁写
 
@@ -95,8 +142,8 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 ### 6.1 入口与主 agent
 
-- `/mode orc [组合]` 切到 orc 模式；`/task <目标>` 在任何模式下都能直接提交；`/tasks` 列任务；`/orc` 看或改本群的编排。
-- orc 模式下每条消息交给主 agent（lead）：只读、短超时、每次新会话，可用 `ORC_LEAD_MODEL` 换便宜模型。上下文是：最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。
+- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，可用 `ORC_LEAD_MODEL` 换便宜模型。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。
+- 兜底命令（用户一般不用）：`/mode auto|single|orc [组合]`、`/task <目标>`、`/task <id>`、`/task stop|retry|attach <id> …`、`/tasks`、`/orc`、`/orc preset <名> | reset | confirm | cancel`。bot 自己的提示文案只教自然语言（"回复「确认」""说「再试一次」"），不再教命令。
 - 主 agent 只输出一个动作，由代码执行：
 
 | 动作 | 作用 |
@@ -110,8 +157,10 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `confirm` / `cancel` | 确认或放弃待确认的提议 |
 | `announce` | 追加群公告，需确认 |
 | `remember` / `forget` | 改群记忆 |
+| `mode {auto\|single\|orc}` | 切换本群的分派方式 |
+| `chat` | 不是团队的事，把消息原样交给单 agent |
 
-所以无论换模型、改记忆、调方向还是回答问题，人都只需要在群里用自然语言说。
+所以无论交给团队、换模型、改记忆、调方向还是回答问题，人都只需要在群里用自然语言说。
 
 ### 6.2 预制组合与角色
 
@@ -219,6 +268,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `CHAT_MEMORY_DIR` / `RECENT_TURNS_PATH` | `state/…` | 群记忆 / 最近对话位置 |
 | `ORC_HOME` / `ORC_CHATS_PATH` | `~/.orc` / `state/orc-chats.json` | orc 数据 / 群编排配置 |
 | `ORC_LEAD_MODEL` / `ORC_LEAD_HARD_MS` / `ORC_LEAD_STALE_MS` | — | 主 agent 模型与超时 |
+| `WHISPER_TASK_HINT` | 开 | 设为 `0` 不向单 agent 注入 `[[task]]` 用法 |
 | `ORC_LOOP_CONCURRENCY` | 3 | 同时进行的监督循环轮次 |
 | `ORC_LOOP_ASK_TIMEOUT_MS` | 4 小时 | 非不可逆问题的默认回答时限 |
 | `ORC_LOOP_WORKER_TURNS` | 15 | worker 续接多少轮后换新会话 |
@@ -231,7 +281,8 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `orc_check.ts` / `orc_extras_check.ts` | 离线 | 流水线解析、状态机、假执行器端到端、崩溃恢复 |
 | `orc_loop_check.ts` | 离线 | 监督循环：各项把关、完成门禁、引用核对、不可逆批准、换角色、长作业等待、守卫、崩溃恢复 |
 | `runner_wiring_check.ts` / `memory_check.ts` / `watch_check.ts` / `outgoing_check.ts` | 离线 | 路由接线、记忆、监控、附件 |
-| `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（16 条） |
+| `route_check.ts` | 离线 | 消息分派规则（53 条）、`[[task]]` 解析 |
+| `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（22 条，含 auto 模式下交回单 agent、切换模式） |
 | `outgoing_agent_check.ts` | 真实模型 | agent 是否按 `[[image]]` / `[[file]]` 协议发图、发文件 |
 | `announce_check.ts` / `memory_live_check.ts` / `watch_live_check.ts` / `outgoing_live_check.ts` | 真实飞书 | 临时建群验证后解散 |
 

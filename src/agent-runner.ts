@@ -56,8 +56,9 @@ import {
 import { getProjects, loadProjects, routePrompt, watchProjects } from "./projects";
 import { getChatInstructions } from "./announcement";
 import { applyMemoryOps, chatOf, extractMemoryOps, formatMemory, joinInstructions, memoryCommand } from "./memory";
-import { handleOrcCommand, runLeadTurn, type OrcChatHost } from "./orc/commands";
-import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, stopChatTasks, taskForCard } from "./orc/chat";
+import { handleOrcCommand, runLeadTurn, submitTaskOp, type OrcChatHost } from "./orc/commands";
+import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, routeContext, stopChatTasks, taskForCard } from "./orc/chat";
+import { extractTaskOps, formatTaskHint, routeMessage } from "./orc/route";
 import { flushRecent, recordTurn } from "./recent";
 import { extractSendOps, formatSendHint, resolveOutgoing, sendRoots } from "./outgoing";
 import {
@@ -410,9 +411,18 @@ export class AgentRunner {
     const handled = await this.handleCommand(ev);
     if (handled) return;
 
-    // orc mode: the lead agent picks an action, orc executes it (docs/orc/002 §2)
-    if (getProfile(ev.chatId).mode === "orc") {
-      await runLeadTurn(this.orcHost(), ev);
+    // single agent or the orc lead agent? code-only routing per message (src/orc/route.ts);
+    // a wrong guess is recoverable: the lead can hand back (`chat`), the single agent can escalate (`[[task]]`)
+    const profile = getProfile(ev.chatId);
+    const route = routeMessage(ev.text || "", {
+      mode: profile.mode,
+      inThread: !!(ev.rootId && taskForCard(ev.rootId)),
+      hasAttachments: ev.attachments.length > 0,
+      ...routeContext(ev.chatId),
+    });
+    if (route.to === "lead") {
+      console.log(`[${this.label}] route ${ev.chatId.slice(0, 10)} → lead (${route.why})`);
+      await runLeadTurn(this.orcHost(), ev, route.why);
       return;
     }
 
@@ -681,21 +691,24 @@ export class AgentRunner {
       await feishu.sendMarkdown(chatId, [
         `**${this.config.name}** | \`${this.config.aiCli}\` → \`${this.config.platform}\``,
         "",
-        "**Commands:**",
+        "**直接说话就行**，例如：",
+        "• 「画一下 loss 曲线发群里」「把报告整理成 html 发我」",
+        "• 「后台跑这个训练，跑完或出错叫我」",
+        "• 「记住：GPU 机器只有 2 张卡」",
+        "• 「这个交给团队做，测试全过为止」「让两个模型交叉评审一下」",
+        "• 「#12 到哪了」「先别推」「执行者换成 claude」「别每轮都刷屏」",
+        "普通对话由单 agent 处理；要团队做的事、说到进行中的任务时自动交给主 agent。",
+        "",
+        "**兜底命令：**",
+        "• `/stop`（`/cancel` `/停止`）— 立即终止当前运行（含本群团队任务）",
         "• `/reset` — 重置会话 + 清零累计 token",
         "• `/model [id]` — 查看/切换模型（`/model default` 恢复默认）",
         "• `/new [name]` — 创建新飞书群 = 全新独立会话",
-        "• `/review [焦点]` — 审视上一轮回复（别名 `/审视` `/critique`）",
-        "• `/mode [single|orc [组合]]` — 切换单 agent / 多 agent 编排（主 agent 分派）",
-        "• `/task <目标>` — 交给多 agent 编排；`/tasks` 列表；`/orc` 查看/切换编排",
-        "• `/记住 <内容>` · `/记忆 [forget <编号> | clear]` — 本群记忆（也可直接说「记住…」）",
-        "• `/watch [stop|check <编号>]` — 长任务监控（让 agent「后台跑训练，跑完/出错叫我」即可登记）",
-        "• `/stop` (或 `/cancel` `/停止`) — 终止当前运行的任务",
-        "• `/status` — 查看当前状态 + 机器资源",
-        "• `/help` — 显示此帮助",
+        "• `/review [焦点]` — 审视上一轮回复",
+        "• `/status` — 当前状态 + 机器资源",
+        "• `/mode [auto|single|orc]` — 消息怎么分派（默认 auto，一般不用改）",
+        "• `/tasks` `/watch` `/记忆` — 查看团队任务 / 监控 / 本群记忆",
         ...extra,
-        "",
-        "其余消息自动转发给 AI CLI 执行。",
       ].join("\n"));
       return true;
     }
@@ -978,6 +991,16 @@ export class AgentRunner {
       recordTurn(chatId, "agent", result.text || "");
     }
 
+    // `[[task]] {...}` lines → hand the work to an orc team (src/orc/route.ts)
+    const taskNotes: string[] = [];
+    if (!isReview) {
+      const tops = extractTaskOps(result.text || "");
+      if (tops.ops.length) {
+        result = { ...result, text: tops.text };
+        for (const op of tops.ops) taskNotes.push(await submitTaskOp(this.orcHost(), chatId, op, ev.text));
+      }
+    }
+
     // `[[image]]` / `[[file]]` lines (+ bare image paths) → attachments sent by code (src/outgoing.ts)
     const sendOps = extractSendOps(result.text || "");
     if (sendOps.ops.length) result = { ...result, text: sendOps.text };
@@ -1005,6 +1028,7 @@ export class AgentRunner {
     }
     if (memoryFooter) body += `\n\n${memoryFooter}`;
     if (watchNotes.length) body += `\n\n${watchNotes.join("\n")}`;
+    if (taskNotes.length) body += `\n\n${taskNotes.join("\n")}`;
     if (outgoing.notes.length) body += `\n\n${outgoing.notes.join("\n")}`;
 
     // Cards reject some markdown (e.g. too many tables → ErrCode 11310) and truncate
@@ -1064,6 +1088,7 @@ export class AgentRunner {
         this.clearAiKey(sessionKey);
         return res.text;
       },
+      runSingle: (ev) => this.runAiAndReply(ev),
     };
     return this._orcHost;
   }
@@ -1100,6 +1125,7 @@ export class AgentRunner {
       chat.startsWith("oc_") ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
       memoryMode === "rw" && process.env.WHISPER_WATCH_HINT !== "0" ? formatWatchContext(chat) : undefined,
       memoryMode === "rw" ? formatSendHint() : undefined,
+      memoryMode === "rw" && chat.startsWith("oc_") && process.env.WHISPER_TASK_HINT !== "0" ? formatTaskHint() : undefined,
     );
     // CLIs without an append-system-prompt flag get it as a prompt prefix
     const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;

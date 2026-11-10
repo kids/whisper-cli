@@ -16,9 +16,9 @@ Key Features:
 
 ⏱ Long-job watches: training / batch jobs run in the background; code checks process, logs and metrics on a timer and wakes the agent when done or failed — zero tokens while waiting.
 
-📎 Attachments both ways: images/files posted in the chat are downloaded into the workspace; the agent writes `[[image]] path` / `[[file]] path` in its reply to send images, html, md, pdf … back (only from the workspace / tmp; `.env` and key files are never sent).
+📎 Attachments both ways: images/files posted in the chat are downloaded into the workspace; say "plot it and post it here" or "send me the report as html" and the agent sends images, html, md, pdf … back (only from the workspace / tmp; `.env` and key files are never sent).
 
-🧭 Multi-agent orchestration (orc): preset pipelines (dev, fix, research, review-only) and a supervisor loop — a supervisor picks the next step each round while code enforces the finish gate, irreversible-action approval and budgets; you can steer it in plain words at any time (add requirements, answer its questions, switch models).
+🧭 Multi-agent teams (orc): say "hand this to the team, until all tests pass" and a team takes over — preset pipelines (dev, fix, research, review-only) or a supervisor loop, with code enforcing the finish gate, irreversible-action approval and budgets; steer it in plain words at any time (add requirements, answer its questions, switch models). Ordinary chat stays with the single agent; routing is automatic.
 
 Merged from feishu-cursor:
 
@@ -148,38 +148,43 @@ sudo systemctl enable --now whisper-cli
 > The service runs the code in its working directory; after updating, `systemctl restart <service>`.
 
 ### 4. Usage
-Send messages in the Feishu bot chat — all configured agent groups run simultaneously.
+Just talk in the Feishu group — all configured agent groups run simultaneously. No commands to learn:
 
-**Commands:**
+| You say | What happens |
+|---------|--------------|
+| "what's the difference between token bucket and leaky bucket", "fix the error on app.ts line 30" | the single agent answers or edits |
+| "plot the loss curve and post it here", "send me the report as html" | the agent creates the file and posts it |
+| "run this training in the background, ping me when done or failed" | a watch is registered; zero tokens while waiting |
+| "remember: the GPU box only has 2 cards" | stored in this group's memory, included every turn |
+| "from now on, start every reply with a one-line conclusion" | proposed as a group-announcement rule; applied after you say "confirm" |
+| "hand this to the team, until all tests pass", "have two models cross-review it" | a multi-agent team takes it; a task card appears |
+| "how's #12 going", "use redis for the rate limiter", "don't push yet", "switch the worker to claude", "stop posting every round" | the lead agent adjusts the running task |
+| "back to single-agent mode", "always use the team from now on" | changes how this group routes messages |
+
+**Who handles a message:** by default code-only rules decide per message (no extra model call, no latency):
+- asks for a team / iterating until a target is met / cross-model review / a mode switch → lead agent;
+- mentions a running task (id, words from its title), asks for progress, stops, retries, switches models → lead agent;
+- a short reply while a task waits for your answer or the lead waits for your confirmation → lead agent;
+- replies in a task card's thread → lead agent;
+- everything else, and messages with attachments → single agent.
+
+Wrong guesses recover on their own: the lead hands plain questions back to the single agent, and the single agent hands work to a team when it needs one (e.g. iterating until tests pass). The keyword rules are Chinese-first (see `src/orc/route.ts`).
+
+**Fallback commands** (rarely needed):
 
 | Command | Description |
 |---------|-------------|
-| `/help` | Show all commands |
+| `/stop` `/cancel` | Stop the current run immediately (bypasses the queue; includes this group's team tasks) |
 | `/reset` | Reset session + clear cumulative tokens |
-| `/model` | List available models |
-| `/model <id>` | Switch model (`/model default` to reset) |
+| `/model [id]` | List / switch models (`/model default` to reset) |
 | `/new [name]` | Create a new Feishu group = fresh session (non-admin mode) |
-| `/记住 <text>` `/记忆` | Per-chat memory (or just tell the agent "remember …"); `/记忆 forget <n>` to delete |
-| `/watch [stop\|check <id>]` | Monitors for long-running jobs (ask the agent to "run it in the background and wake me when done") |
-| `/stop` `/cancel` | Stop the current running task |
 | `/review [focus]` | Critique the previous bot reply |
-| `/status` `/sys` | Agent status (CLI, model, workspace) + host resources (CPU/mem/GPU/disk) |
+| `/status` `/sys` | Agent status (CLI, model, workspace) + host resources |
+| `/help` | Help |
 
-**Multi-agent orchestration (orc):**
+Other commands (`/mode`, `/task`, `/tasks`, `/orc`, `/watch`, `/记忆` …) still work; full list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-| Command | Description |
-|---------|-------------|
-| `/mode single` / `/mode orc [preset]` | Single agent, or orc mode where a lead agent dispatches every message |
-| `/task <goal>` | Submit an orc task from any mode |
-| `/tasks`, `/task <id>` | List this chat's tasks / show one |
-| `/task stop\|retry\|attach <id> …` | Stop / retry / add requirements |
-| `/orc`, `/orc preset <name>`, `/orc reset` | Show / switch / reset this chat's orchestration |
-| `/orc confirm` / `/orc cancel` | Apply or drop the lead agent's proposed change |
-
-- Presets: `dev` (plan → implement ⇄ review → test), `fix` (reproduce → fix → regression → review), `research` (research → critique → summary), `review` (two models review, no changes), `loop` (supervisor loop). Defined in `orc/presets/`, roles in `orc/roles/`.
-- orc tasks need the workspace to be a git repo: each task works on its own worktree and branch, your main branch is untouched.
-- In orc mode most things can be said in plain words ("switch that tuning task to claude", "don't push yet", "stop posting every round"); replies in a task card's thread go to that task.
-- The supervisor loop asks you when needed (e.g. whether to push); irreversible actions only run after your explicit approval.
+Team tasks need the workspace to be a git repo: each task works on its own worktree and branch, your main branch is untouched; irreversible actions (push, deploy …) only run after your explicit approval.
 
 **Admin mode (`ADMIN_MODE=true`, on by default for Cursor):**
 
@@ -199,7 +204,7 @@ In work groups just send natural language; `project:instruction` routing via `pr
 - 💾 **Session persistence** — survives restarts (stored in `state/state_<N>.json`)
 - 📊 **Token tracking** — per-turn + cumulative token usage in every reply
 - 🗂 **Multi-workspace** — `projects.json` routing + optional system prompt file
-- 📎 **Attachments** — user images/files downloaded; agent sends images/files back with `[[image]]` / `[[file]]`
+- 📎 **Attachments** — user images/files are downloaded; images/files the agent produces are posted back
 
 ### Helper scripts
 
