@@ -20,7 +20,9 @@
 
 🔍 `/review`：以 reviewer 视角审视上一轮回复（别名 `/审视` `/critique`）
 
-📎 附件：群内发图片/文件自动下载到工作区；Agent 产出的图片/文件自动回传
+📎 附件：群内发图片/文件自动下载到工作区；Agent 在回复里写 `[[image]] 路径` / `[[file]] 路径` 即可把图片、html、md 等发回群里
+
+整体设计（群公告、群记忆、长任务监控、附件发送、orc 流水线与监督循环）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ---
 

@@ -1,0 +1,250 @@
+# whisper-cli 整体设计
+
+> 更新：2026-11-10　对应代码：`main`（18edcfc 之后）
+>
+> 本文是**当前实现**的总览，以它为准。历史设计和选型理由见 [orc/001](orc/001-selection-and-architecture.md)（调度层选型）、[orc/002](orc/002-chat-integration.md)（群模式、群公告、预制组合）；两者写于监督循环、附件发送之前，部分内容已被本文取代。
+> `docs/orc/architecture.html` 是讨论用的图文版，不入库。
+
+## 0. 定位
+
+把飞书群（企微待接）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi），把回复发回群里。在此之上提供：
+
+- **群级上下文**：群公告当指令、群记忆、最近对话，按群隔离，CLI 无关。
+- **长任务监控**：后台训练等作业由代码定时探测，不占 CLI 进程、不耗 token。
+- **附件发送**：agent 在回复里声明要发的图片 / 文件，由代码上传发送。
+- **orc 编排**：多 agent 流水线，以及"监督者 + 执行者"的监督循环。
+
+贯穿全局的三条原则：
+
+1. **LLM 提议，代码裁决。** 模型只输出结构化的意图（回复里的 `[[...]]` 行、主 agent 的动作 JSON、监督者的动作 JSON），是否执行、怎么执行由代码决定；预算、门禁、不可逆操作确认模型绕不过去。
+2. **凭证不进提示词。** agent 不直接调 IM 接口，不拿 token 或 chat_id；发消息、发附件、建监控都由 bot 进程代办。
+3. **IM 只负责投递，状态在本地。** 长连接只用来收消息，发送走 HTTP；任务、账本、监控都持久化，进程重启后继续。
+
+## 1. 分层
+
+```
+入口层   飞书 WS 收事件 / HTTP 发消息、卡片、附件（src/platform/feishu.ts）   企微：未实现
+          │
+路由层   AgentRunner（src/agent-runner.ts）：一个 bot 一个实例
+          ├─ 斜杠命令：/help /reset /model /new /status /记住 /记忆 /watch /mode /orc /task /tasks /stop
+          ├─ 单 agent 模式 → 直接跑 CLI
+          └─ orc 模式，或在任务卡片的回复串里说话 → 主 agent（lead）选动作
+          │
+上下文层 群公告（announcement.ts）· 群记忆（memory.ts）· 最近对话（recent.ts）· 监控 / 发送提示
+          │
+执行层   各 CLI 适配（src/ai/*.ts）：每轮一个子进程，-p 模式，可续接会话
+          │
+后处理   回复里的 [[remember]] / [[forget]] / [[watch]] / [[unwatch]] / [[image]] / [[file]] 行
+          → 由代码执行并从回复中去掉
+          │
+编排层   orc（src/orc/*）：流水线引擎（core.ts）+ 监督循环引擎（loop.ts）+ 调度器（scheduler.ts）
+          │
+持久层   state/*.json · ~/.orc/orc.db（SQLite）· ~/.orc/worktrees · ~/.orc/tasks/<id>/
+```
+
+## 2. 一条消息的路径（单 agent 模式）
+
+1. 飞书事件进入 `AgentRunner`，按群串行排队；`/stop` 绕过队列直接终止当前运行。
+2. 组装系统提示（`--append-system-prompt` 或前缀，不写进工作区，避免共用仓库的群互相串）：
+   - 群公告（按 revision 缓存，变了才重新拉取）；
+   - 群记忆；
+   - 进行中的监控摘要和 `[[watch]]` 用法（可用 `WHISPER_WATCH_HINT=0` 关掉）；
+   - 附件发送用法（`[[image]]` / `[[file]]`）。
+3. 在该群绑定的工作区里运行 CLI，流式更新回复卡片；超时由 `AGENT_STALL_MS`（默认 45 分钟无输出）和 `AGENT_MAX_MS` 控制。
+4. 后处理回复：抽出 `[[...]]` 行交给对应模块，余下文本发回群里；长回复、表格多的回复发一条 post，卡片改成提示"见下方"，避免重复。
+5. 记录到最近对话（`state/recent-turns.json`，每群最多 10 轮），供 orc 主 agent 读取。
+
+## 3. 群级上下文：谁读、谁写
+
+| 内容 | 存储 | 谁读 | 谁写 |
+|---|---|---|---|
+| 群公告（本群的长期指令） | 飞书群公告（docx） | 每轮注入所有 agent（单 agent、主 agent、orc 各角色） | 人直接改；主 agent 的 `announce` 动作需人确认后追加，带版本校验 |
+| 群记忆（事实、偏好） | `state/chat-memory/`（`CHAT_MEMORY_DIR`），每群 ≤60 条 | 每轮注入 | `/记住`、`/记忆 forget/clear`；单 agent 回复里的 `[[remember]]` / `[[forget]]`；主 agent 的 `remember` / `forget`。orc 的 worker 只读 |
+| 最近对话 | `state/recent-turns.json` | orc 主 agent（每条消息都是新会话，只靠它接上下文） | 单 agent 和主 agent 每轮自动记录 |
+
+不用 CodeBuddy 自带的 Auto Memory：它按 cwd 区分，共用仓库的群会串，orc 的 worktree 会把它打散，其他 CLI 也看不到。
+
+## 4. 长任务监控（`src/watch.ts`）
+
+一次 CLI 运行有时长上限，不能干等几个小时的训练。做法是 agent 把作业放后台、登记监控、结束本轮；之后由代码定时探测。
+
+- 登记：单 agent 回复里写 `[[watch]] {"title":…,"pid":…,"log":…,"done":…,"wake_on":[…],"stale":"30m","metrics":{…},"file":…,"cmd":…,"every":"10m","timeout":"2d","on_wake":"…"}`；取消用 `[[unwatch]] <编号>`；人用 `/watch`。
+- 探测类型：进程存活、日志尾正则（完成标记、报错）、日志多久没更新、指标文件、产物文件、自定义只读命令。每 `WATCH_TICK_MS`（默认 15 秒）扫描到期项，单项最短间隔 30 秒。
+- 进展只更新监控卡片，不刷屏；条件满足、出错或超时时发一条通知，有 `on_wake` 就唤醒 agent 接着处理。
+- 状态存 `state/watches.json`，重启后接着探测。
+- orc 监督循环的 `wait` 动作复用同一套监控（`sessionKey = orc-loop:<taskId>`），触发后交回该任务的账本，而不是唤醒群里的 agent。
+
+## 5. 附件发送（`src/outgoing.ts`）
+
+agent 先把图片或报告存成本地文件，再在回复里单独占一行：
+
+```
+[[image]] /abs/path/loss.png
+[[file]]  /abs/path/report.html
+```
+
+- 由 `AgentRunner` 统一解析，对所有 CLI 生效（中文别名 `[[图片]]` / `[[文件]]` 也认），代码块里的行不算；这些行从回复中去掉。
+- 相对路径按当前工作区解析。只允许发送工作区、项目目录、bot 工作目录、`/tmp` 和 `WHISPER_SEND_ROOTS` 下的文件；会先解析软链再判断。
+- `.env`、私钥、证书、`.ssh` / `.git` 等目录里的文件一律拒发。
+- 图片 ≤10MB，超了或不是图片格式就按文件发送；其他文件 ≤30MB；每条回复最多 10 个。
+- 发不出去时在回复末尾说明原因。
+- 兜底：回复里直接出现的图片绝对路径仍会静默发送；其他类型的裸路径**不会**再自动上传（以前会，有泄露风险）。
+- 平台层只需实现 `sendAgentImages` / `sendAgentFiles`，飞书已实现（先上传拿 key 再发消息），企微接入时实现同样两个方法即可。
+
+## 6. orc 编排
+
+### 6.1 入口与主 agent
+
+- `/mode orc [组合]` 切到 orc 模式；`/task <目标>` 在任何模式下都能直接提交；`/tasks` 列任务；`/orc` 看或改本群的编排。
+- orc 模式下每条消息交给主 agent（lead）：只读、短超时、每次新会话，可用 `ORC_LEAD_MODEL` 换便宜模型。上下文是：最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。
+- 主 agent 只输出一个动作，由代码执行：
+
+| 动作 | 作用 |
+|---|---|
+| `reply` | 直接回答 |
+| `submit {goal, preset?, criteria?, constraints?}` | 提交任务；人的原话一起存下，供后续引用核对 |
+| `attach {task, text, urgent?}` | 给进行中的任务补充要求；`urgent` 会打断正在干活的 worker |
+| `answer {task, option?, text?}` | 回答监督循环提出的问题 |
+| `status` / `stop` / `retry {note?}` | 查询、终止、重试 |
+| `config {patch, task?, verbosity?}` | 不带 task：改本群以后的编排，需确认。带 task：对进行中的监督循环任务立即生效（换角色的 CLI / 模型、调播报档位） |
+| `confirm` / `cancel` | 确认或放弃待确认的提议 |
+| `announce` | 追加群公告，需确认 |
+| `remember` / `forget` | 改群记忆 |
+
+所以无论换模型、改记忆、调方向还是回答问题，人都只需要在群里用自然语言说。
+
+### 6.2 预制组合与角色
+
+编排不现场生成，从 `orc/presets/*.yaml` 选，角色定义在 `orc/roles/*.md`（frontmatter 写 CLI、输出类型、隔离方式、超时，正文是角色提示词）。群可以在组合基础上改角色的 CLI / 模型。
+
+| 组合 | 形态 | 内容 |
+|---|---|---|
+| `dev` | 流水线 | 规划 →（可选）设计评审 → 实现 ⇄ 评审 → 独立测试 |
+| `fix` | 流水线 | 写失败用例复现 → 修复 → 回归测试 → 评审 |
+| `research` | 流水线 | 调研 → 对抗式审视 → 汇总 |
+| `review` | 流水线 | 两个不同模型各审一遍 → 汇总，只审不改 |
+| `loop` | 监督循环 | 监督者 supervisor ⇄ 执行者 implementer，审查者 critic |
+
+| 角色 | 默认 CLI | 输出 | 隔离 |
+|---|---|---|---|
+| planner / researcher / synthesizer | codebuddy | plan / report | 只读 |
+| implementer / reproducer | codebuddy | impl | worktree 可写（implementer 续接会话） |
+| critic | codex | verdict | 只读 |
+| critic_alt | codebuddy | verdict | 只读 |
+| tester | codebuddy | test | 每次新开 |
+| supervisor | codebuddy | action | 只读 |
+
+通用机制：每个任务一个 git worktree 和分支，写入角色每轮自动提交；只读角色越权写入会被回滚；角色并发名额限制；所有副作用（启动、通知、轮次）都是持久化 effect，崩溃恢复后重放。
+
+### 6.3 流水线（`core.ts`）
+
+纯状态机：按组合里的阶段顺序跑，评审或测试不通过就按 `on_fail` 退回，次数受 `max_loops` 限制；支持可选阶段（群里按需启用）、只给意见不阻塞的阶段（advisory），以及规划者把任务拆成子任务（子任务全部结束后父任务再收尾）。适合目标清晰、能一次验收的任务。
+
+### 6.4 监督循环（`ledger.ts` + `loop.ts`）
+
+适合需要反复试错、长时间实验、或目标会随讨论调整的任务。监督者替代"人盯着长会话"：看进展、调方向、纠错、追问。
+
+**每一轮**：调度器取出一个持久化的 `loop` effect（同一任务的轮次不重叠，全局并发 `ORC_LOOP_CONCURRENCY`，默认 3）→ 从账本重建上下文 → 监督者在**新的只读会话**里提出一个动作 → 代码校验 → 执行 → 结果写回账本 → 排下一轮。进程崩溃时这一轮会带 `recover` 标记重跑，监督者会被提示先核实再重复操作。
+
+**账本**（SQLite `ledgers` 表，每轮记录在 `loop_steps`）：
+
+- 目标、验收标准 `C1…`、约束 `K1…`（带版本号）、计划、关键决定；
+- 证据 `E1…`：每条记录采集时的代码版本（sha）；
+- 观察记录、人的消息队列（inbox）、人的原话记录（用于核对引用）、已获批准的不可逆操作、待回答的问题；
+- worker 会话（epoch、已续接轮数）、预算、守卫计数、等待中的监控。
+
+**动作集与代码把关**：
+
+| 动作 | 作用 | 代码把关 |
+|---|---|---|
+| `instruct {text, fresh?}` | 给 worker 下指令，默认续接会话；约束和验收标准由代码附上 | 含不可逆操作（push、部署、删库等，前面有"不要"等否定词的不算）时，必须先有人批准，一次批准只放行一次 |
+| `verify {checks}` | 代码直接跑只读检查命令，结果成为证据 | 必须是只读命令；最多 8 条；单条超时 ≤1800 秒（默认 10 分钟） |
+| `report {progress, …}` | 给人看的进展和建议，不阻塞 | 不能连续两轮都是 report |
+| `update_constraints {changes, reason, source, quote?}` | 改约束或验收标准 | 收紧可以直接改；修改、删除必须 `source=human`，并原样引用人说过的话（代码核对原话记录） |
+| `review {focus?}` | 让审查者看当前改动，结论成为证据 | 需要配置了审查者 |
+| `wait {watch, heartbeat?, keep?}` | 挂起等外部作业，复用监控模块 | 需要绑定群；监控规格按 `/watch` 规则校验；心跳最短 10 分钟 |
+| `ask {question, why, options, default}` | 问人 | `why` 只能是 irreversible / high_cost / goal_ambiguous。irreversible 必须有一个 `go` 选项且它不能是默认，超时也不自动执行；其他问题 4 小时（`ORC_LOOP_ASK_TIMEOUT_MS`）没回复按默认继续 |
+| `finish {summary, acceptance}` | 完成 | 每条验收标准都要对应一条**在当前代码版本上采集并通过**的证据；代码改过之后旧证据作废；`require_review` 时还要有通过的审查 |
+| `abort {reason, tried, blockers, unmet}` | 放弃 | 字段必填，`unmet` 必须是已有的验收标准 |
+
+被拒的提议不会执行，拒绝理由写进下一轮的上下文。
+
+**守卫**（触发后转成问人，默认选项多为"停下"）：
+
+- 原地打转：连续 4 轮进展没有变化；
+- 同一个错误出现 3 次时提示监督者，5 次时问人；
+- 连续 3 次提议无效；
+- 预算：轮数、worker 运行次数、活跃时长（默认 60 / 25 / 8 小时），用到 80% 时提醒，用完问人是否追加；
+- 基础设施连续出错时退避重试，第 3 次转为 blocked。
+
+**worker**：续接同一个会话，超过 `ORC_LOOP_WORKER_TURNS`（默认 15）轮，或人换了 CLI / 模型时开新会话，并附上交接摘要。提示词要求长作业用 `setsid nohup` 放后台，并在输出里报告 `job{pid, log}`，供监督者接着用 `wait`。
+
+**等待长作业**：`wait` 期间不跑任何轮次、不耗 token。监控触发后结果作为证据写入账本并唤醒任务；期间人发的消息会唤醒一轮，监督者可以 `wait {keep:true}` 继续等。
+
+**人在运行中介入**：
+
+- 人的消息先进 inbox，下一轮交给监督者；`urgent` 会打断正在跑的 worker。
+- 监督者在问问题时，人的回复直接作为回答；选了 irreversible 的 `go` 选项才记为批准。
+- 换角色、调播报档位立即生效，并作为观察记录告诉监督者。
+- 外部写入（人的消息、监控触发、角色调整）只追加到账本的队列里，`commit()` 在事务中合并，不会和正在进行的一轮互相覆盖。
+
+**群里怎么看**：每个任务一张主卡片，原地更新（状态、进展、验收标准、预算、待回答的问题）；每一轮的"主 → 子"往来发在卡片的回复串里。播报分三档：quiet（只发汇报、提问和结果）/ normal（每轮一条摘要，默认）/ verbose（附指令原文和监督者分析）。
+
+### 6.5 产物与恢复
+
+- `~/.orc/orc.db`（`ORC_HOME`）：`tasks` / `attempts` / `effects` / `ledgers` / `loop_steps`。
+- `~/.orc/worktrees/`：每个任务的工作区；`~/.orc/tasks/<id>/`：每轮的提示词和输出（监督循环为 `loop-<n>-<role>.prompt.md` / `.output.md`）。
+- 启动时把运行中的 effect 重置为待执行（标记 recover），未完成的任务接着推进。
+
+## 7. 状态文件
+
+| 文件 | 内容 |
+|---|---|
+| `state/state_<N>.json` | 每个 bot 的会话、模型、token 累计 |
+| `state/chat-memory/` | 群记忆 |
+| `state/recent-turns.json` | 最近对话 |
+| `state/watches.json` | 监控 |
+| `state/orc-chats.json` | 每群的模式、编排、待确认提议 |
+| `~/.orc/` | orc 数据库、worktree、每轮产物、卡片映射（`cards.json`） |
+| `.tasks.json` | 管理群的工作组 ↔ 会话（沿用 feishu-cursor） |
+
+## 8. 主要环境变量
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `AGENT_STALL_MS` / `AGENT_MAX_MS` | 45 分钟 / 不限 | CLI 无输出超时 / 总时长上限 |
+| `WHISPER_WATCH_HINT` | 开 | 设为 `0` 不注入监控用法 |
+| `WHISPER_SEND_ROOTS` | 空 | 额外允许发送附件的目录，冒号分隔 |
+| `WATCH_TICK_MS` / `WATCHES_PATH` | 15 秒 / `state/watches.json` | 监控扫描间隔 / 存储位置 |
+| `CHAT_MEMORY_DIR` / `RECENT_TURNS_PATH` | `state/…` | 群记忆 / 最近对话位置 |
+| `ORC_HOME` / `ORC_CHATS_PATH` | `~/.orc` / `state/orc-chats.json` | orc 数据 / 群编排配置 |
+| `ORC_LEAD_MODEL` / `ORC_LEAD_HARD_MS` / `ORC_LEAD_STALE_MS` | — | 主 agent 模型与超时 |
+| `ORC_LOOP_CONCURRENCY` | 3 | 同时进行的监督循环轮次 |
+| `ORC_LOOP_ASK_TIMEOUT_MS` | 4 小时 | 非不可逆问题的默认回答时限 |
+| `ORC_LOOP_WORKER_TURNS` | 15 | worker 续接多少轮后换新会话 |
+| `ORC_CARD_THROTTLE_MS` | 30 秒 | 卡片更新节流 |
+
+## 9. 验证脚本（`scripts/`）
+
+| 脚本 | 类型 | 内容 |
+|---|---|---|
+| `orc_check.ts` / `orc_extras_check.ts` | 离线 | 流水线解析、状态机、假执行器端到端、崩溃恢复 |
+| `orc_loop_check.ts` | 离线 | 监督循环：各项把关、完成门禁、引用核对、不可逆批准、换角色、长作业等待、守卫、崩溃恢复 |
+| `runner_wiring_check.ts` / `memory_check.ts` / `watch_check.ts` / `outgoing_check.ts` | 离线 | 路由接线、记忆、监控、附件 |
+| `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（16 条） |
+| `outgoing_agent_check.ts` | 真实模型 | agent 是否按 `[[image]]` / `[[file]]` 协议发图、发文件 |
+| `announce_check.ts` / `memory_live_check.ts` / `watch_live_check.ts` / `outgoing_live_check.ts` | 真实飞书 | 临时建群验证后解散 |
+
+运行：`npx tsx scripts/<name>.ts`；类型检查：`npx tsc --noEmit`。
+
+## 10. 现状与后续
+
+已上线（`whisper-feishu.service`，systemd 托管，直接运行工作区代码）：单 agent、群公告、群记忆、监控、附件发送、orc 流水线、监督循环 M1。
+
+未完成：
+
+- **企微出入口**：平台层未实现，入口处直接跳过。
+- **监督循环在真实群里的端到端使用**：卡片回复串、监控交回任务目前只有离线检查。
+- **监督者汇报附图**：report / ask 还不能带 `[[image]]`。
+- **后续里程碑**（详见 architecture.html）：M2 小训练脚本模拟长任务 + 中途重启；M3 审查调用流水线、`loop-dev` / `loop-train` 组合、主 agent 自动选形态；M4 断线补拉历史消息；M5 远端作业平台（太极、k8s）的作业句柄与探测适配、GPU 时长预算。
+- **成本**：一次 6 轮的真实闭环统计约 112 万 token（可能含缓存读取），账本长度和观察摘要还需要控制。

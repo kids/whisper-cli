@@ -12,6 +12,8 @@ Key Features:
 
 ⚡ Lightweight & Fast: Extremely low latency, making "chat-to-code" a real-time reality.
 
+Design overview (group announcement & memory, long-job watches, attachments, orc pipelines and supervisor loop): [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (Chinese).
+
 ---
 
 ## Quick Start
