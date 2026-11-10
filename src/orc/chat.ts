@@ -4,7 +4,8 @@
 // =============================================================================
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { FeishuClient } from "../platform/feishu";
+import { larkOf } from "../platform/feishu";
+import type { ImClient } from "../platform/types";
 import type { AgentConfig } from "../types";
 import { getChatInstructions } from "../announcement";
 import { formatMemory, joinInstructions } from "../memory";
@@ -78,8 +79,8 @@ export function listPresetSummaries(): string[] {
 
 // ---- shared orchestrator ----------------------------------------------------
 
-const chatClients = new Map<string, FeishuClient>();
-const bots = new Map<string, FeishuClient>();     // bot group name → client (registered at startup)
+const chatClients = new Map<string, ImClient>();
+const bots = new Map<string, ImClient>();     // bot group name → client (registered at startup)
 const cardTouched = new Map<number, number>();
 const CARD_THROTTLE_MS = Number(process.env.ORC_CARD_THROTTLE_MS || 30_000);
 let orc: Orchestrator | null = null;
@@ -110,18 +111,18 @@ export function taskForCard(messageId: string): number | undefined {
 }
 
 /** Called once per bot group at startup */
-export function registerBot(name: string, feishu: FeishuClient): void {
-  bots.set(name, feishu);
+export function registerBot(name: string, im: ImClient): void {
+  bots.set(name, im);
 }
 
-export function bindChat(chatId: string, feishu: FeishuClient): void {
-  chatClients.set(chatId, feishu);
-  const name = [...bots.entries()].find(([, f]) => f === feishu)?.[0];
+export function bindChat(chatId: string, im: ImClient): void {
+  chatClients.set(chatId, im);
+  const name = [...bots.entries()].find(([, f]) => f === im)?.[0];
   if (name && getProfile(chatId).bot !== name) setProfile(chatId, { ...getProfile(chatId), bot: name });
 }
 
 /** Client for a chat: bound this process, else the bot recorded in its profile, else the only bot */
-function clientFor(chatId: string | null): FeishuClient | undefined {
+function clientFor(chatId: string | null): ImClient | undefined {
   if (!chatId) return undefined;
   const hit = chatClients.get(chatId);
   if (hit) return hit;
@@ -192,13 +193,13 @@ export function renderLoopCard(t: Task, l: Ledger | undefined): string {
 }
 
 async function refreshCard(t: Task, force = false): Promise<void> {
-  const feishu = clientFor(t.chatId);
+  const im = clientFor(t.chatId);
   const cardId = cardMap().get(t.id);
-  if (!feishu || !cardId || !orc) return;
+  if (!im || !cardId || !orc) return;
   const now = Date.now();
   if (!force && now - (cardTouched.get(t.id) ?? 0) < CARD_THROTTLE_MS) return;
   cardTouched.set(t.id, now);
-  await feishu.updateCardMessage(cardId, renderCard(t, orc.store)).catch(() => {});
+  await im.updateCardMessage(cardId, renderCard(t, orc.store)).catch(() => {});
 }
 
 export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator {
@@ -210,7 +211,8 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
     instructionsFor: async (t) => {
       if (!t.chatId) return undefined;
       const f = clientFor(t.chatId);
-      const ann = f ? await getChatInstructions(f.getClient(), t.chatId) : undefined;
+      const lark = larkOf(f);
+      const ann = lark ? await getChatInstructions(lark, t.chatId) : undefined;
       return joinInstructions(ann, formatMemory(t.chatId)); // workers read group memory, never write it
     },
     onProgress: (t) => void refreshCard(t, TERMINAL.includes(t.status)),
@@ -218,7 +220,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       if (!t.chatId) return; // CLI-submitted task: nothing to deliver
       const f = clientFor(t.chatId);
       // bot not registered yet (startup race) → throw so the notify effect is retried with backoff
-      if (!f) throw new Error(`no Feishu client for chat ${t.chatId}`);
+      if (!f) throw new Error(`no chat client for chat ${t.chatId}`);
       // loop rounds (主 ↔ 子) go into the card's thread so the chat stays readable
       if (n.kind === "turn") {
         void refreshCard(t);
@@ -255,12 +257,12 @@ export function availableClis(): string[] {
 
 /** Submit from chat: posts the progress card and binds it to the task */
 export async function submitFromChat(
-  o: Orchestrator, feishu: FeishuClient, chatId: string, goal: string, repo: string, preset: ResolvedPreset,
+  o: Orchestrator, im: ImClient, chatId: string, goal: string, repo: string, preset: ResolvedPreset,
   extra: { criteria?: string[]; constraints?: string[]; sourceText?: string } = {},
 ): Promise<Task> {
-  bindChat(chatId, feishu);
+  bindChat(chatId, im);
   const task = o.submit({ goal, repo, preset, chatId, ...extra });
-  const cardId = await feishu.sendCardAndGetId(chatId, renderCard(task, o.store)).catch(() => undefined);
+  const cardId = await im.sendCardAndGetId(chatId, renderCard(task, o.store)).catch(() => undefined);
   if (cardId) setCard(task.id, cardId);
   return task;
 }

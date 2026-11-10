@@ -7,7 +7,7 @@
 
 ## 0. 定位
 
-把飞书群（企微待接）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi），把回复发回群里。在此之上提供：
+把飞书群（也支持企业微信智能机器人、Telegram，见 §1.1）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi），把回复发回群里。在此之上提供：
 
 - **群级上下文**：群公告当指令、群记忆、最近对话，按群隔离，CLI 无关。
 - **长任务监控**：后台训练等作业由代码定时探测，不占 CLI 进程、不耗 token。
@@ -23,7 +23,7 @@
 ## 1. 分层
 
 ```
-入口层   飞书 WS 收事件 / HTTP 发消息、卡片、附件（src/platform/feishu.ts）   企微：未实现
+入口层   ImClient（src/platform/types.ts）：飞书 feishu.ts · 企微 wecom.ts · Telegram telegram.ts
           │
 路由层   AgentRunner（src/agent-runner.ts）：一个 bot 一个实例
           ├─ 斜杠命令：/help /reset /model /new /status /记住 /记忆 /watch /mode /orc /task /tasks /stop
@@ -43,11 +43,26 @@
 持久层   state/*.json · ~/.orc/orc.db（SQLite）· ~/.orc/worktrees · ~/.orc/tasks/<id>/
 ```
 
+### 1.1 平台适配
+
+`AgentRunner` 只依赖 `ImClient` 接口（`src/platform/types.ts`）；群 id 带前缀区分平台：飞书 `oc_…`（原样）、企微 `wc_<chatid 或 userid>`、Telegram `tg_<chat id>`，`isChatKey()` 用它区分真实会话和内部 session key。
+
+| 能力 | 飞书 | 企微智能机器人（`@wecom/aibot-node-sdk` 长连接） | Telegram（Bot API 长轮询） |
+|---|---|---|---|
+| 收消息 | 全部 | 群里只收 @ 的；文本 / 语音（已转文字）/ 图片 / 文件 / 图文混排 | 隐私模式关闭才收全部；文本、图片、文件（带说明文字） |
+| 回复原地刷新 | 卡片 patch | 只能刷新"回复触发消息的流式消息"，`WECOM_STREAM_MAX_MS` 后收尾，结果另发 | `editMessageText`，3 秒一刷，429 时丢中间帧 |
+| 监控卡片 / 任务卡片刷新 | ✅ | ❌（发一次，不刷新） | ✅ |
+| 回复串 | 话题 | ❌（`replyInThread` 返回 false，改发群里） | 回复卡片消息；回复 bot 消息带 `rootId`，所以回复任务卡片 = 进卡片回复串 |
+| 群公告 | ✅ | ❌（lead 的 announce 动作改为提示"记住…"） | ❌ |
+| 建群 / 管理台 | ✅ | ❌（`ADMIN_MODE` 忽略，`/new` 提示手动拉群） | ❌ |
+| 附件下载 | `messageResource` | 链接 5 分钟失效，收到消息时就下载到内存，处理时落盘 | `getFile`，≤20MB |
+| markdown | 卡片 / post | 原样（单条 ≤20KB，按字节分段） | 转 HTML 子集，解析失败退回纯文本；4000 字分段 |
+
 ## 2. 一条消息的路径
 
-1. 飞书事件进入 `AgentRunner`，按群串行排队；`/stop` 绕过队列直接终止当前运行。斜杠命令直接处理，其余消息先分派（§2.1），交给单 agent 的走下面 2–5 步，交给主 agent 的见 §6.1。
+1. 平台事件进入 `AgentRunner`，按群串行排队；`/stop` 绕过队列直接终止当前运行。斜杠命令直接处理；「停掉监控」这类短句由代码直接停（§4）；其余消息先分派（§2.1），交给单 agent 的走下面 2–5 步，交给主 agent 的见 §6.1。
 2. 组装系统提示（`--append-system-prompt` 或前缀，不写进工作区，避免共用仓库的群互相串）：
-   - 群公告（按 revision 缓存，变了才重新拉取）；
+   - 群公告（仅飞书；按 revision 缓存，变了才重新拉取）；
    - 群记忆；
    - 进行中的监控摘要和 `[[watch]]` 用法（可用 `WHISPER_WATCH_HINT=0` 关掉）；
    - 附件发送用法（`[[image]]` / `[[file]]`）；
@@ -75,6 +90,7 @@
 | 6 | 要切换模式（"切到编排模式""回到单聊模式""退出团队模式"） | 主 agent |
 | 7 | 消息带图片 / 文件（主 agent 看不到附件） | 单 agent |
 | 8 | 命中"要团队"关键词 | 主 agent |
+| 8.5 | 说到"监控 / 别盯了"，且没点名任务、没提"任务 / 执行者" | 单 agent |
 | 9 | 本群有进行中的任务（或 24 小时内失败 / 卡住的），且消息点名了任务（`#12`、"12 号那个"、标题里连续 4 个字），或是在调整任务（"先别 / 停一下 / 再试 / 放弃 / 换成 / 进展 / 刷屏"等，短消息或带"任务 / 执行者"字样） | 主 agent |
 | 10 | 其他 | 单 agent |
 
@@ -115,7 +131,8 @@
 
 一次 CLI 运行有时长上限，不能干等几个小时的训练。做法是 agent 把作业放后台、登记监控、结束本轮；之后由代码定时探测。
 
-- 登记：单 agent 回复里写 `[[watch]] {"title":…,"pid":…,"log":…,"done":…,"wake_on":[…],"stale":"30m","metrics":{…},"file":…,"cmd":…,"every":"10m","timeout":"2d","on_wake":"…"}`；取消用 `[[unwatch]] <编号>`；人用 `/watch`。
+- 登记：单 agent 回复里写 `[[watch]] {"title":…,"pid":…,"log":…,"done":…,"wake_on":[…],"stale":"30m","metrics":{…},"file":…,"cmd":…,"every":"10m","timeout":"2d","on_wake":"…"}`；agent 取消用 `[[unwatch]] <编号>`。
+- 人停监控直接说：「停掉监控」「别盯了」「训练那个监控关了」「停掉监控 #3」「监控全停了」。短句（≤40 字）、不是疑问、不是复合指令（"…然后…"、提到进程 / kill）时由代码直接处理（`parseStopWatchIntent` / `planStopWatches`），不跑模型：给了编号停编号；说"全部"停本群全部；否则按标题里的词匹配；只有一个就停它；有多个且分不出来就列出来问。其余说法交给单 agent（它有 `[[unwatch]]` 和本群监控列表）；分派层把说到"监控"的消息留给单 agent，不送主 agent。监督循环挂着的监控（`orc-loop:<id>`）不让单独停，提示改为叫停任务，免得任务卡住。`/watch stop <编号>` 仍可用。
 - 探测类型：进程存活、日志尾正则（完成标记、报错）、日志多久没更新、指标文件、产物文件、自定义只读命令。每 `WATCH_TICK_MS`（默认 15 秒）扫描到期项，单项最短间隔 30 秒。
 - 进展只更新监控卡片，不刷屏；条件满足、出错或超时时发一条通知，有 `on_wake` 就唤醒 agent 接着处理。
 - 状态存 `state/watches.json`，重启后接着探测。
@@ -136,7 +153,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 - 图片 ≤10MB，超了或不是图片格式就按文件发送；其他文件 ≤30MB；每条回复最多 10 个。
 - 发不出去时在回复末尾说明原因。
 - 兜底：回复里直接出现的图片绝对路径仍会静默发送；其他类型的裸路径**不会**再自动上传（以前会，有泄露风险）。
-- 平台层只需实现 `sendAgentImages` / `sendAgentFiles`，飞书已实现（先上传拿 key 再发消息），企微接入时实现同样两个方法即可。
+- 平台层实现 `sendAgentImages` / `sendAgentFiles`：飞书先上传拿 key 再发；企微 `uploadMedia` + `sendMediaMessage`；Telegram `sendPhoto` / `sendDocument`。
 
 ## 6. orc 编排
 
@@ -273,6 +290,8 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `ORC_LOOP_ASK_TIMEOUT_MS` | 4 小时 | 非不可逆问题的默认回答时限 |
 | `ORC_LOOP_WORKER_TURNS` | 15 | worker 续接多少轮后换新会话 |
 | `ORC_CARD_THROTTLE_MS` | 30 秒 | 卡片更新节流 |
+| `WECOM_STREAM_MAX_MS` | 5 分钟 | 企微流式回复多久后主动收尾（结果改为另发） |
+| `WECOM_MD_MAX_BYTES` | 20000 | 企微单条 markdown 上限；发送失败自动按 4000 字节重发 |
 
 ## 9. 验证脚本（`scripts/`）
 
@@ -280,8 +299,9 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 |---|---|---|
 | `orc_check.ts` / `orc_extras_check.ts` | 离线 | 流水线解析、状态机、假执行器端到端、崩溃恢复 |
 | `orc_loop_check.ts` | 离线 | 监督循环：各项把关、完成门禁、引用核对、不可逆批准、换角色、长作业等待、守卫、崩溃恢复 |
-| `runner_wiring_check.ts` / `memory_check.ts` / `watch_check.ts` / `outgoing_check.ts` | 离线 | 路由接线、记忆、监控、附件 |
-| `route_check.ts` | 离线 | 消息分派规则（53 条）、`[[task]]` 解析 |
+| `runner_wiring_check.ts` / `memory_check.ts` / `watch_check.ts` / `outgoing_check.ts` | 离线 | 路由接线、记忆、监控（含自然语言停监控）、附件 |
+| `route_check.ts` | 离线 | 消息分派规则（57 条）、`[[task]]` 解析 |
+| `im_check.ts` | 离线 | 企微（假 SDK）/ Telegram（假 fetch）适配器、配置解析、分段工具 |
 | `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（22 条，含 auto 模式下交回单 agent、切换模式） |
 | `outgoing_agent_check.ts` | 真实模型 | agent 是否按 `[[image]]` / `[[file]]` 协议发图、发文件 |
 | `announce_check.ts` / `memory_live_check.ts` / `watch_live_check.ts` / `outgoing_live_check.ts` | 真实飞书 | 临时建群验证后解散 |
@@ -294,7 +314,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 未完成：
 
-- **企微出入口**：平台层未实现，入口处直接跳过。
+- **企微 / Telegram 真机验证**：适配器只有离线检查，还没用真实机器人跑过。
 - **监督循环在真实群里的端到端使用**：卡片回复串、监控交回任务目前只有离线检查。
 - **监督者汇报附图**：report / ask 还不能带 `[[image]]`。
 - **后续里程碑**（详见 architecture.html）：M2 小训练脚本模拟长任务 + 中途重启；M3 审查调用流水线、`loop-dev` / `loop-train` 组合、主 agent 自动选形态；M4 断线补拉历史消息；M5 远端作业平台（太极、k8s）的作业句柄与探测适配、GPU 时长预算。

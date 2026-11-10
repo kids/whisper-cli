@@ -3,7 +3,7 @@
 // =============================================================================
 
 /** Supported IM platforms */
-export type Platform = "feishu" | "wecom";
+export type Platform = "feishu" | "wecom" | "telegram";
 
 /** Supported AI CLI tools */
 export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini" | "pi";
@@ -24,6 +24,8 @@ export interface AgentConfig {
   feishu?: FeishuConfig;
   /** WeCom-specific config (when platform === "wecom") */
   wecom?: WeComConfig;
+  /** Telegram config (when platform === "telegram") */
+  telegram?: TelegramConfig;
   /** CodeBuddy-specific config (when aiCli === "codebuddy") */
   codebuddy?: CodeBuddyConfig;
   /** Cursor-specific config (when aiCli === "cursor") */
@@ -53,7 +55,7 @@ export interface FeishuConfig {
   appSecret: string;
 }
 
-/** Incoming Feishu image/file attachment */
+/** Incoming image/file attachment (fileKey = platform resource id: Feishu file_key, Telegram file_id, WeCom cache key) */
 export interface IncomingAttachment {
   type: "file" | "image";
   fileKey: string;
@@ -72,11 +74,17 @@ export interface AgentFile {
   fileName?: string;
 }
 
+/** WeCom 智能机器人 (aibot) over the WebSocket long connection */
 export interface WeComConfig {
-  corpId: string;
-  corpSecret: string;
-  token: string;
-  encodingAesKey: string;
+  botId: string;
+  secret: string;
+}
+
+/** Telegram Bot API (long polling) */
+export interface TelegramConfig {
+  botToken: string;
+  /** Override for a self-hosted Bot API server / reverse proxy; default https://api.telegram.org */
+  apiBase?: string;
 }
 
 export interface CodeBuddyConfig {

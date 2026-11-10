@@ -1,4 +1,4 @@
-This project is a ChatOps automation tool for developers. It turns a Feishu (Lark) group into a mobile/remote "command-line terminal" (WeCom config keys are reserved, but sending/receiving is not implemented yet).
+This project is a ChatOps automation tool for developers. It turns a Feishu (Lark) group — or a WeCom / Telegram chat — into a mobile/remote "command-line terminal".
 
 With this tool, you can simply send natural language or specific commands in a chat window. The underlying bot will automatically invoke and drive AI-powered programming CLI tools like Codex, Claude Code, Gemini, Cursor, CodeBuddy and Pi on your local or cloud environment. Whether you are on the go fixing an emergency bug via your phone, triggering a code review, or multi-tasking at your desk, it puts your development workflow right at your fingertips.
 
@@ -8,7 +8,7 @@ Key Features:
 
 🤖 AI CLI Driven: Supports Codex, Claude Code, Gemini, Cursor, CodeBuddy and Pi.
 
-🔒 Secure Remote Control: User allowlist (`AGENT_<N>_FEISHU_ALLOWLIST`) keeps your development environment safe.
+🔒 Secure Remote Control: User allowlist (`AGENT_<N>_ALLOWLIST`) keeps your development environment safe.
 
 📌 Group announcement = instructions: the group announcement is injected into every agent turn as the chat's standing rules.
 
@@ -90,9 +90,21 @@ AGENT_6_PLATFORM=feishu
 AGENT_6_AI_CLI=pi
 AGENT_6_FEISHU_APP_ID=cli_ccc
 AGENT_6_FEISHU_APP_SECRET=ccc
+
+# Group 7: WeCom AI bot (long connection) ↔ CodeBuddy
+AGENT_7_PLATFORM=wecom
+AGENT_7_AI_CLI=codebuddy
+AGENT_7_WECOM_BOT_ID=aibxxx
+AGENT_7_WECOM_BOT_SECRET=xxx
+AGENT_7_CODEBUDDY_API_KEY=ck_xxx
+
+# Group 8: Telegram ↔ Claude Code
+AGENT_8_PLATFORM=telegram
+AGENT_8_AI_CLI=claude
+AGENT_8_TELEGRAM_BOT_TOKEN=123456:ABC-xxx
 ```
 
-> Each Feishu bot group needs its **own Feishu app** (different `APP_ID`); long-connection events cannot be shared. `AI_CLI` aliases: `codex-cli`, `claude-code` / `claude-code-cli`, `gemini-cli`. All optional keys (allowlist, workdir, Pi provider …) are listed in `.env.example`.
+> Each bot group needs its **own bot credentials** (different Feishu `APP_ID` / WeCom bot id / Telegram token); long-connection events cannot be shared. `AI_CLI` aliases: `codex-cli`, `claude-code` / `claude-code-cli`, `gemini-cli`. All optional keys (allowlist, workdir, Pi provider …) are listed in `.env.example`.
 
 > **Codex Auth:** Codex uses OAuth persistent login (`codex login`) — this is **not** the same as an OpenAI API Key (`sk-xxx`):
 >
@@ -148,13 +160,14 @@ sudo systemctl enable --now whisper-cli
 > The service runs the code in its working directory; after updating, `systemctl restart <service>`.
 
 ### 4. Usage
-Just talk in the Feishu group — all configured agent groups run simultaneously. No commands to learn:
+Just talk in the group (in WeCom groups, @ the bot) — all configured agent groups run simultaneously. No commands to learn:
 
 | You say | What happens |
 |---------|--------------|
 | "what's the difference between token bucket and leaky bucket", "fix the error on app.ts line 30" | the single agent answers or edits |
 | "plot the loss curve and post it here", "send me the report as html" | the agent creates the file and posts it |
 | "run this training in the background, ping me when done or failed" | a watch is registered; zero tokens while waiting |
+| 「停掉监控」「别盯了」「训练那个监控关了」 ("stop the watch") | the watch stops (the process keeps running); asks which one if several |
 | "remember: the GPU box only has 2 cards" | stored in this group's memory, included every turn |
 | "from now on, start every reply with a one-line conclusion" | proposed as a group-announcement rule; applied after you say "confirm" |
 | "hand this to the team, until all tests pass", "have two models cross-review it" | a multi-agent team takes it; a task card appears |
@@ -177,7 +190,7 @@ Wrong guesses recover on their own: the lead hands plain questions back to the s
 | `/stop` `/cancel` | Stop the current run immediately (bypasses the queue; includes this group's team tasks) |
 | `/reset` | Reset session + clear cumulative tokens |
 | `/model [id]` | List / switch models (`/model default` to reset) |
-| `/new [name]` | Create a new Feishu group = fresh session (non-admin mode) |
+| `/new [name]` | Create a new Feishu group = fresh session (Feishu only, non-admin mode) |
 | `/review [focus]` | Critique the previous bot reply |
 | `/status` `/sys` | Agent status (CLI, model, workspace) + host resources |
 | `/help` | Help |
@@ -205,6 +218,19 @@ In work groups just send natural language; `project:instruction` routing via `pr
 - 📊 **Token tracking** — per-turn + cumulative token usage in every reply
 - 🗂 **Multi-workspace** — `projects.json` routing + optional system prompt file
 - 📎 **Attachments** — user images/files are downloaded; images/files the agent produces are posted back
+
+**Platform differences:** chat, group memory, watches, attachments and teams work on all three; these depend on the platform:
+
+| | Feishu | WeCom (AI bot) | Telegram |
+|---|---|---|---|
+| Messages seen in groups | all | only @bot | all with privacy mode off, else @bot / replies / commands |
+| Live-updating reply | ✅ card | ✅ stream reply, closed after ~5 min, result posted separately | ✅ message edits (~every 3 s) |
+| Watch / team cards refresh in place | ✅ | ❌ posted once, final notice posted | ✅ |
+| Team task threads | ✅ | ❌ posted in the chat | ✅ replies to the card |
+| Group announcement as rules | ✅ | ❌ (use "remember …") | ❌ (use "remember …") |
+| Group creation (`/new`, admin `/新任务`) | ✅ | ❌ | ❌ |
+| Receive images / files | ✅ | ✅ (URLs expire in 5 min; downloaded on receipt) | ✅ (≤ 20 MB) |
+| Send images / files | ✅ | ✅ | ✅ |
 
 ### Helper scripts
 

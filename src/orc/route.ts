@@ -69,6 +69,7 @@ const STEER_LEAD = /^(再试|重试|继续|放弃|停|先别|算了|不用了|�
 const YES_NO = "好|好的|好啊|可以|行|没问题|确认|同意|就这么(改|办|定)吧?|改吧|ok|okay|yes|嗯|算了|不用了?|取消|不要了?|放弃|别改了?|先不改?|不改了";
 export const CONFIRM_PATTERN = new RegExp(`^((${YES_NO})[\\s,，。.!！~～]*)+$`, "i");
 
+const WATCH_TALK = /监控|(别|不要|不用|继续|接着)(再)?盯/;
 const TASK_WORDS = /(这个|那个|刚才的?|上一个|之前的?)?(任务|团队|监督者|执行者|审查者|worker|supervisor|critic)/i;
 
 function mentionsTask(text: string, tasks: RouteTask[]): RouteTask | undefined {
@@ -104,6 +105,8 @@ export function routeMessage(text: string, c: RouteCtx): Route {
   if (MODE_PATTERN.test(s)) return { to: "lead", why: "切换模式" };
   if (c.hasAttachments) return { to: "single", why: "带附件" };
   for (const [re, why] of TEAM_PATTERNS) if (re.test(s)) return { to: "lead", why };
+  // long-job monitors belong to the single agent (it registered them and has [[unwatch]])
+  if (WATCH_TALK.test(s) && !ref && !TASK_WORDS.test(s)) return { to: "single", why: "说的是监控" };
   if (live.length) {
     if (ref) return { to: "lead", why: `提到 #${ref.id}` };
     if (STEER_LEAD.test(s) || (STEER_PATTERN.test(s) && (s.length <= SHORT || TASK_WORDS.test(s)))) {

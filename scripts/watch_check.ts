@@ -160,6 +160,50 @@ const ctx = W.formatWatchContext("oc_cap");
 check("context: protocol + active list", ctx.includes("[[watch]]") && ctx.includes("setsid") && ctx.includes("本群进行中的监控"));
 const wake = W.buildWakePrompt({ ...W.getWatch(wa.id)!, spec: { ...W.getWatch(wa.id)!.spec, onWake: "跑 eval" } }, { fire: { kind: "file", reason: "产物已出现" }, summary: "", evidence: "日志末尾：ok", logOffset: 0 });
 check("wake prompt has reason, evidence, on_wake", wake.includes("产物已出现") && wake.includes("日志末尾：ok") && wake.includes("跑 eval"));
+check("active card tells how to stop in words", W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active" }).includes("停掉监控 #") && !W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active" }).includes("/watch"));
+
+// --- natural-language stop ---
+const intents: [string, { ids: number[]; all: boolean } | undefined][] = [
+  ["停掉监控", { ids: [], all: false }],
+  ["别盯了", { ids: [], all: false }],
+  ["不用再盯了", { ids: [], all: false }],
+  ["取消 #3 监控", { ids: [3], all: false }],
+  ["停掉监控 #3 #5", { ids: [3, 5], all: false }],
+  ["把 2 号监控关掉", { ids: [2], all: false }],
+  ["监控都停了吧", { ids: [], all: true }],
+  ["所有监控全部取消", { ids: [], all: true }],
+  ["把训练那个监控撤了", { ids: [], all: false }],
+  ["监控停了吗", undefined],
+  ["为什么监控停了", undefined],
+  ["别停监控", undefined],
+  ["继续盯着", undefined],
+  ["帮我盯着训练", undefined],
+  ["别忘了监控显存", undefined],
+  ["关于监控的实现原理讲一下", undefined],
+  ["停掉监控然后把进程也 kill 掉", undefined],
+  ["/watch stop 3", undefined],
+  ["训练跑完之后请帮我把这几个监控统一停掉并且汇总一下所有实验的结果", undefined],
+];
+for (const [s, want] of intents) {
+  const got = W.parseStopWatchIntent(s);
+  check(`stop intent「${s}」`, JSON.stringify(got) === JSON.stringify(want), { got, want });
+}
+const fakeW = (id: number, title: string, sessionKey = "oc_s") => ({ id, chatId: "oc_s", bot: "b", sessionKey, cwd: dir, spec: { title }, status: "active" } as any);
+const one = [fakeW(1, "训练 a.yaml")];
+const two = [fakeW(1, "训练 a.yaml"), fakeW(2, "eval 批处理")];
+const withLoop = [fakeW(1, "训练 a.yaml"), fakeW(7, "loop 实验", "orc-loop:12")];
+const plan = (s: string, ws: any[]) => W.planStopWatches(s, W.parseStopWatchIntent(s)!, ws);
+const ids = (ws: any[]) => ws.map((w) => w.id).join(",");
+check("only one watch → stop it", ids(plan("停掉监控", one).stop) === "1");
+check("two watches, no hint → ask", ids(plan("停掉监控", two).ambiguous) === "1,2" && !plan("停掉监控", two).stop.length);
+check("title words pick one", ids(plan("把训练那个监控停了", two).stop) === "1");
+check("latin title word picks one", ids(plan("eval 的监控关掉", two).stop) === "2");
+check("all → every own watch", ids(plan("监控全停了", two).stop) === "1,2");
+check("explicit id; unknown id reported", ids(plan("停掉监控 #2 #9", two).stop) === "2" && plan("停掉监控 #2 #9", two).missing.join() === "9");
+check("loop-owned watch is not stopped", ids(plan("停掉监控 #7", withLoop).loopOwned) === "7" && !plan("停掉监控 #7", withLoop).stop.length);
+check("all skips loop-owned", ids(plan("所有监控都停了", withLoop).stop) === "1");
+check("only loop-owned left → explain", ids(plan("停掉监控", [withLoop[1]]).loopOwned) === "7");
+check("loopTaskOf", W.loopTaskOf(withLoop[1]) === 12 && W.loopTaskOf(withLoop[0]) === undefined);
 
 console.log(failed ? `\n${failed} FAILED` : "\nall passed");
 process.exit(failed ? 1 : 0);

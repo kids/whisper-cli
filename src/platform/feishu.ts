@@ -6,31 +6,26 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { AgentFile, AgentImage, FeishuConfig, IncomingAttachment } from "../types";
 import { chunkMarkdown, markdownToPostBody } from "../post";
+import type { CardOpts, ChatEvent, ImClient, MessageHandler } from "./types";
 
 // ---------------------------------------------------------------------------
 // Message event types
 // ---------------------------------------------------------------------------
 
-export interface FeishuMessageEvent {
-  messageId: string;
-  chatId: string;
-  chatType: string;        // "p2p" | "group"
-  messageType: string;     // "text" | "post" | "image" | "file"
-  text: string;            // parsed plain text
-  senderOpenId: string;
-  content: string;         // raw JSON content
-  attachments: IncomingAttachment[];
-  /** set when the message was posted inside a thread / reply chain (root message id) */
-  rootId?: string;
-}
+/** Kept for existing imports; every platform produces the same event shape */
+export type FeishuMessageEvent = ChatEvent;
 
-export type MessageHandler = (event: FeishuMessageEvent) => Promise<void> | void;
+/** Lark API client when the chat client is Feishu (group announcements are Feishu-only) */
+export function larkOf(im: ImClient | undefined): Lark.Client | undefined {
+  return im instanceof FeishuClient ? im.getClient() : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Client wrapper
 // ---------------------------------------------------------------------------
 
-export class FeishuClient {
+export class FeishuClient implements ImClient {
+  public readonly platform = "feishu" as const;
   public readonly appId: string;
   private client: Lark.Client;
   private wsClient: Lark.WSClient;
@@ -257,7 +252,7 @@ export class FeishuClient {
   }
 
   /** Send a streaming card and return its message_id for subsequent patches */
-  async sendCardAndGetId(chatId: string, text: string): Promise<string | undefined> {
+  async sendCardAndGetId(chatId: string, text: string, _opts?: CardOpts): Promise<string | undefined> {
     const content = FeishuClient.buildMarkdownCard(text);
     try {
       const resp = await this.client.im.v1.message.create({
@@ -285,6 +280,11 @@ export class FeishuClient {
       console.error("[feishu] updateCard exception:", e);
       return false;
     }
+  }
+
+  /** Feishu cards stay editable; the last update is just another patch */
+  finalizeCard(messageId: string, text: string): Promise<boolean> {
+    return this.updateCardMessage(messageId, text);
   }
 
   /**

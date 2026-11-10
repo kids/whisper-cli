@@ -12,7 +12,8 @@
 //   /tasks                            this chat's tasks
 // A lead turn only picks an action; the code below executes it (002 §2.3).
 // =============================================================================
-import type { FeishuClient, FeishuMessageEvent } from "../platform/feishu";
+import { larkOf } from "../platform/feishu";
+import { PLATFORM_LABEL, type ChatEvent, type ImClient } from "../platform/types";
 import type { AgentConfig } from "../types";
 import { appendAnnouncementText, fetchAnnouncement } from "../announcement";
 import { applyMemoryOps } from "../memory";
@@ -28,14 +29,14 @@ import type { CliName } from "./types";
 import { repoRoot } from "./worktree";
 
 export interface OrcChatHost {
-  feishu: FeishuClient;
+  im: ImClient;
   agents: AgentConfig[];
   bins: ExecutorBins;
   workspaceFor(chatId: string): string;
   /** One LLM turn for the lead agent (goes through the bot's own CLI + group announcement) */
   runLead(prompt: string, sessionKey: string): Promise<string>;
   /** Hand the message to the chat's single agent (lead `chat` action) */
-  runSingle(ev: FeishuMessageEvent): Promise<void>;
+  runSingle(ev: ChatEvent): Promise<void>;
 }
 
 const orcOf = (h: OrcChatHost) => getOrc(h.agents, h.bins);
@@ -52,7 +53,7 @@ function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMo
   if (want !== "single" || preset) {
     try { resolveChatPreset(next, undefined, availableClis().length ? availableClis() : undefined); }
     catch (e) { return `❌ ${(e as Error).message}`; }
-    orcOf(h); bindChat(chatId, h.feishu);
+    orcOf(h); bindChat(chatId, h.im);
   }
   setProfile(chatId, next);
   const tail = want === "single" ? "后台的团队任务会继续跑，结果照常通知。" : want === "orc" ? `默认编排 \`${next.preset}\`。说「回到自动模式」即可切回。` : "";
@@ -81,15 +82,15 @@ async function submit(
   } catch (e) {
     return `❌ 编排无效：${(e as Error).message}`;
   }
-  const t = await submitFromChat(o, h.feishu, chatId, goal, repo, preset, extra);
+  const t = await submitFromChat(o, h.im, chatId, goal, repo, preset, extra);
   const crit = preset.kind === "loop" && extra.criteria?.length ? `\n验收标准：${extra.criteria.map((c, i) => `C${i + 1} ${c}`).join("；")}` : "";
   return `已提交 #${t.id} → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`${crit}`;
 }
 
-export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): Promise<boolean> {
+export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<boolean> {
   const text = ev.text.trim();
   const chatId = ev.chatId;
-  const say = (md: string) => h.feishu.sendMarkdown(chatId, md);
+  const say = (md: string) => h.im.sendMarkdown(chatId, md);
 
   let m = text.match(/^\/(mode|模式)(?:\s+(\S+))?(?:\s+(\S+))?\s*$/i);
   if (m) {
@@ -136,7 +137,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): 
   if (m) {
     const arg = (m[1] || "").trim();
     const o = orcOf(h);
-    bindChat(chatId, h.feishu);
+    bindChat(chatId, h.im);
     if (!arg) { await say("用法：`/task <目标>` 提交；`/task <id>` 查看；`/task stop|retry|attach <id> …`"); return true; }
     const sm = arg.match(/^(stop|retry|attach)\s+#?(\d+)\s*([\s\S]*)$/i);
     if (sm) {
@@ -159,7 +160,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: FeishuMessageEvent): 
 
 async function confirmPending(h: OrcChatHost, chatId: string): Promise<void> {
   const p = getProfile(chatId);
-  const say = (md: string) => h.feishu.sendMarkdown(chatId, md);
+  const say = (md: string) => h.im.sendMarkdown(chatId, md);
   if (!p.pending) { await say("没有待确认的变更。"); return; }
   if (p.pending.kind === "config") {
     const patch = p.pending.patch;
@@ -171,7 +172,9 @@ async function confirmPending(h: OrcChatHost, chatId: string): Promise<void> {
     return;
   }
   try {
-    const rev = await appendAnnouncementText(h.feishu.getClient(), chatId, p.pending.paragraphs, p.pending.revision);
+    const lark = larkOf(h.im);
+    if (!lark) throw new Error("群公告只有飞书支持");
+    const rev = await appendAnnouncementText(lark, chatId, p.pending.paragraphs, p.pending.revision);
     setProfile(chatId, { ...p, pending: undefined });
     await say(`✅ 已写入群公告（rev ${rev}），从下一轮起对本群所有 agent 生效。`);
   } catch (e) {
@@ -181,11 +184,11 @@ async function confirmPending(h: OrcChatHost, chatId: string): Promise<void> {
 }
 
 /** One lead-agent turn → structured action → executed by code (`why`: the router's reason) */
-export async function runLeadTurn(h: OrcChatHost, ev: FeishuMessageEvent, why?: string): Promise<void> {
+export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): Promise<void> {
   const chatId = ev.chatId;
-  const say = (md: string) => h.feishu.sendMarkdown(chatId, md);
+  const say = (md: string) => h.im.sendMarkdown(chatId, md);
   const o = orcOf(h);
-  bindChat(chatId, h.feishu);
+  bindChat(chatId, h.im);
   const p = getProfile(chatId);
   let presetLine = "";
   try { presetLine = presetSummary(resolveChatPreset(p)); } catch (e) { presetLine = `（无效：${(e as Error).message}）`; }
@@ -268,7 +271,7 @@ function configTask(h: OrcChatHost, chatId: string, act: Extract<LeadAction, { a
 
 export async function executeLeadAction(h: OrcChatHost, chatId: string, act: LeadAction, userText?: string): Promise<void> {
   const o = orcOf(h);
-  const say = (md: string) => h.feishu.sendMarkdown(chatId, md);
+  const say = (md: string) => h.im.sendMarkdown(chatId, md);
   const p = getProfile(chatId);
   const own = (id: number) => o.store.getTask(id)?.chatId === chatId;
   switch (act.action) {
@@ -318,8 +321,13 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       return;
     }
     case "announce": {
+      const lark = larkOf(h.im);
+      if (!lark) {
+        await say(`🧭 ${PLATFORM_LABEL[h.im.platform]}没有群公告。想让本群一直遵守，可以说「记住：${act.paragraphs[0] ?? "…"}」，存进本群记忆。`);
+        return;
+      }
       try {
-        const snap = await fetchAnnouncement(h.feishu.getClient(), chatId);
+        const snap = await fetchAnnouncement(lark, chatId);
         setProfile(chatId, { ...p, pending: { kind: "announce", paragraphs: act.paragraphs, revision: snap.revisionId } });
         await say(`🧭 拟在群公告（=本群长期指令）末尾追加${act.reason ? `（${act.reason}）` : ""}：\n${act.paragraphs.map((x) => `> ${x}`).join("\n")}\n\n回复「确认」写入，「算了」放弃。`);
       } catch (e) {

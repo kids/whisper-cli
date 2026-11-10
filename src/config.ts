@@ -63,8 +63,9 @@ function collectGroups(env: Record<string, string>): RawGroup[] {
 }
 
 function validatePlatform(p: string): Platform {
-  if (p === "feishu" || p === "wecom") return p;
-  throw new Error(`Unsupported platform: "${p}". Supported: feishu, wecom`);
+  if (p === "feishu" || p === "wecom" || p === "telegram") return p;
+  if (p === "tg") return "telegram";
+  throw new Error(`Unsupported platform: "${p}". Supported: feishu, wecom, telegram`);
 }
 
 const AI_CLI_ALIASES: Record<string, AiCli> = {
@@ -140,15 +141,27 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     config.feishu = { appId, appSecret };
   }
   if (platform === "wecom") {
-    const corpId = e.WECOM_CORP_ID;
-    const corpSecret = e.WECOM_CORP_SECRET;
-    const token = e.WECOM_TOKEN;
-    const encodingAesKey = e.WECOM_ENCODING_AES_KEY;
-    if (!corpId || !corpSecret) {
-      console.warn(`[config] Skipping AGENT_${raw.index}: missing WECOM_CORP_ID or WECOM_CORP_SECRET`);
+    // 智能机器人 (aibot) long connection: bot id + secret from the WeCom admin console
+    const botId = e.WECOM_BOT_ID;
+    const secret = e.WECOM_BOT_SECRET || e.WECOM_SECRET;
+    if (!botId || !secret) {
+      console.warn(`[config] Skipping AGENT_${raw.index}: missing WECOM_BOT_ID or WECOM_BOT_SECRET`);
       return null;
     }
-    config.wecom = { corpId, corpSecret, token: token || "", encodingAesKey: encodingAesKey || "" };
+    config.wecom = { botId, secret };
+  }
+  if (platform === "telegram") {
+    const botToken = e.TELEGRAM_BOT_TOKEN;
+    if (!botToken) {
+      console.warn(`[config] Skipping AGENT_${raw.index}: missing TELEGRAM_BOT_TOKEN`);
+      return null;
+    }
+    config.telegram = { botToken, apiBase: e.TELEGRAM_API_BASE || undefined };
+  }
+  // admin console (/新任务 creates groups) needs Feishu group creation
+  if (platform !== "feishu" && config.adminMode) {
+    console.warn(`[config] AGENT_${raw.index}: ADMIN_MODE is Feishu-only, ignored on ${platform}`);
+    config.adminMode = false;
   }
 
   // CLI-specific

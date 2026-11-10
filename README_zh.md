@@ -1,4 +1,4 @@
-本项目是一个 ChatOps 开发自动化工具。解除了开发环境的地理限制，把飞书群变成移动端/远程的"命令行终端"（企业微信的配置项已预留，收发尚未实现）。
+本项目是一个 ChatOps 开发自动化工具。解除了开发环境的地理限制，把飞书群（也支持企业微信、Telegram）变成移动端/远程的"命令行终端"。
 
 通过本项目，你只需在聊天框中发送自然语言或特定指令，背后的机器人就能自动调用、驱动本地或云端的 Codex、Claude Code、Gemini、Cursor、CodeBuddy、Pi 等 AI 辅助编程 CLI 工具。无论是出门在外通过手机紧急修复 Bug、触发代码审查，还是在工位上实现多端联动，它都能让你随时随地，触手可得。
 
@@ -8,7 +8,7 @@
 
 🤖 AI CLI 驱动：对接 Codex、Claude Code、Gemini、Cursor、CodeBuddy、Pi 等 AI 编程助手的命令行接口。
 
-🔒 安全远程控制：支持用户白名单（`AGENT_<N>_FEISHU_ALLOWLIST`），确保你的开发环境安全无虞。
+🔒 安全远程控制：支持用户白名单（`AGENT_<N>_ALLOWLIST`），确保你的开发环境安全无虞。
 
 📌 群公告即指令：群公告的内容每轮注入给 agent，作为本群的长期约束；改公告就是改规则。
 
@@ -89,9 +89,21 @@ AGENT_6_PLATFORM=feishu
 AGENT_6_AI_CLI=pi
 AGENT_6_FEISHU_APP_ID=cli_ccc
 AGENT_6_FEISHU_APP_SECRET=ccc
+
+# 第 7 组：企业微信智能机器人（长连接）↔ CodeBuddy
+AGENT_7_PLATFORM=wecom
+AGENT_7_AI_CLI=codebuddy
+AGENT_7_WECOM_BOT_ID=aibxxx
+AGENT_7_WECOM_BOT_SECRET=xxx
+AGENT_7_CODEBUDDY_API_KEY=ck_xxx
+
+# 第 8 组：Telegram ↔ Claude Code
+AGENT_8_PLATFORM=telegram
+AGENT_8_AI_CLI=claude
+AGENT_8_TELEGRAM_BOT_TOKEN=123456:ABC-xxx
 ```
 
-> 每组飞书 Bot 必须使用**独立的飞书应用**（不同 `APP_ID`），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`。完整的可选项（白名单、工作目录、Pi 的 provider 等）见 `.env.example`。
+> 每组 Bot 必须使用**独立的机器人凭证**（不同飞书 `APP_ID` / 企微 Bot ID / Telegram token），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`。完整的可选项（白名单、工作目录、Pi 的 provider 等）见 `.env.example`。
 
 > **Codex 认证说明：** Codex 使用的是 OAuth 持久化认证（`codex login`），与 OpenAI API Key（`sk-xxx`）**不是同一回事**：
 >
@@ -147,13 +159,14 @@ sudo systemctl enable --now whisper-cli
 > 服务直接运行工作目录里的代码；更新代码后 `systemctl restart <服务名>` 生效。
 
 ### 4. 使用
-在飞书群里直接说话即可，所有配置的 Agent 组同时在线。不需要记命令：
+在群里直接说话即可（企微群里要 @ 机器人），所有配置的 Agent 组同时在线。不需要记命令：
 
 | 你说 | 会发生什么 |
 |------|------|
 | 「令牌桶和漏桶有什么区别」「修一下 app.ts 第 30 行的报错」 | 单 agent 直接回答或动手改 |
 | 「画一下 loss 曲线发群里」「把报告整理成 html 发我」 | agent 生成文件并发到群里 |
 | 「后台跑这个训练，跑完或出错叫我」 | 登记监控，等待期间不耗 token，跑完通知你 |
+| 「停掉监控」「别盯了」「训练那个监控关了」「监控全停了」 | 停止监控（被监控的进程不受影响）；有多个时会问你停哪个 |
 | 「记住：GPU 机器只有 2 张卡」 | 记入本群记忆，之后每轮都会带上 |
 | 「以后所有回复先给一句话结论」 | 提议写入群公告，你回「确认」才生效 |
 | 「这个交给团队做，测试全过为止」「让两个模型交叉评审一下」 | 交给多 agent 团队，群里出现任务卡片 |
@@ -175,7 +188,7 @@ sudo systemctl enable --now whisper-cli
 | `/stop` `/cancel` `/停止` | 立即终止当前运行（绕过排队，含本群团队任务） |
 | `/reset` `/重置` | 重置会话，清零累计 token |
 | `/model [id]` | 查看 / 切换模型（`/model default` 恢复默认） |
-| `/new [name]` | 创建新飞书群 = 全新独立会话（非管理台模式） |
+| `/new [name]` | 创建新飞书群 = 全新独立会话（仅飞书，非管理台模式） |
 | `/review [焦点]` | 审视上一轮 bot 回复 |
 | `/status` `/sys` | 当前状态（CLI、模型、工作区）+ 机器资源 |
 | `/help` | 帮助 |
@@ -200,6 +213,19 @@ sudo systemctl enable --now whisper-cli
 - 📡 **流式输出** — 回复以卡片形式实时逐字更新，不用等完成
 - 💾 **会话持久化** — 重启 bot 不丢会话历史（存储在 `state/state_<N>.json`）
 - 📊 **Token 统计** — 每次回复显示本轮 + 会话累计 token 用量
+
+**各平台差异：** 对话、群记忆、长任务监控、附件收发、多 agent 团队在三个平台都能用；下面这些受平台限制：
+
+| | 飞书 | 企业微信（智能机器人） | Telegram |
+|---|---|---|---|
+| 群里收哪些消息 | 全部 | 只收 @ 机器人的 | 关闭隐私模式后全部，否则只收 @、回复和 /命令 |
+| 回复实时刷新 | ✅ 卡片 | ✅ 流式消息，约 5 分钟后收尾，结果另发 | ✅ 编辑消息（约 3 秒一刷） |
+| 监控 / 团队任务卡片原地刷新 | ✅ | ❌ 只发一次，结束时另发通知 | ✅ |
+| 团队任务的回复串 | ✅ 话题 | ❌ 直接发在群里 | ✅ 回复卡片那条消息 |
+| 群公告当规则 | ✅ | ❌（用「记住…」代替） | ❌（用「记住…」代替） |
+| 建群：`/new`、管理台 `/新任务` | ✅ | ❌ | ❌ |
+| 收图片 / 文件 | ✅ | ✅（链接 5 分钟失效，收到即下载） | ✅（20MB 以内） |
+| 发图片 / 文件 | ✅ | ✅ | ✅ |
 - 🗂 **多工作区** — `projects.json` 路由 + 可选系统提示文件
 - 📎 **附件往返** — 下载用户发的图片/文件；agent 产出的图片和文件发回群里
 

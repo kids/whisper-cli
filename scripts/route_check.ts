@@ -79,6 +79,11 @@ const cases: [string, RouteCtx, "single" | "lead"][] = [
   ["确认", { ...proposal, mode: "single" }, "lead"],
   ["随便聊聊", { ...none, inThread: true }, "lead"],
   ["这个交给团队做", { ...none, hasAttachments: true }, "single"],
+  // monitors are the single agent's, even while orc tasks run
+  ["训练跑完之后把监控停掉，然后把 eval 结果汇总一下发群里", busy, "single"],
+  ["停掉监控", busy, "single"],
+  ["别再盯了", busy, "single"],
+  ["#12 的监控停一下", busy, "lead"],
 ];
 
 let ok = 0;

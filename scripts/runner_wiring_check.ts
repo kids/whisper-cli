@@ -29,15 +29,18 @@ const feishu = {
   sendToChat: async (chat: string, text: string) => { sent.push({ kind: "text", chat, text }); },
   sendPostMarkdown: async (chat: string, text: string) => { sent.push({ kind: "post", chat, text }); },
   sendCardAndGetId: async (chat: string, text: string) => { const id = `card-${++n}`; sent.push({ kind: "card", chat, text, id }); return id; },
-  updateCardMessage: async (id: string, text: string) => { sent.push({ kind: "update", chat: "", text, id }); },
+  updateCardMessage: async (id: string, text: string) => { sent.push({ kind: "update", chat: "", text, id }); return true; },
+  finalizeCard: async (id: string, text: string) => { sent.push({ kind: "update", chat: "", text, id }); return true; },
+  replyInThread: async () => false,
+  downloadAttachments: async () => [],
   sendAgentImages: async () => {}, sendAgentFiles: async () => {},
-  getClient: () => ({}),
+  platform: "feishu",
 };
 
 const cfg = loadAllAgents(resolve(import.meta.dirname, "../.env")).find((a) => a.codebuddy)!;
 const work = join(tmp, "ws");
 const runner: any = new AgentRunner(cfg, work, {}, tmp);
-runner.feishu = feishu;
+runner.im = feishu;
 const prompts: string[] = [];
 let nextReply = "";
 runner.dispatchAi = async (prompt: string) => { prompts.push(prompt); return { text: nextReply, sessionId: "sess-1" }; };
@@ -88,7 +91,28 @@ await runner.runAiAndReply(ev("盯一下 999999"));
 await runner.handleCommand(ev("/watch stop 2"));
 check("/watch stop cancels", W.getWatch(2)!.status === "cancelled" && sent.at(-1)!.text.includes("已停止监控 #2"));
 
-// 5. startup block present (the piece that went missing in 90ed027)
+// 5. natural-language stop: one active watch → stopped by code, no model turn
+nextReply = `[[watch]] {"pid":999998,"title":"训练 b"}`;
+await runner.runAiAndReply(ev("盯一下 999998"));
+const turns = prompts.length;
+await runner.processMessage(ev("别盯了"));
+check("「别盯了」stops the only watch", W.getWatch(3)!.status === "cancelled" && sent.at(-1)!.text.includes("已停止监控 #3"), sent.at(-1)!.text);
+check("…without a model turn", prompts.length === turns);
+await runner.processMessage(ev("停掉监控"));
+check("nothing left → says so", sent.at(-1)!.text.includes("没有进行中的监控"), sent.at(-1)!.text);
+nextReply = `[[watch]] {"pid":999997,"title":"训练 c"}\n[[watch]] {"pid":999996,"title":"eval d"}`;
+await runner.runAiAndReply(ev("盯两个"));
+await runner.processMessage(ev("停掉监控"));
+check("two watches → asks which", sent.at(-1)!.text.includes("要停哪个") && W.getWatch(4)!.status === "active" && W.getWatch(5)!.status === "active", sent.at(-1)!.text);
+await runner.processMessage(ev("eval 那个监控关掉"));
+check("title word picks it", W.getWatch(5)!.status === "cancelled" && W.getWatch(4)!.status === "active");
+const card4 = sent.find((s) => s.kind === "card" && s.text.includes("监控 #4"));
+check("watch card says how to stop in words", !!card4 && card4.text.includes("停掉监控 #4"), card4?.text);
+nextReply = "好的，我看一下";
+await runner.processMessage(ev("监控停了吗"));
+check("a question goes to the agent", prompts.length > turns && W.getWatch(4)!.status === "active");
+
+// 6. startup block present (the piece that went missing in 90ed027)
 const src = readFileSync(resolve(import.meta.dirname, "../src/agent-runner.ts"), "utf8");
 const start = src.slice(src.indexOf("async start()"), src.indexOf("private handleMessage"));
 check("start(): registerBot + watch host + orc resume", ["registerBot(", "registerWatchHost(", "startWatches()", "hasOrcState()"].every((k) => start.includes(k)));

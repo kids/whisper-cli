@@ -6,7 +6,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "
 import { resolve } from "node:path";
 import type { AgentConfig, AiResult, CumulativeUsage, AgentState } from "./types";
 import { emptyCumulativeUsage } from "./types";
-import { FeishuClient, buildPromptWithAttachments, type FeishuMessageEvent } from "./platform/feishu";
+import { FeishuClient, buildPromptWithAttachments, larkOf } from "./platform/feishu";
+import { WeComClient } from "./platform/wecom";
+import { TelegramClient } from "./platform/telegram";
+import { PLATFORM_LABEL, isChatKey, type ChatEvent, type ImClient } from "./platform/types";
 import {
   runCodebuddy,
   stopCodebuddyRun,
@@ -63,7 +66,8 @@ import { flushRecent, recordTurn } from "./recent";
 import { extractSendOps, formatSendHint, resolveOutgoing, sendRoots } from "./outgoing";
 import {
   addWatch, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch, listWatches,
-  parseWatchSpec, registerWatchHost, renderWatchCard, startWatches, tickWatches, updateWatch, watchCommandKind,
+  loopTaskOf, parseStopWatchIntent, parseWatchSpec, planStopWatches, registerWatchHost, renderWatchCard, startWatches,
+  tickWatches, updateWatch, watchCommandKind,
   type CheckResult, type Watch,
 } from "./watch";
 import { loadAllAgents } from "./config";
@@ -258,7 +262,7 @@ export interface AgentBins {
 
 export class AgentRunner {
   private config: AgentConfig;
-  private feishu?: FeishuClient;
+  private im?: ImClient;
   private workdir: string;
   private bins: AgentBins;
   private statePath: string;
@@ -302,18 +306,28 @@ export class AgentRunner {
     loadProjects();
     watchProjects(() => console.log(`[${this.label}] projects.json reloaded`));
 
+    let im: ImClient;
     if (platform === "feishu") {
       if (!this.config.feishu) throw new Error("Missing Feishu config");
-      this.feishu = new FeishuClient(this.config.feishu);
-      this.feishu.onMessage(this.handleMessage.bind(this));
-      this.feishu.start();
-      console.log(`[${this.label}] Feishu started (appId=${this.config.feishu.appId.slice(0, 10)}..., adminMode=${!!this.config.adminMode})`);
+      im = new FeishuClient(this.config.feishu);
+    } else if (platform === "wecom") {
+      if (!this.config.wecom) throw new Error("Missing WeCom config");
+      im = new WeComClient(this.config.wecom);
+    } else {
+      if (!this.config.telegram) throw new Error("Missing Telegram config");
+      im = new TelegramClient(this.config.telegram);
+    }
+    this.im = im;
+    im.onMessage(this.handleMessage.bind(this));
+    await im.start();
+    console.log(`[${this.label}] ${PLATFORM_LABEL[platform]} started (adminMode=${!!this.config.adminMode})`);
+    {
       // orc: let cards/notifications reach chats after a restart, and resume left-over tasks
       // without waiting for someone to touch orc first
-      registerBot(this.config.name, this.feishu);
+      registerBot(this.config.name, im);
       // long-running work: probe on a timer, update cards, wake the agent when something happens
       registerWatchHost(this.config.name, {
-        card: async (w) => { if (w.cardId) await this.feishu?.updateCardMessage(w.cardId, renderWatchCard(w)); },
+        card: async (w) => { if (w.cardId) await this.im?.updateCardMessage(w.cardId, renderWatchCard(w)); },
         fire: (w, r) => this.onWatchFire(w, r),
       });
       startWatches();
@@ -326,7 +340,7 @@ export class AgentRunner {
         const adminChat = this.config.adminChatId || getStore().adminChatId;
         if (adminChat) {
           setTimeout(() => {
-            this.feishu?.sendMarkdown(adminChat, [
+            this.im?.sendMarkdown(adminChat, [
               `**${this.config.name} 已上线**`,
               "私聊发 `/帮助` 或 `/新任务 测试`",
               "工作群内直接对话；`/review` 审视上一轮；`/stop` 终止",
@@ -334,10 +348,6 @@ export class AgentRunner {
           }, 3000);
         }
       }
-    }
-
-    if (platform === "wecom") {
-      console.log(`[${this.label}] WeCom not implemented`);
     }
 
     currentStatePath = this.statePath;
@@ -355,7 +365,7 @@ export class AgentRunner {
   // Message handler — enters serial queue
   // -----------------------------------------------------------------------
 
-  private handleMessage(ev: FeishuMessageEvent): void {
+  private handleMessage(ev: ChatEvent): void {
     if (isStopCommand(ev.text)) {
       this.handleStop(ev);
       return;
@@ -363,11 +373,11 @@ export class AgentRunner {
     enqueue(ev.chatId, () => this.processMessage(ev));
   }
 
-  private async processMessage(ev: FeishuMessageEvent): Promise<void> {
+  private async processMessage(ev: ChatEvent): Promise<void> {
     const supported = new Set(["text", "post", "file", "image"]);
     if (!supported.has(ev.messageType)) {
       console.warn(`[跳过] 不支持的消息类型 type=${ev.messageType} chat=${ev.chatId.slice(0, 8)}`);
-      await this.feishu?.sendToChat(
+      await this.im?.sendToChat(
         ev.chatId,
         `暂不支持该消息类型（${ev.messageType}）。请发文字 / 富文本 / 图片 / 文件。`,
       );
@@ -378,7 +388,7 @@ export class AgentRunner {
       console.warn(
         `[跳过] 空内容 type=${ev.messageType} chat=${ev.chatId.slice(0, 8)} raw=${ev.content?.slice(0, 200) || ""}`,
       );
-      await this.feishu?.sendToChat(
+      await this.im?.sendToChat(
         ev.chatId,
         "收到消息但未能解析出文字内容。请改发纯文本，或把链接/正文直接粘贴发送。",
       );
@@ -386,7 +396,7 @@ export class AgentRunner {
     }
 
     if (this.config.allowlist.size > 0 && !this.config.allowlist.has(ev.senderOpenId)) {
-      await this.feishu?.sendToChat(ev.chatId, "⛔ Not authorized.");
+      await this.im?.sendToChat(ev.chatId, "⛔ Not authorized.");
       return;
     }
 
@@ -400,7 +410,7 @@ export class AgentRunner {
       // Group must be a registered task
       const task = getTaskByChatId(ev.chatId);
       if (!task) {
-        await this.feishu?.sendToChat(
+        await this.im?.sendToChat(
           ev.chatId,
           "此群未注册或已归档。请在 Bot 私聊发 `/新任务` 创建。",
         );
@@ -410,6 +420,9 @@ export class AgentRunner {
 
     const handled = await this.handleCommand(ev);
     if (handled) return;
+
+    // 「停掉监控」「别盯了」: short, unambiguous → handled by code, no model turn
+    if (ev.attachments.length === 0 && await this.stopWatchesByWords(ev)) return;
 
     // single agent or the orc lead agent? code-only routing per message (src/orc/route.ts);
     // a wrong guess is recoverable: the lead can hand back (`chat`), the single agent can escalate (`[[task]]`)
@@ -433,8 +446,8 @@ export class AgentRunner {
   // Admin console (feishu-cursor style)
   // -----------------------------------------------------------------------
 
-  private async handleAdminMessage(ev: FeishuMessageEvent): Promise<void> {
-    const feishu = this.feishu!;
+  private async handleAdminMessage(ev: ChatEvent): Promise<void> {
+    const im = this.im!;
     const trimmed = ev.text.trim();
     setAdminChat(ev.chatId);
     if (ev.senderOpenId) setAdminOpenId(ev.senderOpenId);
@@ -443,7 +456,7 @@ export class AgentRunner {
 
     if (/^\/(help|帮助)\s*$/i.test(trimmed)) {
       const projects = Object.keys(getProjects().projects);
-      await feishu.sendMarkdown(ev.chatId, [
+      await im.sendMarkdown(ev.chatId, [
         `**${this.config.name} 管理台**（私聊专用）`,
         "",
         "- `/新任务 标题` — 建群并开始新 session",
@@ -474,21 +487,21 @@ export class AgentRunner {
     }
 
     if (/^\/(新任务|new|task)\s*$/i.test(trimmed)) {
-      await feishu.sendToChat(ev.chatId, "请提供任务标题，例如：`/新任务 重构 auth`");
+      await im.sendToChat(ev.chatId, "请提供任务标题，例如：`/新任务 重构 auth`");
       return;
     }
 
     if (/^\/(列表|list|任务)\s*$/i.test(trimmed)) {
       const tasks = listTasks(true);
       if (tasks.length === 0) {
-        await feishu.sendToChat(ev.chatId, "暂无活跃任务。发送 `/新任务 标题` 创建。");
+        await im.sendToChat(ev.chatId, "暂无活跃任务。发送 `/新任务 标题` 创建。");
         return;
       }
       const lines = tasks.map((t, i) => {
         const sess = t.cursorSessionId ? `\`${t.cursorSessionId.slice(0, 8)}\`` : "（未开始）";
         return `**${i + 1}. ${t.title}** [${t.projectLabel}]\n   ${formatRelativeTime(t.lastActiveAt)} · session ${sess}\n   \`${t.chatId}\``;
       });
-      await feishu.sendMarkdown(ev.chatId, `**活跃任务 (${tasks.length})**\n\n${lines.join("\n\n")}\n\n归档: \`/归档 编号\``);
+      await im.sendMarkdown(ev.chatId, `**活跃任务 (${tasks.length})**\n\n${lines.join("\n\n")}\n\n归档: \`/归档 编号\``);
       return;
     }
 
@@ -502,19 +515,19 @@ export class AgentRunner {
         task = tasks[num - 1];
       }
       if (!task) {
-        await feishu.sendToChat(ev.chatId, `未找到任务「${arg}」。发送 \`/列表\` 查看。`);
+        await im.sendToChat(ev.chatId, `未找到任务「${arg}」。发送 \`/列表\` 查看。`);
         return;
       }
       archiveTask(task.chatId);
-      await feishu.sendToChat(task.chatId, "📦 此任务已由管理台归档，群内消息不再触发 AI。");
-      await feishu.sendMarkdown(ev.chatId, `已归档: **${task.title}**\n群 \`${task.chatId}\` 仍保留。`);
+      await im.sendToChat(task.chatId, "📦 此任务已由管理台归档，群内消息不再触发 AI。");
+      await im.sendMarkdown(ev.chatId, `已归档: **${task.title}**\n群 \`${task.chatId}\` 仍保留。`);
       return;
     }
 
     if (/^\/(status|状态)\s*$/i.test(trimmed)) {
       const tasks = listTasks(true);
       const projects = getProjects();
-      await feishu.sendMarkdown(ev.chatId, [
+      await im.sendMarkdown(ev.chatId, [
         `**${this.config.name}**`,
         `AI CLI: \`${this.config.aiCli}\``,
         `默认项目: ${projects.default_project || "(无)"}`,
@@ -525,11 +538,11 @@ export class AgentRunner {
     }
 
     if (trimmed.startsWith("/")) {
-      await feishu.sendToChat(ev.chatId, "未知管理指令。发送 `/帮助` 查看。\n普通指令请在工作群内发送。");
+      await im.sendToChat(ev.chatId, "未知管理指令。发送 `/帮助` 查看。\n普通指令请在工作群内发送。");
       return;
     }
 
-    await feishu.sendMarkdown(ev.chatId, [
+    await im.sendMarkdown(ev.chatId, [
       "这是 **管理私聊**，不直接执行 AI。",
       "",
       "- `/新任务 重构 auth` — 建群开新 session",
@@ -540,27 +553,31 @@ export class AgentRunner {
   }
 
   private async createNewTask(
-    ev: FeishuMessageEvent,
+    ev: ChatEvent,
     title: string,
     firstPrompt?: string,
   ): Promise<void> {
-    const feishu = this.feishu!;
+    const im = this.im!;
+    if (!im.createSessionChat) {
+      await im.sendToChat(ev.chatId, `${PLATFORM_LABEL[im.platform]}机器人不能自己建群；请手动拉群后把机器人加进来。`);
+      return;
+    }
     const routed = firstPrompt
       ? routePrompt(firstPrompt)
       : routePrompt("", { workspace: this.workdir, label: getProjects().default_project || "default" });
     const groupName = `🤖 ${this.config.aiCli} · ${title}`.slice(0, 50);
 
     try {
-      await feishu.sendToChat(ev.chatId, `正在创建群「${groupName}」…`);
+      await im.sendToChat(ev.chatId, `正在创建群「${groupName}」…`);
       const openId = ev.senderOpenId || getStore().adminOpenId;
       if (!openId) {
-        await feishu.sendToChat(ev.chatId, "未知用户 open_id，请先在私聊发一条消息。");
+        await im.sendToChat(ev.chatId, "未知用户 open_id，请先在私聊发一条消息。");
         return;
       }
 
-      const { chatId, message } = await feishu.createSessionChat(groupName, openId);
+      const { chatId, message } = await im.createSessionChat!(groupName, openId);
       if (!chatId) {
-        await feishu.sendToChat(ev.chatId, `❌ 创建失败\n${message}`);
+        await im.sendToChat(ev.chatId, `❌ 创建失败\n${message}`);
         return;
       }
 
@@ -572,7 +589,7 @@ export class AgentRunner {
       });
       chatWorkspace.set(chatId, { workspace: routed.workspace, label: routed.label });
 
-      await feishu.sendMarkdown(chatId, [
+      await im.sendMarkdown(chatId, [
         `**${groupName}** 已就绪`,
         `- 工作区: \`${routed.label}\` → ${routed.workspace}`,
         `- 在此群对话即与 ${this.config.aiCli} 交互`,
@@ -580,7 +597,7 @@ export class AgentRunner {
         `- 管理请回 Bot 私聊发 \`/列表\` \`/归档\``,
       ].join("\n"));
 
-      await feishu.sendMarkdown(ev.chatId, [
+      await im.sendMarkdown(ev.chatId, [
         `✅ 已创建任务群`,
         `- 标题: **${title}**`,
         `- chat_id: \`${chatId}\``,
@@ -599,7 +616,7 @@ export class AgentRunner {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await feishu.sendToChat(ev.chatId, `❌ 创建任务群失败\n\n${msg.slice(0, 1500)}`);
+      await im.sendToChat(ev.chatId, `❌ 创建任务群失败\n\n${msg.slice(0, 1500)}`);
     }
   }
 
@@ -607,19 +624,19 @@ export class AgentRunner {
   // /stop handler — bypasses queue
   // -----------------------------------------------------------------------
 
-  private handleStop(ev: FeishuMessageEvent): void {
+  private handleStop(ev: ChatEvent): void {
     const stopped = this.stopRunByKey(ev.chatId);
 
     const orcStopped = getProfile(ev.chatId).mode === "orc" ? stopChatTasks(ev.chatId) : [];
     if (orcStopped.length) {
-      this.feishu?.sendToChat(ev.chatId, `⏹️ 已终止 orc 任务 ${orcStopped.map((i) => "#" + i).join(" ")}`);
+      this.im?.sendToChat(ev.chatId, `⏹️ 已终止 orc 任务 ${orcStopped.map((i) => "#" + i).join(" ")}`);
       if (!stopped) return;
     }
 
     if (stopped) {
-      this.feishu?.sendToChat(ev.chatId, "⏹️ 正在停止…");
+      this.im?.sendToChat(ev.chatId, "⏹️ 正在停止…");
     } else {
-      this.feishu?.sendToChat(ev.chatId, "当前没有运行中的任务。");
+      this.im?.sendToChat(ev.chatId, "当前没有运行中的任务。");
     }
   }
 
@@ -639,22 +656,22 @@ export class AgentRunner {
   // Commands (work groups + non-admin mode)
   // -----------------------------------------------------------------------
 
-  private async handleCommand(ev: FeishuMessageEvent): Promise<boolean> {
+  private async handleCommand(ev: ChatEvent): Promise<boolean> {
     const text = ev.text.trim();
-    const feishu = this.feishu!;
+    const im = this.im!;
     const chatId = ev.chatId;
 
     // /记住 /记忆 — per-chat memory (src/memory.ts)
     const memReply = memoryCommand(chatId, text);
     if (memReply) {
-      await feishu.sendMarkdown(chatId, memReply);
+      await im.sendMarkdown(chatId, memReply);
       return true;
     }
 
     // /watch — long-running job monitors (src/watch.ts)
     const wc = watchCommandKind(text);
     if (wc) {
-      await feishu.sendMarkdown(chatId, await this.handleWatchCommand(chatId, wc));
+      await im.sendMarkdown(chatId, await this.handleWatchCommand(chatId, wc));
       return true;
     }
 
@@ -666,7 +683,7 @@ export class AgentRunner {
     if (reviewCmd) {
       const sid = this.getSessionId(chatId);
       if (!sid) {
-        await feishu.sendToChat(chatId, "还没有可审视的上一条回复。请先发送一条指令并等待回复后再 `/review`。");
+        await im.sendToChat(chatId, "还没有可审视的上一条回复。请先发送一条指令并等待回复后再 `/review`。");
         return true;
       }
       const prompt = buildReviewPrompt(reviewCmd.focus || undefined);
@@ -676,7 +693,7 @@ export class AgentRunner {
 
     if (text === "/reset" || text === "/重置") {
       this.clearSession(chatId);
-      await feishu.sendToChat(chatId, "🔄 会话已重置。Token 累计清零。");
+      await im.sendToChat(chatId, "🔄 会话已重置。Token 累计清零。");
       return true;
     }
 
@@ -688,12 +705,12 @@ export class AgentRunner {
             "**工作群:** 直接对话；`项目名:指令` 路由；`/review` 审视",
           ]
         : [];
-      await feishu.sendMarkdown(chatId, [
+      await im.sendMarkdown(chatId, [
         `**${this.config.name}** | \`${this.config.aiCli}\` → \`${this.config.platform}\``,
         "",
         "**直接说话就行**，例如：",
         "• 「画一下 loss 曲线发群里」「把报告整理成 html 发我」",
-        "• 「后台跑这个训练，跑完或出错叫我」",
+        "• 「后台跑这个训练，跑完或出错叫我」「停掉监控」「别盯了」",
         "• 「记住：GPU 机器只有 2 张卡」",
         "• 「这个交给团队做，测试全过为止」「让两个模型交叉评审一下」",
         "• 「#12 到哪了」「先别推」「执行者换成 claude」「别每轮都刷屏」",
@@ -703,7 +720,7 @@ export class AgentRunner {
         "• `/stop`（`/cancel` `/停止`）— 立即终止当前运行（含本群团队任务）",
         "• `/reset` — 重置会话 + 清零累计 token",
         "• `/model [id]` — 查看/切换模型（`/model default` 恢复默认）",
-        "• `/new [name]` — 创建新飞书群 = 全新独立会话",
+        ...(this.config.platform === "feishu" ? ["• `/new [name]` — 创建新飞书群 = 全新独立会话"] : []),
         "• `/review [焦点]` — 审视上一轮回复",
         "• `/status` — 当前状态 + 机器资源",
         "• `/mode [auto|single|orc]` — 消息怎么分派（默认 auto，一般不用改）",
@@ -716,7 +733,7 @@ export class AgentRunner {
     if (text === "/status" || text === "/状态" || text === "/sys") {
       const model = this.getEffectiveModel(chatId);
       const ws = chatWorkspace.get(chatId);
-      await feishu.sendMarkdown(chatId, [
+      await im.sendMarkdown(chatId, [
         `**${this.config.name}**`,
         `平台: \`${this.config.platform}\``,
         `AI CLI: \`${this.config.aiCli}\``,
@@ -748,12 +765,13 @@ export class AgentRunner {
 
   private async handleWatchCommand(chatId: string, c: NonNullable<ReturnType<typeof watchCommandKind>>): Promise<string> {
     const mine = (id: number) => { const w = getWatch(id); return w && w.chatId === chatId ? w : undefined; };
-    if (c.kind === "usage") return "用法：`/watch` 列出；`/watch stop <编号…>` 停止；`/watch check <编号>` 立即检查一次";
+    if (c.kind === "usage") return "用法：`/watch` 列出；`/watch stop <编号…>` 停止（也可以直接说「停掉监控 #编号」）；`/watch check <编号>` 立即检查一次";
     if (c.kind === "stop") {
       return c.ids.map((id) => {
-        if (!cancelWatch(id, chatId)) return `监控 #${id} 不存在或已结束`;
-        const w = getWatch(id)!;
-        if (w.cardId) void this.feishu?.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+        const w = mine(id);
+        const t = w && w.status === "active" ? loopTaskOf(w) : undefined;
+        if (t) return `监控 #${id} 是团队任务 #${t} 在等的结果，单停它任务会卡住；要停就说「#${t} 停一下」`;
+        if (!this.cancelAndRefresh(id, chatId)) return `监控 #${id} 不存在或已结束`;
         return `🛑 已停止监控 #${id}（被监控的进程不受影响）`;
       }).join("\n");
     }
@@ -773,14 +791,53 @@ export class AgentRunner {
     return [...active, ...done].map((w) => renderWatchCard(w)).join("\n\n---\n\n");
   }
 
+  /** Cancel a watch and turn its progress card into the final "stopped" state */
+  private cancelAndRefresh(id: number, chatId: string): boolean {
+    if (!cancelWatch(id, chatId)) return false;
+    const w = getWatch(id)!;
+    if (w.cardId) void this.im?.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+    return true;
+  }
+
+  /** Natural-language stop (src/watch.ts parseStopWatchIntent); false = not a stop request */
+  private async stopWatchesByWords(ev: ChatEvent): Promise<boolean> {
+    const intent = parseStopWatchIntent(ev.text);
+    if (!intent) return false;
+    const chatId = ev.chatId;
+    const active = listWatches({ chatId, status: ["active"] });
+    const say = (md: string) => this.im!.sendMarkdown(chatId, md);
+    if (!active.length) { await say("本群没有进行中的监控。"); return true; }
+    const plan = planStopWatches(ev.text, intent, active);
+    const lines: string[] = [];
+    for (const w of plan.stop) {
+      if (this.cancelAndRefresh(w.id, chatId)) lines.push(`🛑 已停止监控 #${w.id}「${w.spec.title}」`);
+    }
+    if (plan.stop.length) lines.push("被监控的进程还在跑；要停进程请直接说。");
+    for (const id of plan.missing) lines.push(`监控 #${id} 不存在或已经结束了。`);
+    for (const w of plan.loopOwned) {
+      const t = loopTaskOf(w);
+      lines.push(`监控 #${w.id}「${w.spec.title}」是团队任务 #${t} 在等的结果，单停它任务会卡住；要停就说「#${t} 停一下」。`);
+    }
+    if (plan.ambiguous.length) {
+      lines.push(
+        `本群有 ${plan.ambiguous.length} 个监控，要停哪个？`,
+        ...plan.ambiguous.map((w) => `- #${w.id} ${w.spec.title}：${w.summary}`),
+        "说「停掉监控 #编号」，或者「监控全停了」。",
+      );
+    }
+    console.log(`[${this.label}] watch stop by words: stop=${plan.stop.map((w) => w.id)} ambiguous=${plan.ambiguous.length} loop=${plan.loopOwned.length}`);
+    await say(lines.join("\n"));
+    return true;
+  }
+
   /** A watch hit its condition: tell the chat, then (if the agent left instructions) wake it */
   private async onWatchFire(w: Watch, r: CheckResult): Promise<void> {
-    const feishu = this.feishu;
-    if (!feishu) return;
+    const im = this.im;
+    if (!im) return;
     const loopTask = w.sessionKey.match(/^orc-loop:(\d+)$/)?.[1];
     const tail = r.evidence ? `\n\n\`\`\`\n${r.evidence.split("\n").slice(-15).join("\n").slice(-2500)}\n\`\`\`` : "";
     const next = loopTask ? `\n\n交回 orc 任务 #${loopTask} 的监督者接着处理…` : w.spec.onWake ? "\n\n正在唤醒 agent 接着处理…" : "";
-    await feishu.sendMarkdown(w.chatId, `**${w.status === "expired" ? "⌛" : "🔔"} 监控 #${w.id} ${w.spec.title}**\n${w.fired?.reason ?? ""}${tail}${next}`);
+    await im.sendMarkdown(w.chatId, `**${w.status === "expired" ? "⌛" : "🔔"} 监控 #${w.id} ${w.spec.title}**\n${w.fired?.reason ?? ""}${tail}${next}`);
     // a supervisor-loop task parked on this watch: hand the result to its ledger, not to a chat agent
     if (loopTask) {
       const h = this.orcHost();
@@ -789,7 +846,7 @@ export class AgentRunner {
       return;
     }
     if (!w.spec.onWake) return;
-    const ev: FeishuMessageEvent = {
+    const ev: ChatEvent = {
       messageId: `watch-${w.id}`, chatId: w.chatId, chatType: "group", messageType: "text",
       text: buildWakePrompt(w, r), senderOpenId: "", content: "", attachments: [],
     };
@@ -797,9 +854,9 @@ export class AgentRunner {
     enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "wake" }));
   }
 
-  private async handleModelCommand(ev: FeishuMessageEvent): Promise<boolean> {
+  private async handleModelCommand(ev: ChatEvent): Promise<boolean> {
     const arg = ev.text.trim().slice("/model".length).trim();
-    const feishu = this.feishu!;
+    const im = this.im!;
     const chatId = ev.chatId;
     const { aiCli } = this.config;
 
@@ -807,7 +864,7 @@ export class AgentRunner {
       const effective = this.getEffectiveModel(chatId);
       const listed = this.listKnownModels();
       if (listed.length) {
-        await feishu.sendMarkdown(chatId, [
+        await im.sendMarkdown(chatId, [
           `当前模型: \`${effective}\``,
           `用法: /model <id>  （/model default 恢复默认）`,
           "",
@@ -815,7 +872,7 @@ export class AgentRunner {
           ...listed.map((s) => `• \`${s}\``),
         ].join("\n"));
       } else {
-        await feishu.sendMarkdown(chatId, [
+        await im.sendMarkdown(chatId, [
           `当前模型: \`${effective}\``,
           `用法: /model <id>  （/model default 恢复默认）`,
           "",
@@ -829,7 +886,7 @@ export class AgentRunner {
       models.delete(chatId);
       this.clearSession(chatId);
       scheduleSave();
-      await feishu.sendToChat(chatId, "✅ 已恢复默认模型，会话已重置。");
+      await im.sendToChat(chatId, "✅ 已恢复默认模型，会话已重置。");
       return true;
     }
 
@@ -842,7 +899,7 @@ export class AgentRunner {
     models.set(chatId, arg);
     this.clearSession(chatId);
     scheduleSave();
-    await feishu.sendToChat(
+    await im.sendToChat(
       chatId,
       unlisted
         ? `✅ 模型已切换至: \`${arg}\`，会话已重置。\n\n（该 id 不在 /model 列表中；若模型不存在，CLI 会在下次执行时报错）`
@@ -851,16 +908,20 @@ export class AgentRunner {
     return true;
   }
 
-  private async handleNewCommand(ev: FeishuMessageEvent): Promise<boolean> {
+  private async handleNewCommand(ev: ChatEvent): Promise<boolean> {
     const custom = ev.text.trim().slice("/new".length).trim();
     const stamp = new Date().toISOString().slice(5, 16).replace("T", " ");
     const name = custom || `${this.config.aiCli} ${stamp}`;
-    const feishu = this.feishu!;
-    await feishu.sendToChat(ev.chatId, `🆕 创建新群组「${name}」…`);
-    const { chatId, message } = await feishu.createSessionChat(name, ev.senderOpenId);
-    await feishu.sendToChat(ev.chatId, message);
+    const im = this.im!;
+    if (!im.createSessionChat) {
+      await im.sendToChat(ev.chatId, `${PLATFORM_LABEL[im.platform]}机器人不能自己建群。要一个全新会话就发 \`/reset\`；要并行的独立会话，手动拉个新群把机器人加进去。`);
+      return true;
+    }
+    await im.sendToChat(ev.chatId, `🆕 创建新群组「${name}」…`);
+    const { chatId, message } = await im.createSessionChat(name, ev.senderOpenId);
+    await im.sendToChat(ev.chatId, message);
     if (chatId) {
-      await feishu.sendMarkdown(
+      await im.sendMarkdown(
         chatId,
         `🤖 这是独立的 ${this.config.aiCli} 会话「${name}」。\n` +
           `本群消息独立运行，不与其他群共享上下文。`,
@@ -874,10 +935,10 @@ export class AgentRunner {
   // -----------------------------------------------------------------------
 
   private async runAiAndReply(
-    ev: FeishuMessageEvent,
+    ev: ChatEvent,
     opts?: { kind?: "normal" | "review" | "wake"; rawPrompt?: boolean },
   ): Promise<void> {
-    const feishu = this.feishu!;
+    const im = this.im!;
     const chatId = ev.chatId;
     const isReview = opts?.kind === "review";
 
@@ -895,10 +956,10 @@ export class AgentRunner {
       let localPaths: string[] = [];
       if (ev.attachments.length > 0) {
         try {
-          localPaths = await feishu.downloadAttachments(ev.messageId, fallback.workspace, ev.attachments);
+          localPaths = await im.downloadAttachments(ev.messageId, fallback.workspace, ev.attachments);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          await feishu.sendToChat(chatId, `❌ 附件下载失败\n\n${msg.slice(0, 1500)}`);
+          await im.sendToChat(chatId, `❌ 附件下载失败\n\n${msg.slice(0, 1500)}`);
           return;
         }
       }
@@ -931,9 +992,11 @@ export class AgentRunner {
     let cardId: string | undefined;
     try {
       const init = isReview ? `🔍 审视中 [${label}]…` : `⚙️ 正在生成 [${label}]…`;
-      cardId = await feishu.sendCardAndGetId(chatId, init);
+      cardId = await im.sendCardAndGetId(chatId, init, { replyTo: ev.messageId, placeholder: true });
     } catch { /* fallback */ }
 
+    // Telegram rate-limits edits (≈20/min in groups); others take 2/s fine
+    const streamEveryMs = im.platform === "telegram" ? 3000 : 500;
     let pendingText = "";
     let updateTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleUpdate = () => {
@@ -941,8 +1004,8 @@ export class AgentRunner {
       if (updateTimer) return;
       updateTimer = setTimeout(() => {
         updateTimer = null;
-        feishu.updateCardMessage(cardId!, pendingText);
-      }, 500);
+        void im.updateCardMessage(cardId!, pendingText).catch(() => false);
+      }, streamEveryMs);
     };
 
     const onStreamUpdate = (text: string) => {
@@ -984,7 +1047,10 @@ export class AgentRunner {
             watchNotes.push(`⚠️ 监控没有登记成功：${(e as Error).message}`);
           }
         }
-        for (const id of wops.remove) watchNotes.push(cancelWatch(id, chatId) ? `🛑 已停止监控 #${id}` : `监控 #${id} 不存在或已结束`);
+        for (const id of wops.remove) {
+          const t = getWatch(id)?.status === "active" ? loopTaskOf(getWatch(id)!) : undefined;
+          watchNotes.push(t ? `监控 #${id} 属于团队任务 #${t}，没有停` : this.cancelAndRefresh(id, chatId) ? `🛑 已停止监控 #${id}` : `监控 #${id} 不存在或已结束`);
+        }
       }
       // shared short transcript: the orc lead reads it when the chat switches modes
       recordTurn(chatId, "user", opts?.kind === "wake" ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
@@ -1031,32 +1097,33 @@ export class AgentRunner {
     if (taskNotes.length) body += `\n\n${taskNotes.join("\n")}`;
     if (outgoing.notes.length) body += `\n\n${outgoing.notes.join("\n")}`;
 
-    // Cards reject some markdown (e.g. too many tables → ErrCode 11310) and truncate
-    // poorly when oversized. Never put the full reply on both card and post.
+    // Feishu cards reject some markdown (e.g. too many tables → ErrCode 11310) and truncate
+    // poorly when oversized. Never put the full reply on both card and post. Other platforms
+    // decide in finalizeCard (false = too long / stream gone → post it).
     const tableHeavy = (body.match(/^\|/gm) || []).length >= 4 || body.includes("|---");
-    const preferPost = !cardId || body.length > 3000 || tableHeavy;
+    const preferPost = !cardId || (im.platform === "feishu" && (body.length > 3000 || tableHeavy));
     if (!preferPost) {
-      const ok = await feishu.updateCardMessage(cardId!, body).catch(() => false);
-      if (!ok) await feishu.sendPostMarkdown(chatId, body);
+      const ok = await im.finalizeCard(cardId!, body).catch(() => false);
+      if (!ok) await im.sendPostMarkdown(chatId, body);
     } else {
       if (cardId) {
         const tip = isReview ? "🔍 审视完成，见下方。" : "✅ 生成完成，见下方。";
-        await feishu.updateCardMessage(cardId, tip).catch(() => false);
+        await im.finalizeCard(cardId, tip).catch(() => false);
       }
-      await feishu.sendPostMarkdown(chatId, body);
+      await im.sendPostMarkdown(chatId, body);
     }
 
     // one in-place progress card per new watch
     for (const w of newWatches) {
-      const id = await feishu.sendCardAndGetId(chatId, renderWatchCard(w)).catch(() => undefined);
+      const id = await im.sendCardAndGetId(chatId, renderWatchCard(w)).catch(() => undefined);
       if (id) updateWatch(w.id, { cardId: id });
     }
 
     if (result.images && result.images.length > 0) {
-      await feishu.sendAgentImages(chatId, result.images);
+      await im.sendAgentImages(chatId, result.images);
     }
     if (result.files && result.files.length > 0) {
-      await feishu.sendAgentFiles(chatId, result.files);
+      await im.sendAgentFiles(chatId, result.files);
     }
   }
 
@@ -1070,7 +1137,7 @@ export class AgentRunner {
     let agents: AgentConfig[] = [this.config];
     try { agents = [this.config, ...loadAllAgents().filter((a) => a.name !== this.config.name)]; } catch { /* keep own config */ }
     this._orcHost = {
-      feishu: this.feishu!,
+      im: this.im!,
       agents,
       bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin, cursorAgentBin: this.bins.cursorAgentBin },
       workspaceFor: (chatId) => chatWorkspace.get(chatId)?.workspace || this.workdir,
@@ -1116,16 +1183,16 @@ export class AgentRunner {
 
     // Group announcement (= this chat's rules, revision-cached) + per-chat memory, every turn.
     // Session keys look like "<chatId>" or "<chatId>#role:x" - the chat is the prefix.
+    // Group announcements exist on Feishu only; memory / hints work on every platform.
     const chat = chatOf(chatId);
-    const announcement = this.feishu
-      ? await getChatInstructions(this.feishu.getClient(), chat)
-      : undefined;
+    const lark = larkOf(this.im);
+    const announcement = lark ? await getChatInstructions(lark, chat) : undefined;
     const instructions = joinInstructions(
       announcement,
-      chat.startsWith("oc_") ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
+      isChatKey(chat) ? formatMemory(chat, { writable: memoryMode === "rw" }) : undefined,
       memoryMode === "rw" && process.env.WHISPER_WATCH_HINT !== "0" ? formatWatchContext(chat) : undefined,
       memoryMode === "rw" ? formatSendHint() : undefined,
-      memoryMode === "rw" && chat.startsWith("oc_") && process.env.WHISPER_TASK_HINT !== "0" ? formatTaskHint() : undefined,
+      memoryMode === "rw" && isChatKey(chat) && process.env.WHISPER_TASK_HINT !== "0" ? formatTaskHint() : undefined,
     );
     // CLIs without an append-system-prompt flag get it as a prompt prefix
     const prefixed = instructions ? `${instructions}\n\n---\n\n${prompt}` : prompt;

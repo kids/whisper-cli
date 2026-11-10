@@ -345,7 +345,7 @@ export function updateWatch(id: number, patch: Partial<Watch>): Watch | undefine
 
 export function addWatch(input: { chatId: string; bot: string; sessionKey: string; cwd: string; spec: WatchSpec }): Watch {
   const active = listWatches({ chatId: input.chatId, status: ["active"] }).length;
-  if (active >= MAX_ACTIVE_PER_CHAT) throw new Error(`本群已有 ${active} 个进行中的监控（上限 ${MAX_ACTIVE_PER_CHAT}），先 /watch stop 一些`);
+  if (active >= MAX_ACTIVE_PER_CHAT) throw new Error(`本群已有 ${active} 个进行中的监控（上限 ${MAX_ACTIVE_PER_CHAT}），先说「停掉监控 #编号」停掉一些`);
   const d = load();
   const now = Date.now();
   let logOffset = 0;
@@ -442,7 +442,7 @@ export function renderWatchCard(w: Watch, now = Date.now()): string {
   const head = `**${icon} 监控 #${w.id} ${w.spec.title}**`;
   const meta = `已运行 ${fmtAge((now - w.createdAt) / 1000)} · 每 ${fmtAge(w.spec.everyS)} 检查 · 已检查 ${w.checks} 次`;
   const tail = w.status === "active"
-    ? `下次检查 ${hhmm(w.nextAt)}；完成或出错时${w.spec.onWake ? "会唤醒 agent 接着处理" : "会在群里通知"}。\`/watch stop ${w.id}\` 停止`
+    ? `下次检查 ${hhmm(w.nextAt)}；完成或出错时${w.spec.onWake ? "会唤醒 agent 接着处理" : "会在群里通知"}。不用盯了就说「停掉监控 #${w.id}」`
     : w.fired ? `${w.status === "expired" ? "超时" : "触发"}：${w.fired.reason}` : w.status === "cancelled" ? "已停止" : "";
   return [head, meta, `最新：${w.summary}`, tail].filter(Boolean).join("\n");
 }
@@ -514,4 +514,75 @@ export function watchCommandKind(text: string): { kind: "list" | "stop" | "check
   if (!sm) return { kind: "usage", ids: [] };
   const ids = sm[2].split(/[#,，\s]+/).filter((s) => /^\d+$/.test(s)).map(Number);
   return { kind: /^(check|检查)$/i.test(sm[1]) ? "check" : "stop", ids };
+}
+
+// ---- 「停掉监控」 in plain words ---------------------------------------------------
+// A code fast path (no model turn) for short, unambiguous requests. Anything longer,
+// compound or phrased as a question goes to the agent, which still has `[[unwatch]]`.
+
+const STOP_VERB = "停|停掉|停止|停下|取消|关掉|关闭|关了|结束掉|撤|撤掉|撤销|去掉|删|删掉|删除|移除|终止|不要了|不用了";
+const STOP_A = new RegExp(`(${STOP_VERB})[^。！？?\\n]{0,14}(监控|盯)`);
+const STOP_B = new RegExp(`(监控|盯着?)[^。！？?\\n]{0,12}(${STOP_VERB})`);
+const STOP_C = /(别|不要|不用|无需|不必|甭)(再)?(盯|监控)/;
+const NOT_STOP = /(别|不要|不用|先别|不能|不许)(停|取消|关|撤|删|去掉|移除|终止)|继续(盯|监控)|接着(盯|监控)|(保留|留着)[^。！？\n]{0,6}监控/;
+const QUESTION = /[吗嘛么呢？?]\s*$|为什么|为啥|怎么|是不是|有没有|是否|什么时候|啥时候/;
+const COMPOUND = /然后|并且|顺便|同时|之后|以后|另外|后(把|再|就)|再(帮|跑|启|开)|重新|换成|改成|进程|kill|杀/i;
+const MAX_LEN = 40;
+
+export interface StopWatchIntent { ids: number[]; all: boolean }
+
+/** 「停掉监控」「别盯了」「取消 #3 监控」「把训练那个监控停了」「监控全关了」 → intent; else undefined */
+export function parseStopWatchIntent(text: string): StopWatchIntent | undefined {
+  const s = (text || "").trim();
+  if (!s || s.length > MAX_LEN || s.startsWith("/")) return undefined;
+  if (QUESTION.test(s) || NOT_STOP.test(s) || COMPOUND.test(s)) return undefined;
+  if (!(STOP_A.test(s) || STOP_B.test(s) || STOP_C.test(s))) return undefined;
+  const ids = [...s.matchAll(/#\s?(\d+)|(\d+)\s?号|监控\s?#?\s?(\d+)/g)].map((m) => Number(m[1] ?? m[2] ?? m[3]));
+  return { ids: [...new Set(ids)], all: /全部|所有|全都|统统|一起|(都|全)(给我)?(停|关|撤|删|取消|去掉|不要|不用)/.test(s) };
+}
+
+/** Watch that a supervisor-loop task is parked on (stopping it would strand the task) */
+export function loopTaskOf(w: Watch): number | undefined {
+  const m = /^orc-loop:(\d+)$/.exec(w.sessionKey);
+  return m ? Number(m[1]) : undefined;
+}
+
+export interface StopWatchPlan { stop: Watch[]; loopOwned: Watch[]; missing: number[]; ambiguous: Watch[] }
+
+const GENERIC = new Set(["监控", "盯着", "任务", "那个", "这个", "停止", "停掉", "取消", "关掉", "关闭", "结束", "删掉", "删除", "不要", "不用"]);
+/** Distinctive bits of a watch title: 2-char CJK windows and 3+ char latin/digit words */
+function titleKeys(title: string): string[] {
+  const keys = new Set<string>();
+  for (const run of title.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    for (let i = 0; i + 2 <= run.length; i++) { const k = run.slice(i, i + 2); if (!GENERIC.has(k)) keys.add(k); }
+  }
+  for (const w of title.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? []) keys.add(w);
+  return [...keys];
+}
+
+/** Which of this chat's active watches the words point at */
+export function planStopWatches(text: string, intent: StopWatchIntent, active: Watch[]): StopWatchPlan {
+  const plan: StopWatchPlan = { stop: [], loopOwned: [], missing: [], ambiguous: [] };
+  const take = (ws: Watch[]) => { for (const w of ws) (loopTaskOf(w) ? plan.loopOwned : plan.stop).push(w); };
+  if (intent.ids.length) {
+    for (const id of intent.ids) {
+      const w = active.find((x) => x.id === id);
+      if (w) take([w]); else plan.missing.push(id);
+    }
+    return plan;
+  }
+  const own = active.filter((w) => !loopTaskOf(w));
+  if (intent.all) { plan.stop = own; return plan; }
+  const t = text.toLowerCase();
+  const byTitle = active.filter((w) => titleKeys(w.spec.title).some((k) => t.includes(k)));
+  if (byTitle.length === 1) { take(byTitle); return plan; }
+  if (byTitle.length > 1) {
+    const ownHits = byTitle.filter((w) => !loopTaskOf(w));
+    if (ownHits.length === 1) plan.stop = ownHits; else if (ownHits.length) plan.ambiguous = ownHits; else take(byTitle);
+    return plan;
+  }
+  if (own.length === 1) plan.stop = own;
+  else if (own.length > 1) plan.ambiguous = own;
+  else take(active);
+  return plan;
 }
