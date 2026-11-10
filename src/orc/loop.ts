@@ -31,11 +31,24 @@ export interface LoopOptions {
   watchBot?: (task: Task) => string | undefined;
   /** a watch was registered for a loop task (post its card) */
   onWatchCreated?: (task: Task, w: Watch) => void;
+  /** an agent run inside round n started / progressed / ended (per-round thread card, agent-cards.ts) */
+  onRun?: (task: Task, ev: LoopRunEvent) => void;
   /** max loop tasks running a round at the same time */
   concurrency?: number;
   /** high-cost / ambiguous questions fall back to their default after this long */
   askTimeoutMs?: number;
   verifyTimeoutMs?: number;
+}
+
+export interface LoopRunEvent {
+  taskId: number;
+  n: number;
+  phase: "start" | "progress" | "end";
+  label: string;
+  model: string;
+  line?: string;
+  tokens?: number;
+  error?: string;
 }
 
 const FINAL: TaskStatus[] = ["ready", "failed", "dropped"];
@@ -382,7 +395,7 @@ export class LoopEngine {
     const turn: NotifyPayload[] = [];
     if (l.verbosity !== "quiet" && out.turn) {
       const think = l.verbosity === "verbose" ? thinking(res.text) : "";
-      turn.push({ taskId: task.id, kind: "turn", text: `**第 ${n} 轮 · ${L.ACTION_LABEL[a.action]}**\n${out.turn}${think ? `\n\n> 监督者的分析：${clip(think, 1200).replace(/\n/g, "\n> ")}` : ""}` });
+      turn.push({ taskId: task.id, kind: "turn", round: n, text: `**第 ${n} 轮 · ${L.ACTION_LABEL[a.action]}**\n${out.turn}${think ? `\n\n> 监督者的分析：${clip(think, 1200).replace(/\n/g, "\n> ")}` : ""}` });
     }
     this.commit(task, l, { status, progress: out.progress, notifies: [...notifies, ...turn, ...out.notifies, ...extra], next, wakeIfInbox: status !== "blocked" });
   }
@@ -634,6 +647,11 @@ export class LoopEngine {
     mkdirSync(dir, { recursive: true });
     const base = `loop-${o.n}-${o.key.split("#")[1] ?? "run"}`;
     writeFileSync(resolve(dir, `${base}.prompt.md`), prompt);
+    const model = role.model || role.cli;
+    const onRun = (ev: Omit<LoopRunEvent, "taskId" | "n" | "label" | "model">) => {
+      try { this.opts.onRun?.(task, { taskId: task.id, n: o.n, label: o.label, model, ...ev }); } catch { /* cards are best-effort */ }
+    };
+    onRun({ phase: "start" });
     let last = 0;
     const progress = (line: string) => {
       const now = Date.now();
@@ -641,6 +659,7 @@ export class LoopEngine {
       last = now;
       this.store.updateTask(task.id, { progress: `第 ${o.n} 轮 · ${o.label}：${line}` });
       this.emit(task.id);
+      onRun({ phase: "progress", line });
     };
     let res: RunResult;
     try {
@@ -657,6 +676,7 @@ export class LoopEngine {
       this.running.delete(task.id);
     }
     writeFileSync(resolve(dir, `${base}.output.md`), res.text || res.error || "");
+    onRun({ phase: "end", tokens: res.tokens, error: res.error || (res.timedOut ? "超时" : undefined) });
     const cancelled = h.cancelled || (res.cancelled && !h.interrupted);
     return { ...res, cancelled, interrupted: h.interrupted };
   }

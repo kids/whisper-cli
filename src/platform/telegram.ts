@@ -272,10 +272,15 @@ export class TelegramClient implements ImClient {
   }
 
   async replyInThread(messageId: string, text: string): Promise<boolean> {
+    return (await this.replyCardInThread(messageId, text)) !== undefined;
+  }
+
+  /** Reply to the message; returns an id editable with updateCardMessage */
+  async replyCardInThread(messageId: string, text: string): Promise<string | undefined> {
     const k = parseMsgKey(messageId);
-    if (!k) return false;
+    if (!k) return undefined;
     const mid = await this.sendOne(k.chat, chunkText(text)[0], { reply_parameters: { message_id: k.mid, allow_sending_without_reply: true } });
-    return mid !== undefined;
+    return mid !== undefined ? `${tgChatKey(k.chat)}:${mid}` : undefined;
   }
 
   // -----------------------------------------------------------------------

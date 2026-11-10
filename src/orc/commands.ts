@@ -7,6 +7,7 @@
 //   /orc                              current orchestration + presets
 //   /orc preset <name> | reset        change / clear this chat's orchestration
 //   /orc confirm | cancel             apply / drop the lead agent's pending proposal
+//   /orc 播报 安静|正常|详细          per-agent thread cards for this chat's tasks
 //   /task <goal>                      submit to orc (any mode)
 //   /task <id> | stop|retry|attach <id> …
 //   /tasks                            this chat's tasks
@@ -25,7 +26,7 @@ import {
 } from "./chat";
 import { MODE_LABEL, type ChatMode, type TaskOp } from "./route";
 import type { ExecutorBins } from "./runner";
-import type { CliName } from "./types";
+import type { CliName, Verbosity } from "./types";
 import { repoRoot } from "./worktree";
 
 export interface OrcChatHost {
@@ -40,6 +41,13 @@ export interface OrcChatHost {
 }
 
 const orcOf = (h: OrcChatHost) => getOrc(h.agents, h.bins);
+
+const VERBOSITY_WORDS: Record<string, Verbosity> = { quiet: "quiet", 安静: "quiet", normal: "normal", 正常: "normal", verbose: "verbose", 详细: "verbose" };
+const VERBOSITY_ZH: Record<Verbosity, string> = {
+  quiet: "安静（回复串里不发每个 agent 的卡片，只发结果、提问和失败）",
+  normal: "正常（回复串里每个 agent / 每轮一张卡片）",
+  verbose: "详细（同正常，监督循环再附指令原文和监督者分析）",
+};
 
 /** Configured CLIs, this bot's own CLI first: the order roles fall back in (config.ts resolvePreset) */
 function clisFor(h: OrcChatHost): string[] | undefined {
@@ -133,6 +141,13 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
     if (sub === "reset") { setProfile(chatId, { ...p, patch: {}, version: p.version + 1, pending: undefined }); await say("已清除本群对编排的调整。"); return true; }
     if (sub === "cancel") { setProfile(chatId, { ...p, pending: undefined }); await say("已放弃待确认的变更。"); return true; }
     if (sub === "confirm") { await confirmPending(h, chatId); return true; }
+    if (sub === "播报" || sub === "verbosity") {
+      const v = VERBOSITY_WORDS[(m[2] || "").toLowerCase()];
+      if (!v) { await say(`本群团队任务的播报：**${VERBOSITY_ZH[p.verbosity ?? "normal"]}**\n用法：\`/orc 播报 安静|正常|详细\``); return true; }
+      setProfile(chatId, { ...p, verbosity: v });
+      await say(`📣 本群团队任务的播报改为 **${VERBOSITY_ZH[v]}**（流水线任务立即生效；监督循环任务对新任务生效，进行中的可以说「#N 播报改成…」）`);
+      return true;
+    }
     return false;
   }
 

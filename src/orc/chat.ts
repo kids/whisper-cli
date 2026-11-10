@@ -10,6 +10,7 @@ import type { AgentConfig } from "../types";
 import { getChatInstructions } from "../announcement";
 import { formatMemory, joinInstructions } from "../memory";
 import { renderWatchCard, updateWatch } from "../watch";
+import { AGENT_CARDS_ON, AgentCards } from "./agent-cards";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { budgetState, clip, currentEvidence, type Ledger } from "./ledger";
 import { findJsonObjects } from "./output";
@@ -18,6 +19,7 @@ import { Orchestrator } from "./scheduler";
 import { OrcStore } from "./store";
 import { MODE_LABEL, type ChatMode, type RouteTask } from "./route";
 import type { CliName, PresetPatch, ResolvedPreset, Task, Verbosity } from "./types";
+import type { LoopRunEvent } from "./loop";
 import { TERMINAL } from "./types";
 
 export const ORC_HOME = process.env.ORC_HOME || resolve(process.env.HOME || "/root", ".orc");
@@ -35,6 +37,8 @@ export interface ChatProfile {
   pending?: { kind: "config"; patch: PresetPatch } | { kind: "announce"; paragraphs: string[]; revision: number };
   /** Bot group that serves this chat — lets cards/notifications resume after a restart */
   bot?: string;
+  /** Pipeline tasks: quiet = no per-agent cards in the thread; normal (default) / verbose = one card per run */
+  verbosity?: Verbosity;
 }
 
 let profiles: Record<string, ChatProfile> | null = null;
@@ -66,7 +70,9 @@ export function resolveChatPreset(p: ChatProfile, extra?: PresetPatch, available
   if (!base) throw new Error(`未知组合 "${p.preset}"，可选：${[...presets.keys()].join(" / ")}`);
   let def = applyPatch(base, p.patch, presets);
   if (extra) def = applyPatch(def, extra, presets);
-  return resolvePreset(def, roles, { version: p.version + (extra ? 1 : 0), availableClis: available as any });
+  const r = resolvePreset(def, roles, { version: p.version + (extra ? 1 : 0), availableClis: available as any });
+  if (r.loop && p.verbosity) r.loop.verbosity = p.verbosity;
+  return r;
 }
 
 export function listPresetSummaries(available?: string[]): string[] {
@@ -145,30 +151,41 @@ const roleLabel = (t: Task, name?: string) => {
 };
 const age = (ms: number) => { const m = Math.round(ms / 60_000); return m < 90 ? `${m}m` : `${(m / 60).toFixed(1)}h`; };
 
-export function renderCard(t: Task, store: OrcStore): string {
-  if (t.kind === "loop") return renderLoopCard(t, store.getLedger<Ledger>(t.id));
+export function renderCard(t: Task, store: OrcStore, threaded = false): string {
+  if (t.kind === "loop") return renderLoopCard(t, store.getLedger<Ledger>(t.id), threaded);
   const stage = t.preset.stages[Math.min(t.stageIdx, t.preset.stages.length - 1)];
   const icon = STATUS_ICON[t.status];
-  const mins = Math.round((Date.now() - t.createdAt) / 60_000);
   const lines = [
     `**${icon} #${t.id} ${t.title}**`,
-    `${t.preset.name} · 阶段 ${t.status === "ready" ? "完成" : `${stage.id}(${t.stageIdx + 1}/${t.preset.stages.length})`} · ${t.status} · ${mins}m`,
+    `${t.preset.name} · 阶段 ${t.status === "ready" ? "完成" : `${stage.id}(${t.stageIdx + 1}/${t.preset.stages.length})`} · ${STATUS_ZH[t.status]} · ${age(Date.now() - t.createdAt)}`,
   ];
   const loops = Object.entries(t.loops).filter(([k]) => !k.includes(":"));
   if (loops.length) lines.push(`退回：${loops.map(([k, v]) => `${k} ${v}/${t.preset.stages.find((s) => s.id === k)?.maxLoops ?? "?"}`).join("，")}`);
-  lines.push(`最近：${t.progress || "-"}`);
-  const atts = store.listAttempts(t.id).slice(-6);
+  const all = store.listAttempts(t.id);
+  const atts = all.slice(-6);
+  const role = t.preset.roles[stage.role];
+  const others = (t.status === "running" || t.status === "queued") && !all.some((a) => a.status === "running")
+    ? store.runningAttempts().filter((a) => a.role === stage.role && a.taskId !== t.id) : [];
+  if (role && others.length >= role.count) {
+    lines.push(`⏳ 排队等 ${stage.role}：名额被 ${others.map((a) => `#${a.taskId}`).join("、")} 占着`);
+  } else {
+    lines.push(`最近：${t.progress || "-"}`);
+  }
+  const tok = all.reduce((s, a) => s + (a.tokens || 0), 0);
+  if (tok) lines.push(`已用 ${(tok / 1e6).toFixed(1)}M tokens · ${all.length} 次运行`);
   if (atts.length) {
     lines.push("", ...atts.map((a) => {
       const mark = a.status === "running" ? "▶" : a.parsed?.pass ? "✓" : a.status === "done" ? "✗" : "·";
-      return `${mark} ${a.stageId}/${a.role} \`${a.cli}${a.model ? ":" + a.model : ""}\` ${(a.parsed?.summary || a.progress || a.error || "").slice(0, 80)}`;
+      const tail = threaded ? "" : ` ${(a.parsed?.summary || a.progress || a.error || "").slice(0, 80)}`;
+      return `${mark} ${a.stageId}/${a.role} \`${a.cli}${a.model ? ":" + a.model : ""}\`${tail}`;
     }));
   }
   if (t.branch) lines.push("", `分支 \`${t.branch}\``);
+  if (threaded) lines.push("", "每个 agent 的过程和结论在这条消息的回复串里。");
   return lines.join("\n");
 }
 
-export function renderLoopCard(t: Task, l: Ledger | undefined): string {
+export function renderLoopCard(t: Task, l: Ledger | undefined, threaded = false): string {
   const loop = t.preset.loop;
   const lines = [
     `**${STATUS_ICON[t.status]} #${t.id} ${t.title}**`,
@@ -188,7 +205,7 @@ export function renderLoopCard(t: Task, l: Ledger | undefined): string {
     lines.push("", ...l.plan.slice(0, 8).map((p) => `${mark[p.status]} ${clip(p.text, 80)}`));
   }
   if (t.branch) lines.push("", `分支 \`${t.branch}\``);
-  if (!TERMINAL.includes(t.status) || t.status === "blocked") lines.push("", "每轮的主 ↔ 子交互在这条消息的回复串里。直接在群里说话就能影响它：补充要求、改口径、换模型、叫停都行。");
+  if (!TERMINAL.includes(t.status) || t.status === "blocked") lines.push("", `${threaded ? "每轮一张卡片（监督者和执行者各跑了什么、结论是什么）" : "每轮的主 ↔ 子交互"}在这条消息的回复串里。直接在群里说话就能影响它：补充要求、改口径、换模型、叫停都行。`);
   return lines.join("\n");
 }
 
@@ -196,10 +213,49 @@ async function refreshCard(t: Task, force = false): Promise<void> {
   const im = clientFor(t.chatId);
   const cardId = cardMap().get(t.id);
   if (!im || !cardId || !orc) return;
+  void syncAgentCards(t);
   const now = Date.now();
   if (!force && now - (cardTouched.get(t.id) ?? 0) < CARD_THROTTLE_MS) return;
   cardTouched.set(t.id, now);
-  await im.updateCardMessage(cardId, renderCard(t, orc.store)).catch(() => {});
+  await im.updateCardMessage(cardId, renderCard(t, orc.store, threadCards(t))).catch(() => {});
+}
+
+// ---- per-agent cards in the task card's thread (agent-cards.ts) ----------------
+
+let agentCards: AgentCards | null = null;
+const cardsOf = () => (agentCards ??= new AgentCards(resolve(ORC_HOME, "agent-cards.json")));
+const syncChain = new Map<number, Promise<void>>();
+
+/** This task gets per-agent thread cards (platform has threads, chat not set to quiet) */
+function threadCards(t: Task): boolean {
+  if (!AGENT_CARDS_ON() || !t.chatId) return false;
+  const im = clientFor(t.chatId);
+  if (!im?.replyCardInThread || !cardMap().get(t.id)) return false;
+  const v = t.kind === "loop" ? orc?.store.getLedger<Ledger>(t.id)?.verbosity : getProfile(t.chatId).verbosity;
+  return v !== "quiet";
+}
+
+/** Pipeline: create / update / finalise the card of every attempt (serialised per task) */
+function syncAgentCards(t: Task): Promise<void> {
+  if (t.kind === "loop" || !orc || !threadCards(t)) return Promise.resolve();
+  const im = clientFor(t.chatId)!;
+  const root = cardMap().get(t.id)!;
+  const store = orc.store;
+  const next = (syncChain.get(t.id) ?? Promise.resolve())
+    .then(() => cardsOf().syncAttempts(im, root, store.getTask(t.id) ?? t, store.listAttempts(t.id), ORC_HOME))
+    .catch((e) => console.error(`[orc] agent cards #${t.id}:`, (e as Error).message));
+  syncChain.set(t.id, next);
+  return next;
+}
+
+function loopRunCard(t: Task, ev: LoopRunEvent): void {
+  if (!threadCards(t)) return;
+  const im = clientFor(t.chatId)!;
+  const root = cardMap().get(t.id)!;
+  const next = (syncChain.get(t.id) ?? Promise.resolve())
+    .then(() => cardsOf().loopRun(im, root, ev))
+    .catch((e) => console.error(`[orc] agent cards #${t.id}:`, (e as Error).message));
+  syncChain.set(t.id, next);
 }
 
 export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator {
@@ -225,11 +281,16 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       if (n.kind === "turn") {
         void refreshCard(t);
         const cardId = cardMap().get(t.id);
+        if (cardId && n.round !== undefined && threadCards(t)) {
+          await (syncChain.get(t.id) ?? Promise.resolve());
+          if (await cardsOf().loopTurn(f, cardId, t.id, n.round, n.text)) return;
+        }
         if (cardId && await f.replyInThread(cardId, n.text)) return;
         await f.sendMarkdown(t.chatId, `**#${t.id}** ${n.text}`);
         return;
       }
       await refreshCard(t, true);
+      await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
       const tail = n.kind === "decision" && t.kind !== "loop" ? `\n\n要重试就直接说「再试一次」，可以顺带补充要改的地方；不需要了就说「放弃」。` : "";
       await f.sendMarkdown(t.chatId, `**${head} · #${t.id} ${t.title}**\n\n${n.text}${tail}`);
@@ -245,6 +306,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
         if (!f || !t.chatId) return;
         void f.sendCardAndGetId(t.chatId, renderWatchCard(w)).then((id) => { if (id) updateWatch(w.id, { cardId: id }); }).catch(() => {});
       },
+      onRun: loopRunCard,
     },
   });
   orc.start();
@@ -263,7 +325,7 @@ export async function submitFromChat(
   bindChat(chatId, im);
   const task = o.submit({ goal, repo, preset, chatId, ...extra });
   const cardId = await im.sendCardAndGetId(chatId, renderCard(task, o.store)).catch(() => undefined);
-  if (cardId) setCard(task.id, cardId);
+  if (cardId) { setCard(task.id, cardId); void syncAgentCards(o.store.getTask(task.id) ?? task); }
   return task;
 }
 

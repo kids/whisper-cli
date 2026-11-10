@@ -50,6 +50,8 @@ export interface ImClient {
   /** Last update of a card (WeCom closes the stream); false → caller posts the text instead */
   finalizeCard(id: string, text: string): Promise<boolean>;
   replyInThread(messageId: string, text: string): Promise<boolean>;
+  /** Card reply in the message's thread, returning an id for updateCardMessage; absent = no threads (WeCom) */
+  replyCardInThread?(messageId: string, text: string): Promise<string | undefined>;
   downloadAttachments(messageId: string, workspace: string, attachments: IncomingAttachment[]): Promise<string[]>;
   sendAgentImages(chatId: string, images: AgentImage[]): Promise<void>;
   sendAgentFiles(chatId: string, files: AgentFile[]): Promise<void>;

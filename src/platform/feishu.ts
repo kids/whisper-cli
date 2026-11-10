@@ -131,16 +131,21 @@ export class FeishuClient implements ImClient {
 
   /** Reply inside the message's thread (话题); false if the API refused (caller falls back) */
   async replyInThread(messageId: string, text: string): Promise<boolean> {
+    return (await this.replyCardInThread(messageId, text)) !== undefined;
+  }
+
+  /** Card reply inside the message's thread; returns its message id (editable with updateCardMessage) */
+  async replyCardInThread(messageId: string, text: string): Promise<string | undefined> {
     try {
       const resp = await this.client.im.v1.message.reply({
         path: { message_id: messageId },
         data: { msg_type: "interactive", content: FeishuClient.buildMarkdownCard(text.slice(0, 4000)), reply_in_thread: true } as any,
       });
       if (resp.code !== 0) console.error(`[feishu] replyInThread code=${resp.code} msg=${resp.msg}`);
-      return resp.code === 0;
+      return resp.code === 0 ? resp.data?.message_id ?? "" : undefined;
     } catch (e) {
       console.error("[feishu] replyInThread exception:", (e as Error).message);
-      return false;
+      return undefined;
     }
   }
 

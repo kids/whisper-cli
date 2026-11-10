@@ -33,7 +33,7 @@ export interface OrchestratorOptions {
   tickMs?: number;
   progressThrottleMs?: number;
   /** Supervisor-loop hooks (watch routing etc.) */
-  loop?: Pick<LoopOptions, "watchBot" | "onWatchCreated" | "concurrency" | "askTimeoutMs" | "verifyTimeoutMs">;
+  loop?: Pick<LoopOptions, "watchBot" | "onWatchCreated" | "onRun" | "concurrency" | "askTimeoutMs" | "verifyTimeoutMs">;
 }
 
 const MAX_NOTIFY_TRIES = 5;
@@ -349,10 +349,11 @@ export class Orchestrator {
 
     // Enforce isolation on the worktree, then commit writers' work
     let violation = "";
+    let sha: string | undefined;
     if (role.isolation === "readonly") {
       if (wt.isDirty(task.worktree!)) violation = wt.resetHard(task.worktree!);
     } else {
-      wt.commitAll(task.worktree!, `orc(#${task.id}) ${stage.id}: ${role.name} attempt ${n}`);
+      sha = wt.commitAll(task.worktree!, `orc(#${task.id}) ${stage.id}: ${role.name} attempt ${n}`);
     }
 
     const interrupted = (handle as any).interrupt && !handle.cancelled;
@@ -371,6 +372,8 @@ export class Orchestrator {
         status: interrupted || outcome.kind === "cancelled" ? "cancelled" : outcome.kind === "run_error" ? "failed" : "done",
         output: result.text.slice(0, 200_000), parsed, error: result.error ?? "", sessionId: result.sessionId,
         tokens: result.tokens, endedAt: Date.now(),
+        // finished attempts keep only the commit as their progress line (agent card / task card show it)
+        progress: sha ? `提交 ${sha.slice(0, 7)}` : "",
       });
       const fresh = this.store.getTask(task.id)!;
       if (interrupted) {

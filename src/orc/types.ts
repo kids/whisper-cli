@@ -205,4 +205,6 @@ export interface NotifyPayload {
   taskId: number;
   kind: NotifyKind;
   text: string;
+  /** loop "turn": the round it summarises (its thread card gets finalised with the text) */
+  round?: number;
 }
