@@ -159,7 +159,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 ### 6.1 入口与主 agent
 
-- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，可用 `ORC_LEAD_MODEL` 换便宜模型。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。
+- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，默认模型见 §6.2 角色表下方，可用 `ORC_LEAD_MODEL` 覆盖。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。
 - 兜底命令（用户一般不用）：`/mode auto|single|orc [组合]`、`/task <目标>`、`/task <id>`、`/task stop|retry|attach <id> …`、`/tasks`、`/orc`、`/orc preset <名> | reset | confirm | cancel`。bot 自己的提示文案只教自然语言（"回复「确认」""说「再试一次」"），不再教命令。
 - 主 agent 只输出一个动作，由代码执行：
 
@@ -191,14 +191,17 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `review` | 流水线 | 两个不同模型各审一遍 → 汇总，只审不改 |
 | `loop` | 监督循环 | 监督者 supervisor ⇄ 执行者 implementer，审查者 critic |
 
-| 角色 | 默认 CLI | 输出 | 隔离 |
+| 角色 | 默认 CLI / 模型 | 输出 | 隔离 |
 |---|---|---|---|
-| planner / researcher / synthesizer | codebuddy | plan / report | 只读 |
-| implementer / reproducer | codebuddy | impl | worktree 可写（implementer 续接会话） |
-| critic | codex | verdict | 只读 |
-| critic_alt | codebuddy | verdict | 只读 |
-| tester | codebuddy | test | 每次新开 |
-| supervisor | codebuddy | action | 只读 |
+| planner | codebuddy / claude-sonnet-5.5 | plan | 只读 |
+| supervisor | codebuddy / claude-sonnet-5.5 | action | 只读 |
+| implementer / reproducer | codebuddy / deepseek-v4.1-flash-ioa | impl | worktree 可写（implementer 续接会话） |
+| tester | codebuddy / deepseek-v4.1-flash-ioa | test | 每次新开 |
+| researcher / synthesizer | codebuddy / deepseek-v4.1-flash-ioa | report | 只读 |
+| critic | codebuddy / gpt-6.1-sol | verdict | 只读 |
+| critic_alt | codebuddy / claude-opus-5.5 | verdict | 只读 |
+
+模型写在 `orc/roles/<角色>.md` 文件头。把角色换到别的 CLI 而不指定模型时，用那个 CLI 的默认模型；换到 cursor 一律是 `auto`。主 agent 默认：codebuddy bot 用 claude-sonnet-5.5，cursor bot 用 auto，其他 CLI 用各自默认；`ORC_LEAD_MODEL` 优先。
 
 通用机制：每个任务一个 git worktree 和分支，写入角色每轮自动提交；只读角色越权写入会被回滚；角色并发名额限制；所有副作用（启动、通知、轮次）都是持久化 effect，崩溃恢复后重放。
 
@@ -284,7 +287,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `WATCH_TICK_MS` / `WATCHES_PATH` | 15 秒 / `state/watches.json` | 监控扫描间隔 / 存储位置 |
 | `CHAT_MEMORY_DIR` / `RECENT_TURNS_PATH` | `state/…` | 群记忆 / 最近对话位置 |
 | `ORC_HOME` / `ORC_CHATS_PATH` | `~/.orc` / `state/orc-chats.json` | orc 数据 / 群编排配置 |
-| `ORC_LEAD_MODEL` / `ORC_LEAD_HARD_MS` / `ORC_LEAD_STALE_MS` | — | 主 agent 模型与超时 |
+| `ORC_LEAD_MODEL` / `ORC_LEAD_HARD_MS` / `ORC_LEAD_STALE_MS` | codebuddy→claude-sonnet-5.5，cursor→auto / 4 分钟 / 2 分钟 | 主 agent 模型与超时 |
 | `WHISPER_TASK_HINT` | 开 | 设为 `0` 不向单 agent 注入 `[[task]]` 用法 |
 | `ORC_LOOP_CONCURRENCY` | 3 | 同时进行的监督循环轮次 |
 | `ORC_LOOP_ASK_TIMEOUT_MS` | 4 小时 | 非不可逆问题的默认回答时限 |

@@ -164,7 +164,8 @@ export function resolvePreset(
     }
     // A role's default model belongs to its default CLI: switching CLI without naming a
     // model means "that CLI's default" (cursor → auto), not e.g. a codebuddy model id.
-    const model = slot.model ?? (cli === role.cli ? role.model : undefined);
+    // Cursor always defaults to "auto" (Cursor picks the model).
+    const model = slot.model ?? (cli === role.cli ? role.model : undefined) ?? (cli === "cursor" ? "auto" : undefined);
     resolvedRoles[name] = { ...role, cli, model, count: slot.count };
   }
   const enabled = new Set(def.enabled ?? []);

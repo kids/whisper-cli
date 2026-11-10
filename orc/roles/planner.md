@@ -1,6 +1,7 @@
 ---
 description: 把目标澄清成可验收的规格；必要时拆成可并行、可独立验收的子任务
 cli: codebuddy
+model: claude-sonnet-5.5
 output: plan
 isolation: readonly
 hard_timeout_min: 20

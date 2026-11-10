@@ -1,6 +1,7 @@
 ---
-description: 对抗式代码/方案评审（只读），刻意与实现者使用不同的模型或 CLI
-cli: codex
+description: 对抗式代码/方案评审（只读），刻意与实现者使用不同的模型
+cli: codebuddy
+model: gpt-6.1-sol
 output: verdict
 isolation: readonly
 hard_timeout_min: 30

@@ -1,6 +1,7 @@
 ---
 description: 按规格实现，附带必要的测试；返工时续接自己的会话
 cli: codebuddy
+model: deepseek-v4.1-flash-ioa
 output: impl
 isolation: worktree
 resume: true

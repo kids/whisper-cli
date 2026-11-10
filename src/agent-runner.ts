@@ -72,6 +72,9 @@ import {
 } from "./watch";
 import { loadAllAgents } from "./config";
 
+/** orc lead agent model per bot CLI when ORC_LEAD_MODEL is unset (others: the CLI's own default) */
+const LEAD_DEFAULT_MODEL: Partial<Record<AgentConfig["aiCli"], string>> = { codebuddy: "claude-sonnet-5.5", cursor: "auto" };
+
 /** Tools denied to read-only runs (orc lead agent); Bash too, since it can write */
 const READ_ONLY_DENY = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
 import {
@@ -1150,7 +1153,7 @@ export class AgentRunner {
           readOnly: true,
           hardTimeoutMs: Number(process.env.ORC_LEAD_HARD_MS || 4 * 60_000),
           staleTimeoutMs: Number(process.env.ORC_LEAD_STALE_MS || 2 * 60_000),
-          model: process.env.ORC_LEAD_MODEL || undefined,
+          model: process.env.ORC_LEAD_MODEL || LEAD_DEFAULT_MODEL[this.config.aiCli],
         });
         this.clearAiKey(sessionKey);
         return res.text;

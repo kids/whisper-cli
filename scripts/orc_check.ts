@@ -60,7 +60,7 @@ const presets = loadPresets();
   check("reject unknown role", throws(() => resolvePreset(applyPatch(dev, { roles: { wizard: { count: 1 } } }, presets), roles), /not in the role library/));
   check("reject count", throws(() => resolvePreset(applyPatch(dev, { roles: { implementer: { count: 99 } } }, presets), roles), /count must be/));
   check("reject unbounded loop", throws(() => resolvePreset(applyPatch(dev, { maxLoops: { review: 0 } }, presets), roles), /max_loops/));
-  check("reject unavailable cli", throws(() => resolvePreset(dev, roles, { availableClis: ["codebuddy"] }), /not configured/));
+  check("reject unavailable cli", throws(() => resolvePreset(dev, roles, { availableClis: ["codex"] }), /not configured/));
   check("reject non-optional enable", throws(() => applyPatch(dev, { enable: ["review"] }, presets), /not an optional stage/));
   const bad = structuredClone(dev); bad.stages[2].onFail = "test"; bad.stages[2].maxLoops = 1;
   check("reject forward on_fail", throws(() => resolvePreset(bad, roles), /must point backwards/));
@@ -208,7 +208,7 @@ async function e2e() {
     const critics = exec.calls.filter((c) => c.role === "critic");
     check("A critic fresh sessions + readOnly", critics[0].sessionKey !== critics[1].sessionKey && critics.every((c) => c.readOnly && !c.resumeSessionId));
     check("A critic sees diff", /feature-1\.txt/.test(critics[0].prompt));
-    check("A critic on codex", critics.every((c) => c.cli === "codex"));
+    check("A critic on codebuddy gpt-6.1-sol, implementer on deepseek", critics.every((c) => c.cli === "codebuddy" && c.model === "gpt-6.1-sol") && impls.every((c) => c.model === "deepseek-v4.1-flash-ioa"), [critics[0].cli, critics[0].model, impls[0].model]);
     check("A tester sees spec", exec.calls.find((c) => c.role === "tester")!.prompt.includes("写 feature.txt"));
     check("A artifacts are not violations", notes.filter((n) => /只读角色/.test(n.text)).length === 1 && !/__pycache__/.test(notes.find((n) => /只读角色/.test(n.text))!.text));
     check("A readonly violation reset", !existsSync(join(done.worktree!, "critic-was-here.txt")) && notes.some((n) => /只读角色/.test(n.text)));

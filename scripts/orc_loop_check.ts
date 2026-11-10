@@ -331,7 +331,7 @@ async function e2e() {
     const workers = exec.of(id, "worker");
     check("B approved irreversible instruct ran", steps[3]?.accepted && workers[0]?.req.prompt.includes("git push origin HEAD"), steps.map((s: any) => [s.n, s.accepted]));
     check("B approval single-use", steps[4]?.accepted === false && /不可逆/.test(steps[4].verdict) && l.approvals[0].used === true);
-    check("B role switch reported", switched === "implementer：codebuddy → claude", switched);
+    check("B role switch reported", switched === "implementer：codebuddy:deepseek-v4.1-flash-ioa → claude", switched);
     check("B switched worker: new CLI, fresh session + handoff", workers[1]?.req.cli === "claude" && !workers[1].req.resumeSessionId && /任务目标/.test(workers[1].req.prompt), workers.map((w) => [w.req.cli, w.req.resumeSessionId]));
     check("B switch visible to supervisor", exec.of(id, "supervisor").slice(-2).some((c) => /人调整了角色/.test(c.req.prompt)));
     check("B abort → failed with summary", store.getTask(id)!.status === "failed" && notes.some((n) => n.kind === "failed" && /没有 remote/.test(n.text) && /C1/.test(n.text)));

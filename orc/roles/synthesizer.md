@@ -1,6 +1,7 @@
 ---
 description: 汇总前面各阶段的结论，形成给人看的最终报告
 cli: codebuddy
+model: deepseek-v4.1-flash-ioa
 output: report
 isolation: readonly
 hard_timeout_min: 20

@@ -1,6 +1,7 @@
 ---
 description: 调研/方案对比：查资料与代码，给出有出处的结论
 cli: codebuddy
+model: deepseek-v4.1-flash-ioa
 output: report
 isolation: readonly
 hard_timeout_min: 40

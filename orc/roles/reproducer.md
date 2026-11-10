@@ -1,6 +1,7 @@
 ---
 description: 修 bug 前先用失败的测试稳定复现问题
 cli: codebuddy
+model: deepseek-v4.1-flash-ioa
 output: impl
 isolation: worktree
 hard_timeout_min: 40
