@@ -72,9 +72,9 @@ import { extractTaskOps, formatTaskHint, routeMessage } from "./orc/route";
 import { flushRecent, recordTurn } from "./recent";
 import { extractSendOps, formatSendHint, resolveOutgoing, sendRoots } from "./outgoing";
 import {
-  addWatch, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch, listWatches,
-  loopTaskOf, parseStopWatchIntent, parseWatchSpec, planStopWatches, registerWatchHost, renderWatchCard, startWatches,
-  tickWatches, updateWatch, watchCommandKind,
+  addWatch, buildReportPrompt, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch,
+  isWatchNoteUpdate, listWatches, loopTaskOf, parseStopWatchIntent, parseWatchNote, parseWatchSpec, planStopWatches,
+  registerWatchHost, renderWatchCard, setWatchNote, startWatches, tickWatches, updateWatch, watchCommandKind,
   type CheckResult, type Watch,
 } from "./watch";
 import { loadAllAgents } from "./config";
@@ -351,6 +351,7 @@ export class AgentRunner {
       registerWatchHost(this.config.name, {
         card: async (w) => { if (w.cardId) await this.im?.updateCardMessage(w.cardId, renderWatchCard(w)); },
         fire: (w, r) => this.onWatchFire(w, r),
+        report: (w, r) => this.onWatchReport(w, r),
       });
       startWatches();
       if (hasOrcState()) {
@@ -984,6 +985,16 @@ export class AgentRunner {
     enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "wake" }));
   }
 
+  /** Soft wake: agent refreshes the card note; watch stays active */
+  private async onWatchReport(w: Watch, r: CheckResult): Promise<void> {
+    if (w.sessionKey.startsWith("orc-loop:")) return; // loop tasks use their own heartbeat
+    const ev: ChatEvent = {
+      messageId: `watch-report-${w.id}-${Date.now()}`, chatId: w.chatId, chatType: "group", messageType: "text",
+      text: buildReportPrompt(w, r), senderOpenId: "", content: "", attachments: [],
+    };
+    enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "wake" }));
+  }
+
   private async handleModelCommand(ev: ChatEvent): Promise<boolean> {
     const arg = ev.text.trim().slice("/model".length).trim();
     const im = this.im!;
@@ -1164,7 +1175,18 @@ export class AgentRunner {
         for (const a of wops.add) {
           try {
             if (a.error) throw new Error(a.error);
-            const w = addWatch({ chatId, bot: this.config.name, sessionKey: chatId, cwd: workspace, spec: parseWatchSpec(a.raw, workspace) });
+            if (isWatchNoteUpdate(a.raw)) {
+              const id = Number(a.raw.id);
+              const note = parseWatchNote(a.raw);
+              if (!note) throw new Error("note must be non-empty");
+              const w = setWatchNote(id, note, chatId);
+              if (!w) throw new Error(`监控 #${id} 不存在或不属于本群`);
+              if (w.cardId) void this.im?.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+              watchNotes.push(`👀 已更新监控 #${id} 的说明`);
+              continue;
+            }
+            const note = parseWatchNote(a.raw);
+            const w = addWatch({ chatId, bot: this.config.name, sessionKey: chatId, cwd: workspace, spec: parseWatchSpec(a.raw, workspace), note });
             newWatches.push(w);
             watchNotes.push(`👀 已登记监控 #${w.id}「${w.spec.title}」：${describeSpec(w.spec)}`);
           } catch (e) {
