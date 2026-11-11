@@ -459,7 +459,8 @@ export async function tickWatches(now = Date.now(), only?: number): Promise<numb
         ...(r.fire ? { status: r.fire.kind === "timeout" ? "expired" : "fired", fired: { reason: r.fire.reason, at: now } } : {}),
       });
       const cur = getWatch(w.id)!;
-      await host.card?.(cur).catch(() => {});
+      // card text is agent note only — probes never rewrite it; refresh once on terminal so IM keeps the last note
+      if (r.fire) await host.card?.(cur).catch(() => {});
       if (r.fire) {
         await host.fire(cur, r).catch((e) => console.warn(`[watch] #${w.id} fire handler failed: ${(e as Error).message}`));
       } else if (cur.spec.reportEveryS && host.report && (cur.nextReportAt ?? 0) <= now) {
@@ -484,15 +485,15 @@ export function stopWatches(): void {
 
 // ---- rendering / protocol -----------------------------------------------------
 
-/** Thin shell: status · id · title · age; body is the agent's note (probe summary only as fallback). */
-export function renderWatchCard(w: Watch, now = Date.now()): string {
-  const icon = { active: "👀", fired: "🔔", expired: "⌛", cancelled: "🛑", error: "⚠️" }[w.status];
-  const head = `**${icon} 监控 #${w.id} ${w.spec.title}** · ${fmtAge((now - w.createdAt) / 1000)}`;
-  const body = (w.note?.trim() || w.summary || "").trim();
-  const tail = w.status === "active"
-    ? `不用盯了就说「停掉监控 #${w.id}」`
-    : w.fired ? `${w.status === "expired" ? "超时" : "触发"}：${w.fired.reason}` : w.status === "cancelled" ? "已停止" : "";
-  return [head, body, tail].filter(Boolean).join("\n");
+/**
+ * Card == agent note, verbatim. No status icons, age, probe summary, or stop hints —
+ * those are templates; humans should read what the agent wrote. Empty note → bare id line
+ * so a card can exist until the first report.
+ */
+export function renderWatchCard(w: Watch): string {
+  const note = w.note?.trim();
+  if (note) return note.slice(0, MAX_NOTE);
+  return `监控 #${w.id} ${w.spec.title}`;
 }
 
 export function describeSpec(s: WatchSpec): string {
@@ -507,14 +508,14 @@ export function describeSpec(s: WatchSpec): string {
 export function formatWatchContext(chatId: string): string {
   const active = listWatches({ chatId, status: ["active"] });
   return [
-    "【长任务监控】你的每一轮最长几十分钟，不要在一轮里等待训练/批处理/长作业结束。正确做法：",
-    "1. 脱离当前会话在后台启动并落日志，例如 `setsid nohup python train.py > out/train.log 2>&1 < /dev/null & echo $!` 拿到 pid（本轮结束后进程要继续活着）；",
-    "2. 在回复末尾单独一行登记监控（代码定时探测、零 token；群里的卡片正文用你写的 note，不要指望代码拼进展）：",
-    '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl","show":["step","loss"]},"every":"10m","timeout":"2d","report":"1h","note":"Adam 阶段，目标 step≥100k；当前刚启动。","on_wake":"跑 eval.py 汇报指标"}`',
-    "   至少给 pid/log/metrics/file/cmd 之一；`note` 给人看（阶段、关键指标、关注点）；可选 `report`（≥30m）到点叫醒你刷新 note；不写 on_wake 则只通知、不叫醒；",
-    "3. 刷新卡片：`[[watch]] {\"id\":编号,\"note\":\"…更新后的说明\"}`。取消：`[[unwatch]] 编号`。然后结束本轮。",
+    "【长任务监控】你的每一轮最长几十分钟，不要在一轮里干等长作业。正确做法：",
+    "1. 后台启动并落日志（`setsid nohup … & echo $!`），本轮结束后进程要还活着；",
+    "2. 末尾行登记监控。代码只负责探测（零 token）；**群卡片 = 你写的 `note` 原文，代码不加任何壳**：",
+    '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl"},"every":"10m","timeout":"2d","report":"1h","note":"刚启动 Adam，目标 ≥100k step。","on_wake":"跑 eval 并汇报"}`',
+    "   至少 pid/log/metrics/file/cmd 之一；`note` 写给人看的关键进展（不要贴大表）；可选 `report`（≥30m）到点叫醒你改 note；无 on_wake 则只通知；",
+    "3. 更新进展：`[[watch]] {\"id\":编号,\"note\":\"…这段话会原样出现在卡片上\"}`。取消：`[[unwatch]] 编号`。",
     active.length
-      ? `本群进行中的监控：\n${active.map((w) => `- #${w.id} ${w.spec.title}：${(w.note || w.summary).replace(/\s+/g, " ").slice(0, 120)}`).join("\n")}`
+      ? `本群进行中的监控：\n${active.map((w) => `- #${w.id} ${w.spec.title}${w.note ? "：" + w.note.replace(/\s+/g, " ").slice(0, 120) : "（还没写 note）"}`).join("\n")}`
       : "",
   ].filter(Boolean).join("\n");
 }
@@ -554,14 +555,14 @@ export function buildWakePrompt(w: Watch, r: CheckResult): string {
   ].filter(Boolean).join("\n\n");
 }
 
-/** Soft wake: refresh the human-facing note; does not end the watch */
+/** Soft wake: agent reports key progress into note (card shows that text only). */
 export function buildReportPrompt(w: Watch, r: CheckResult): string {
   return [
-    `【监控 #${w.id} 进展刷新】「${w.spec.title}」已运行 ${fmtAge((Date.now() - w.createdAt) / 1000)}，到点更新群卡片说明。`,
-    `探测摘要：${r.summary || w.summary}`,
-    r.evidence ? `观测：\n${r.evidence}` : "",
-    w.note ? `卡片上现有说明：\n${w.note}` : "卡片还没有说明。",
-    `请核实现状后，用一行 \`[[watch]] {"id":${w.id},"note":"…"}\` 更新给人看的说明（阶段、关键指标、是否正常、大概还要多久）。不要重跑作业；若已结束或出错，按 on_wake 处理或新登记监控。`,
+    `【监控 #${w.id} 进展刷新】「${w.spec.title}」已运行 ${fmtAge((Date.now() - w.createdAt) / 1000)}。请只汇报关键进展，不要贴大表。`,
+    `探测（仅供你参考，不要原样贴进卡片）：${r.summary || w.summary}`,
+    r.evidence ? `观测摘录：\n${r.evidence.slice(0, 1500)}` : "",
+    w.note ? `你上次写的 note：\n${w.note}` : "还没有 note。",
+    `看完现状后，用一行 \`[[watch]] {"id":${w.id},"note":"…"}\` 写一小段关键进展（阶段/关键数字/是否正常/大概还要多久）。卡片只会显示这段原文。不要重跑作业；若已结束或出错，按 on_wake 处理。`,
   ].filter(Boolean).join("\n\n");
 }
 

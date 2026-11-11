@@ -139,11 +139,11 @@ const wb = W.addWatch({ chatId: "oc_other", bot: "absent-bot", sessionKey: "oc_o
 check("first check within a minute", wa.nextAt - wa.createdAt <= 60_000);
 check("not due yet → nothing", (await W.tickWatches(Date.now())) === 0);
 let n = await W.tickWatches(Date.now() + 61_000);
-check("due → probed, card updated, not fired", n === 1 && cards.includes(wa.id) && !fired.length && W.getWatch(wa.id)!.checks === 1);
+check("due → probed, no card (note-only cards)", n === 1 && !cards.length && !fired.length && W.getWatch(wa.id)!.checks === 1);
 check("next check scheduled by every", W.getWatch(wa.id)!.nextAt >= Date.now() + 60_000);
 writeFileSync(done, "1");
 n = await W.tickWatches(Date.now() + 200_000);
-check("condition → fired once", fired.join() === String(wa.id) && W.getWatch(wa.id)!.status === "fired" && !!W.getWatch(wa.id)!.fired);
+check("condition → fired once + card refresh", fired.join() === String(wa.id) && cards.includes(wa.id) && W.getWatch(wa.id)!.status === "fired" && !!W.getWatch(wa.id)!.fired);
 await W.tickWatches(Date.now() + 400_000);
 check("fired watch not probed again", fired.length === 1);
 check("watch of an absent bot is left alone", W.getWatch(wb.id)!.status === "active" && W.getWatch(wb.id)!.checks === 0);
@@ -153,22 +153,21 @@ check("cancel only own chat", !W.cancelWatch(wb.id, "oc_w") && W.cancelWatch(wb.
 for (let i = 0; i < W.MAX_ACTIVE_PER_CHAT; i++) mk({ cmd: "exit 1" }, "oc_cap");
 check("per-chat cap", throws(() => mk({ cmd: "exit 1" }, "oc_cap"), /上限/));
 
-// --- rendering ---
+// --- rendering (card == agent note only) ---
 const card = W.renderWatchCard(W.getWatch(wa.id)!);
-check("card shows fired reason", card.includes("🔔") && card.includes("产物已出现"), card);
+check("fired card without note is bare id", card === `监控 #${wa.id} mgr`, card);
 const ctx = W.formatWatchContext("oc_cap");
 check("context: protocol + active list", ctx.includes("[[watch]]") && ctx.includes("setsid") && ctx.includes("本群进行中的监控") && ctx.includes("note"));
 const wake = W.buildWakePrompt({ ...W.getWatch(wa.id)!, spec: { ...W.getWatch(wa.id)!.spec, onWake: "跑 eval" } }, { fire: { kind: "file", reason: "产物已出现" }, summary: "", evidence: "日志末尾：ok", logOffset: 0 });
 check("wake prompt has reason, evidence, on_wake", wake.includes("产物已出现") && wake.includes("日志末尾：ok") && wake.includes("跑 eval"));
-check("active card tells how to stop in words", W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active" }).includes("停掉监控 #") && !W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active" }).includes("/watch"));
-check("thin card: no check-count template", !W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active", summary: "进程 1 运行中" }).includes("已检查") && !W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active" }).includes("下次检查"));
+check("card has no stop/age/probe template", !/停掉监控|已检查|下次检查|运行中|🔔|👀/.test(W.renderWatchCard({ ...W.getWatch(wa.id)!, status: "active", summary: "进程 1 运行中" })));
 check("report <30m clamped up", W.parseWatchSpec({ title: "n", pid: 999999, report: "10m" }, dir).reportEveryS === W.MIN_REPORT_S);
 const noted = W.addWatch({ chatId: "oc_note", bot: "bot", sessionKey: "oc_note", cwd: dir, spec: W.parseWatchSpec({ title: "n", pid: 999999, report: "1h" }, dir), note: "Adam 阶段 step 12k/100k，loss 下降中" });
 check("report 1h kept", noted.spec.reportEveryS === 3600, noted.spec.reportEveryS);
-check("note on card preferred over summary", W.renderWatchCard({ ...noted, summary: "进程 999999 运行中" }).includes("Adam 阶段") && !W.renderWatchCard({ ...noted, summary: "进程 999999 运行中" }).includes("进程 999999 运行中"));
+check("card is note verbatim, never probe summary", W.renderWatchCard({ ...noted, summary: "进程 999999 运行中" }) === "Adam 阶段 step 12k/100k，loss 下降中");
 check("note update", W.setWatchNote(noted.id, "已到 50k", "oc_note")?.note === "已到 50k" && W.isWatchNoteUpdate({ id: noted.id, note: "x" }) && !W.isWatchNoteUpdate({ title: "t", pid: 999999 }));
 const report = W.buildReportPrompt(noted, { summary: "step 50k", evidence: "metrics ok", logOffset: 0 });
-check("report prompt asks for note refresh", report.includes(`"id":${noted.id}`) && report.includes("note") && report.includes("step 50k"));
+check("report prompt asks for note refresh", report.includes(`"id":${noted.id}`) && report.includes("note") && report.includes("step 50k") && report.includes("关键进展"));
 
 // --- natural-language stop ---
 const intents: [string, { ids: number[]; all: boolean } | undefined][] = [
