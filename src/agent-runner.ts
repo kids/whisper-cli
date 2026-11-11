@@ -113,9 +113,19 @@ import {
 const CHAT_QUEUES = new Map<string, Promise<void>>();
 function enqueue(chatId: string, task: () => Promise<void>): void {
   const prev = CHAT_QUEUES.get(chatId) ?? Promise.resolve();
+  const queued = CHAT_QUEUES.has(chatId);
+  if (queued) console.log(`[queue] chat=${chatId.slice(0, 8)} queued behind in-flight turn`);
   const next = prev
     .catch(() => {})
-    .then(task)
+    .then(async () => {
+      const t0 = Date.now();
+      console.log(`[queue] chat=${chatId.slice(0, 8)} turn start`);
+      try {
+        await task();
+      } finally {
+        console.log(`[queue] chat=${chatId.slice(0, 8)} turn end ${Date.now() - t0}ms`);
+      }
+    })
     .catch((e) => console.error("[queue] task error:", e))
     .finally(() => {
       if (CHAT_QUEUES.get(chatId) === next) CHAT_QUEUES.delete(chatId);
@@ -1132,13 +1142,15 @@ export class AgentRunner {
       result = { text: `⚠️ Error: ${(err as Error).message}` };
     }
 
-    // `[[remember]]` / `[[forget]]` lines → per-chat memory (stripped from the reply)
-    let memoryFooter = "";
+    // `[[remember]]` / `[[forget]]` lines → per-chat memory (stripped; apply silently)
     if (!isReview) {
       const ops = extractMemoryOps(result.text || "");
       if (ops.remember.length || ops.forget.length) {
         result = { ...result, text: ops.text };
-        memoryFooter = applyMemoryOps(chatId, ops, "agent");
+        // Apply in code; do NOT echo "已记入本群记忆" back into the chat —
+        // that footer was noisy, and session context already covers the turn.
+        const note = applyMemoryOps(chatId, ops, "agent");
+        if (note) console.log(`[memory] chat=${chatId.slice(0, 8)} ${note.replace(/\n/g, " | ")}`);
       }
     }
 
@@ -1164,9 +1176,6 @@ export class AgentRunner {
           watchNotes.push(t ? `监控 #${id} 属于团队任务 #${t}，没有停` : this.cancelAndRefresh(id, chatId) ? `🛑 已停止监控 #${id}` : `监控 #${id} 不存在或已结束`);
         }
       }
-      // shared short transcript: the orc lead reads it when the chat switches modes
-      recordTurn(chatId, "user", opts?.kind === "wake" ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
-      recordTurn(chatId, "agent", result.text || "");
     }
 
     // `[[task]] {...}` lines → hand the work to an orc team (src/orc/route.ts)
@@ -1189,6 +1198,12 @@ export class AgentRunner {
       fallbackText: result.text,
     });
 
+    // shared short transcript after protocol lines are stripped
+    if (!isReview) {
+      recordTurn(chatId, "user", opts?.kind === "wake" ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
+      recordTurn(chatId, "agent", result.text || "");
+    }
+
     if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
 
     // Persist session: agent-runner Map (state file) + AI module Map + task store
@@ -1199,12 +1214,12 @@ export class AgentRunner {
 
     const usage = result.usage && result.usage.totalTokens > 0 ? result.usage : undefined;
     const header = isReview ? `**🔍 审视 [${label}]**\n\n` : "";
-    let body = header + (result.text || (sendOps.ops.length ? `📎 附件 ×${sendOps.ops.length}` : "(empty)"));
+    const nOut = outgoing.images.length + outgoing.files.length;
+    let body = header + (result.text || (nOut || sendOps.ops.length ? `📎 附件 ×${nOut || sendOps.ops.length}` : "(empty)"));
     if (usage) {
       const displayModel = result.model || this.getDefaultModelName() || null;
       body += formatUsageFooter(chatId, displayModel, usage);
     }
-    if (memoryFooter) body += `\n\n${memoryFooter}`;
     if (watchNotes.length) body += `\n\n${watchNotes.join("\n")}`;
     if (taskNotes.length) body += `\n\n${taskNotes.join("\n")}`;
     if (outgoing.notes.length) body += `\n\n${outgoing.notes.join("\n")}`;
@@ -1231,11 +1246,16 @@ export class AgentRunner {
       if (id) updateWatch(w.id, { cardId: id });
     }
 
-    if (result.images && result.images.length > 0) {
-      await im.sendAgentImages(chatId, result.images);
+    // Cursor generateImage tool results + [[image]]/[[file]] protocol paths
+    const images = [...(result.images ?? []), ...outgoing.images];
+    const files = [...(result.files ?? []), ...outgoing.files];
+    if (images.length) {
+      console.log(`[outgoing] chat=${chatId.slice(0, 8)} images=${images.length}`);
+      await im.sendAgentImages(chatId, images);
     }
-    if (result.files && result.files.length > 0) {
-      await im.sendAgentFiles(chatId, result.files);
+    if (files.length) {
+      console.log(`[outgoing] chat=${chatId.slice(0, 8)} files=${files.length}`);
+      await im.sendAgentFiles(chatId, files);
     }
   }
 

@@ -50,8 +50,21 @@ export function stopCursorRun(runKey: string): boolean {
   const run = activeRuns.get(runKey);
   if (!run) return false;
   run.cancelled = true;
-  try { run.child.kill("SIGTERM"); } catch {}
-  setTimeout(() => { try { run.child.kill("SIGKILL"); } catch {} }, 5000);
+  const pid = run.child.pid;
+  try {
+    if (pid) process.kill(-pid, "SIGTERM");
+    else run.child.kill("SIGTERM");
+  } catch {
+    try { run.child.kill("SIGTERM"); } catch {}
+  }
+  setTimeout(() => {
+    try {
+      if (pid) process.kill(-pid, "SIGKILL");
+      else run.child.kill("SIGKILL");
+    } catch {
+      try { run.child.kill("SIGKILL"); } catch {}
+    }
+  }, 5000);
   return true;
 }
 
@@ -186,11 +199,19 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       const child = spawn(bin, args, {
         env: { ...process.env, CURSOR_API_KEY: config.apiKey },
         stdio: ["ignore", "pipe", "pipe"],
+        // Own process group: jetsam/signals aimed at the bridge shouldn't
+        // automatically tear down an in-flight agent (and vice versa).
+        detached: true,
       });
 
       const activeRun: ActiveRun = { child, cancelled: false };
       activeRuns.set(chatId, activeRun);
       const clearRun = () => { if (activeRuns.get(chatId) === activeRun) activeRuns.delete(chatId); };
+      const killChild = (sig: NodeJS.Signals = "SIGTERM") => {
+        try { process.kill(-child.pid!, sig); } catch {
+          try { child.kill(sig); } catch {}
+        }
+      };
 
       let stderr = "";
       let resultText = "";
@@ -205,6 +226,8 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       const seenPaths = new Set<string>();
       const startedAt = Date.now();
       let lastOutputAt = startedAt;
+      const STDERR_CAP = 256 * 1024;
+      const SEGMENT_CAP = 2 * 1024 * 1024;
 
       const touch = () => { lastOutputAt = Date.now(); };
 
@@ -234,13 +257,13 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
         if (settled || child.exitCode != null) return;
         const now = Date.now();
         if (stallMs > 0 && now - lastOutputAt >= stallMs) {
-          try { child.kill("SIGTERM"); } catch {}
-          setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
+          killChild("SIGTERM");
+          setTimeout(() => killChild("SIGKILL"), 5000);
           finish({ text: `⏱️ Cursor Agent timed out: no output for ${fmtDur(now - lastOutputAt)}.` });
         }
         if (hardMs > 0 && now - startedAt >= hardMs) {
-          try { child.kill("SIGTERM"); } catch {}
-          setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
+          killChild("SIGTERM");
+          setTimeout(() => killChild("SIGKILL"), 5000);
           finish({ text: `⏱️ Cursor Agent timed out: reached ${fmtDur(hardMs)} limit.` });
         }
       }, Math.min(60_000, Math.max(1_000, Math.min(stallMs || 60_000, hardMs || 60_000) / 4)));
@@ -259,6 +282,9 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
           for (const c of ev.message.content) {
             if (c.type === "text" && c.text) {
               lastSegment += c.text;
+              if (lastSegment.length > SEGMENT_CAP) {
+                lastSegment = lastSegment.slice(-SEGMENT_CAP);
+              }
               const snippet = stripAnsi(c.text).replace(/\s+/g, " ").trim().slice(-80);
               if (snippet) onActivity?.(`💭 ${snippet}`);
               if (lastSegment) onStreamUpdate?.(stripAnsi(lastSegment));
@@ -276,6 +302,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       child.stdout!.on("data", (chunk: Buffer) => {
         touch();
         lineBuf += chunk.toString();
+        if (lineBuf.length > SEGMENT_CAP) lineBuf = lineBuf.slice(-SEGMENT_CAP);
         const lines = lineBuf.split("\n");
         lineBuf = lines.pop()!;
         for (const line of lines) processLine(line);
@@ -284,9 +311,13 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       child.stderr!.on("data", (chunk: Buffer) => {
         touch();
         stderr += chunk.toString();
+        if (stderr.length > STDERR_CAP) stderr = stderr.slice(-STDERR_CAP);
       });
 
       child.on("close", (code: number | null) => {
+        console.log(
+          `[cursor] exit chat=${chatId.slice(0, 8)} code=${code} dur=${fmtDur(Date.now() - startedAt)} session=${(outSessionId || sessionId || "").slice(0, 8) || "(none)"}`,
+        );
         if (lineBuf.trim()) processLine(lineBuf);
 
         if (activeRun.cancelled) {
@@ -313,6 +344,7 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       });
 
       child.on("error", (err) => {
+        console.error(`[cursor] spawn error chat=${chatId.slice(0, 8)}:`, err.message);
         finish({ text: `⚠️ Failed to spawn Cursor Agent: ${err.message}` });
       });
     });

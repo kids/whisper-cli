@@ -6,28 +6,41 @@
   <string>com.r.whisper-feishu</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/node</string>
-    <string>--import</string>
-    <string>file:///Users/r/code/dev/whisper-cli/node_modules/tsx/dist/loader.mjs</string>
-    <string>/Users/r/code/dev/whisper-cli/src/index.ts</string>
+    <string>/bin/bash</string>
+    <string>/Users/r/Library/Application Support/whisper-feishu/start.sh</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/r/code/dev/whisper-cli</string>
+  <string>/Users/r</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
     <string>/Users/r</string>
     <key>PATH</key>
     <string>/Users/r/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>NSAppSleepDisabled</key>
+    <string>YES</string>
+    <key>AGENT_CLI_CREDENTIAL_STORE</key>
+    <string>file</string>
+    <key>NODE_OPTIONS</key>
+    <string>--trace-uncaught</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
+  <!-- KeepAlive=true — do not use PathState on /Volumes/code (PSSD hiccups were killing the bot). -->
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
+  <!-- Interactive escapes the Standard-daemon jetsam thread cap (~32). -->
   <key>ProcessType</key>
   <string>Interactive</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+    <key>NumberOfProcesses</key>
+    <integer>4096</integer>
+  </dict>
   <key>StandardOutPath</key>
   <string>/tmp/whisper-feishu.log</string>
   <key>StandardErrorPath</key>

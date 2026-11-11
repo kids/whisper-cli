@@ -14,10 +14,33 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 
+function installProcessGuards(): void {
+  // Make sure sudden kills still leave a line in the launchd log.
+  const stamp = () => new Date().toISOString();
+  process.on("uncaughtException", (err) => {
+    console.error(`[${stamp()}] uncaughtException:`, err);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error(`[${stamp()}] unhandledRejection:`, reason);
+  });
+  process.on("exit", (code) => {
+    console.error(`[${stamp()}] process.exit code=${code}`);
+  });
+  // Heartbeat: proves the bridge was alive until T; silent gaps ⇒ external kill.
+  const everyMs = Number(process.env.WHISPER_HEARTBEAT_MS || 5 * 60 * 1000);
+  if (everyMs > 0) {
+    setInterval(() => {
+      console.log(`[heartbeat] ${stamp()} uptime=${Math.round(process.uptime())}s rss=${process.memoryUsage().rss}`);
+    }, everyMs).unref();
+  }
+}
+
 async function main(): Promise<void> {
+  installProcessGuards();
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("  whisper-cli — Multi-Agent Forwarding Service");
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+  console.log(`[boot] node=${process.version} pid=${process.pid} ppid=${process.ppid}`);
 
   // Load all agent configs
   const envPath = resolve(ROOT, ".env");
