@@ -54,7 +54,14 @@ export interface WatchSpec {
   cmd?: string;
   /** what the agent should do when woken; absent → notify only */
   onWake?: string;
+  /** soft-wake the agent this often to refresh the human-facing note (min 30m) */
+  reportEveryS?: number;
 }
+
+/** Max length of the agent-authored card body */
+export const MAX_NOTE = 2000;
+/** Soft progress reports are opt-in and never more frequent than this */
+export const MIN_REPORT_S = 30 * 60;
 
 export type WatchStatus = "active" | "fired" | "expired" | "cancelled" | "error";
 
@@ -76,8 +83,13 @@ export interface Watch {
   /** /proc start time of spec.pid at registration (guards against pid reuse) */
   pidStart?: string;
   cardId?: string;
+  /** machine probe line (pid / metrics / last log); used for wake context, not the card */
   summary: string;
+  /** agent-authored markdown shown on the card (richer than summary) */
+  note?: string;
   lastCheckAt?: number;
+  /** next soft report wake (when spec.reportEveryS is set) */
+  nextReportAt?: number;
   fired?: { reason: string; at: number };
   errors: number;
 }
@@ -141,6 +153,10 @@ export function parseWatchSpec(raw: any, cwd: string): WatchSpec {
   if (raw.cmd != null) spec.cmd = String(raw.cmd).slice(0, 1000);
   const onWake = raw.on_wake ?? raw.onWake;
   if (onWake != null && String(onWake).trim()) spec.onWake = String(onWake).trim().slice(0, 1000);
+  const report = raw.report ?? raw.report_every ?? raw.reportEvery;
+  if (report != null && String(report).trim() !== "") {
+    spec.reportEveryS = Math.max(MIN_REPORT_S, parseDuration(report));
+  }
   if ((spec.wakeOn || spec.done) && !spec.log) throw new Error("wake_on / done need a log path");
   if (spec.staleS && !spec.log && !spec.metrics) throw new Error("stale needs a log or metrics path");
   if (!spec.pid && !spec.log && !spec.metrics && !spec.file && !spec.cmd) {
@@ -148,6 +164,20 @@ export function parseWatchSpec(raw: any, cwd: string): WatchSpec {
   }
   if (!spec.title) spec.title = spec.log ? spec.log.split("/").pop()! : spec.pid ? `pid ${spec.pid}` : "watch";
   return spec;
+}
+
+/** Agent-authored card body from a [[watch]] JSON (create or update). */
+export function parseWatchNote(raw: any): string | undefined {
+  const v = raw?.note ?? raw?.card;
+  if (v == null) return undefined;
+  const note = String(v).trim();
+  if (!note) return undefined;
+  return note.slice(0, MAX_NOTE);
+}
+
+/** `[[watch]] {"id":7,"note":"…"}` — refresh the card body without touching probes. */
+export function isWatchNoteUpdate(raw: any): boolean {
+  return raw != null && typeof raw === "object" && raw.id != null && (raw.note != null || raw.card != null);
 }
 
 // ---- probes -----------------------------------------------------------------
@@ -343,7 +373,7 @@ export function updateWatch(id: number, patch: Partial<Watch>): Watch | undefine
   return w;
 }
 
-export function addWatch(input: { chatId: string; bot: string; sessionKey: string; cwd: string; spec: WatchSpec }): Watch {
+export function addWatch(input: { chatId: string; bot: string; sessionKey: string; cwd: string; spec: WatchSpec; note?: string }): Watch {
   const active = listWatches({ chatId: input.chatId, status: ["active"] }).length;
   if (active >= MAX_ACTIVE_PER_CHAT) throw new Error(`本群已有 ${active} 个进行中的监控（上限 ${MAX_ACTIVE_PER_CHAT}），先说「停掉监控 #编号」停掉一些`);
   const d = load();
@@ -355,16 +385,28 @@ export function addWatch(input: { chatId: string; bot: string; sessionKey: strin
     const st = statSync(input.spec.log);
     if (now - st.mtimeMs > 5 * 60_000) logOffset = st.size;
   }
+  const note = input.note?.trim().slice(0, MAX_NOTE) || undefined;
   const w: Watch = {
-    id: d.nextId++, ...input, status: "active", createdAt: now,
+    id: d.nextId++, chatId: input.chatId, bot: input.bot, sessionKey: input.sessionKey, cwd: input.cwd,
+    spec: input.spec, status: "active", createdAt: now,
     // first look soon, so a crash right after launch surfaces within a minute
     nextAt: now + Math.min(60, input.spec.everyS) * 1000,
-    checks: 0, logOffset, summary: "等待首次检查", errors: 0,
+    checks: 0, logOffset, summary: "等待首次检查", errors: 0, note,
+    nextReportAt: input.spec.reportEveryS ? now + input.spec.reportEveryS * 1000 : undefined,
     pidStart: input.spec.pid ? procStart(input.spec.pid) : undefined,
   };
   d.watches.push(w);
   save();
   return w;
+}
+
+/** Update the human-facing card body; returns the watch or undefined if not found / wrong chat. */
+export function setWatchNote(id: number, note: string, chatId?: string): Watch | undefined {
+  const w = getWatch(id);
+  if (!w || (chatId && w.chatId !== chatId)) return undefined;
+  const cleaned = note.trim().slice(0, MAX_NOTE);
+  if (!cleaned) throw new Error("note must be non-empty");
+  return updateWatch(id, { note: cleaned });
 }
 
 export function cancelWatch(id: number, chatId?: string): boolean {
@@ -381,6 +423,8 @@ export interface WatchHost {
   card?(w: Watch): Promise<void>;
   /** Condition hit (or timeout): notify and/or wake the agent */
   fire(w: Watch, r: CheckResult): Promise<void>;
+  /** Soft wake so the agent can refresh `note` (opt-in via report_every); does not end the watch */
+  report?(w: Watch, r: CheckResult): Promise<void>;
 }
 
 const hosts = new Map<string, WatchHost>();
@@ -416,7 +460,12 @@ export async function tickWatches(now = Date.now(), only?: number): Promise<numb
       });
       const cur = getWatch(w.id)!;
       await host.card?.(cur).catch(() => {});
-      if (r.fire) await host.fire(cur, r).catch((e) => console.warn(`[watch] #${w.id} fire handler failed: ${(e as Error).message}`));
+      if (r.fire) {
+        await host.fire(cur, r).catch((e) => console.warn(`[watch] #${w.id} fire handler failed: ${(e as Error).message}`));
+      } else if (cur.spec.reportEveryS && host.report && (cur.nextReportAt ?? 0) <= now) {
+        updateWatch(cur.id, { nextReportAt: now + cur.spec.reportEveryS * 1000 });
+        await host.report(getWatch(cur.id)!, r).catch((e) => console.warn(`[watch] #${w.id} report failed: ${(e as Error).message}`));
+      }
     }
   } finally { ticking = false; }
   return n;
@@ -435,16 +484,15 @@ export function stopWatches(): void {
 
 // ---- rendering / protocol -----------------------------------------------------
 
-const hhmm = (t: number) => new Date(t).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
-
+/** Thin shell: status · id · title · age; body is the agent's note (probe summary only as fallback). */
 export function renderWatchCard(w: Watch, now = Date.now()): string {
   const icon = { active: "👀", fired: "🔔", expired: "⌛", cancelled: "🛑", error: "⚠️" }[w.status];
-  const head = `**${icon} 监控 #${w.id} ${w.spec.title}**`;
-  const meta = `已运行 ${fmtAge((now - w.createdAt) / 1000)} · 每 ${fmtAge(w.spec.everyS)} 检查 · 已检查 ${w.checks} 次`;
+  const head = `**${icon} 监控 #${w.id} ${w.spec.title}** · ${fmtAge((now - w.createdAt) / 1000)}`;
+  const body = (w.note?.trim() || w.summary || "").trim();
   const tail = w.status === "active"
-    ? `下次检查 ${hhmm(w.nextAt)}；完成或出错时${w.spec.onWake ? "会唤醒 agent 接着处理" : "会在群里通知"}。不用盯了就说「停掉监控 #${w.id}」`
+    ? `不用盯了就说「停掉监控 #${w.id}」`
     : w.fired ? `${w.status === "expired" ? "超时" : "触发"}：${w.fired.reason}` : w.status === "cancelled" ? "已停止" : "";
-  return [head, meta, `最新：${w.summary}`, tail].filter(Boolean).join("\n");
+  return [head, body, tail].filter(Boolean).join("\n");
 }
 
 export function describeSpec(s: WatchSpec): string {
@@ -461,11 +509,13 @@ export function formatWatchContext(chatId: string): string {
   return [
     "【长任务监控】你的每一轮最长几十分钟，不要在一轮里等待训练/批处理/长作业结束。正确做法：",
     "1. 脱离当前会话在后台启动并落日志，例如 `setsid nohup python train.py > out/train.log 2>&1 < /dev/null & echo $!` 拿到 pid（本轮结束后进程要继续活着）；",
-    "2. 在回复末尾单独一行登记监控（代码每隔一段时间检查，不消耗 token，完成或出错时再叫醒你）：",
-    '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl","show":["step","loss"]},"every":"10m","timeout":"2d","on_wake":"跑 eval.py 汇报指标"}`',
-    "   字段都可选，但至少给 pid/log/metrics/file/cmd 之一；cmd 为只读检查命令，退出码 0 视为满足；不写 on_wake 则只在群里通知、不叫醒你；",
-    "3. 然后结束本轮，告诉用户已在后台运行、会自动盯着。取消监控输出 `[[unwatch]] 编号`。",
-    active.length ? `本群进行中的监控：\n${active.map((w) => `- #${w.id} ${w.spec.title}：${w.summary}`).join("\n")}` : "",
+    "2. 在回复末尾单独一行登记监控（代码定时探测、零 token；群里的卡片正文用你写的 note，不要指望代码拼进展）：",
+    '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl","show":["step","loss"]},"every":"10m","timeout":"2d","report":"1h","note":"Adam 阶段，目标 step≥100k；当前刚启动。","on_wake":"跑 eval.py 汇报指标"}`',
+    "   至少给 pid/log/metrics/file/cmd 之一；`note` 给人看（阶段、关键指标、关注点）；可选 `report`（≥30m）到点叫醒你刷新 note；不写 on_wake 则只通知、不叫醒；",
+    "3. 刷新卡片：`[[watch]] {\"id\":编号,\"note\":\"…更新后的说明\"}`。取消：`[[unwatch]] 编号`。然后结束本轮。",
+    active.length
+      ? `本群进行中的监控：\n${active.map((w) => `- #${w.id} ${w.spec.title}：${(w.note || w.summary).replace(/\s+/g, " ").slice(0, 120)}`).join("\n")}`
+      : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -500,7 +550,18 @@ export function buildWakePrompt(w: Watch, r: CheckResult): string {
     `监控对象：${describeSpec(w.spec)}；已运行 ${fmtAge((Date.now() - w.createdAt) / 1000)}。`,
     r.evidence ? `观测：\n${r.evidence}` : "",
     `你登记时留下的后续安排：${w.spec.onWake}`,
-    "请先核实现状（进程、日志、产物），再按安排继续；如果还需要继续等待，可以再登记一个新的监控。",
+    "请先核实现状（进程、日志、产物），再按安排继续；如果还需要继续等待，可以再登记一个新的监控（记得写 note）。",
+  ].filter(Boolean).join("\n\n");
+}
+
+/** Soft wake: refresh the human-facing note; does not end the watch */
+export function buildReportPrompt(w: Watch, r: CheckResult): string {
+  return [
+    `【监控 #${w.id} 进展刷新】「${w.spec.title}」已运行 ${fmtAge((Date.now() - w.createdAt) / 1000)}，到点更新群卡片说明。`,
+    `探测摘要：${r.summary || w.summary}`,
+    r.evidence ? `观测：\n${r.evidence}` : "",
+    w.note ? `卡片上现有说明：\n${w.note}` : "卡片还没有说明。",
+    `请核实现状后，用一行 \`[[watch]] {"id":${w.id},"note":"…"}\` 更新给人看的说明（阶段、关键指标、是否正常、大概还要多久）。不要重跑作业；若已结束或出错，按 on_wake 处理或新登记监控。`,
   ].filter(Boolean).join("\n\n");
 }
 
