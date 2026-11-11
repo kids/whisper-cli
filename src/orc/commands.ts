@@ -27,7 +27,7 @@ import {
 } from "./chat";
 import { MODE_LABEL, type ChatMode, type TaskOp } from "./route";
 import type { ExecutorBins } from "./runner";
-import type { CliName, Verbosity } from "./types";
+import type { CliName, Task, Verbosity } from "./types";
 import { repoRoot } from "./worktree";
 
 export interface OrcChatHost {
@@ -81,13 +81,17 @@ function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMo
 export async function submitTaskOp(h: OrcChatHost, chatId: string, op: TaskOp, sourceText: string): Promise<string> {
   if (op.error || !op.goal) return `⚠️ 没有转交团队：${op.error ?? "缺少目标"}`;
   orcOf(h);
-  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText });
+  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar }, "caller");
   return r.startsWith("❌") ? `⚠️ 没有转交团队：${r.replace(/^❌\s*/, "")}` : `🧭 ${r}`;
 }
 
+// Note: submit() posts the card itself; the receipt text goes into the card's thread
+// (deliver="thread", returns "" so the caller posts nothing more) unless the caller needs
+// the text back to fold into its own reply (deliver="caller", e.g. the single agent's 🧭 line).
 async function submit(
   h: OrcChatHost, chatId: string, goal: string, presetName?: string,
-  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string } = {},
+  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; title?: string } = {},
+  deliver: "thread" | "caller" = "thread",
 ): Promise<string> {
   const o = orcOf(h);
   const repo = repoRoot(h.workspaceFor(chatId));
@@ -99,10 +103,13 @@ async function submit(
   } catch (e) {
     return `❌ 编排无效：${(e as Error).message}`;
   }
-  const t = await submitFromChat(o, h.im, chatId, goal, repo, preset, extra);
   const crit = preset.kind === "loop" && extra.criteria?.length ? `\n验收标准：${extra.criteria.map((c, i) => `C${i + 1} ${c}`).join("；")}` : "";
   const fb = fallbackNote(preset);
-  return `已提交 #${t.id} → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`${crit}${fb ? `\nℹ️ ${fb}` : ""}`;
+  const receipt = (t: Task) => `已交给团队：**${t.title}** → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`，分支 \`${t.branch ?? "建好工作区后生成"}\`${crit}${fb ? `\nℹ️ ${fb}` : ""}`;
+  const { task: t, receiptInThread } = await submitFromChat(
+    o, h.im, chatId, goal, repo, preset, extra, deliver === "thread" ? { receipt } : {},
+  );
+  return receiptInThread ? "" : receipt(t);
 }
 
 export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<boolean> {
@@ -177,7 +184,8 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
       await say(t ? renderCard(t, o.store) + (t.feedback ? `\n\n**待处理反馈**\n${t.feedback}` : "") : `没有任务 ${arg}`);
       return true;
     }
-    await say(await submit(h, chatId, arg));
+    const r = await submit(h, chatId, arg);
+    if (r) await say(r);
     return true;
   }
   return false;
@@ -252,7 +260,7 @@ export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): 
 export function describeAction(a: LeadAction): string {
   switch (a.action) {
     case "reply": return a.text;
-    case "submit": return `（提交任务）${a.goal}`;
+    case "submit": return `（提交任务）${a.goal}${a.bar ? `\n评审口径：${a.bar}` : ""}`;
     case "attach": return `（补充给 #${a.task}${a.urgent ? "，打断" : ""}）${a.text}`;
     case "answer": return `（回答 #${a.task} 的问题）${a.option ?? ""}${a.text ? " " + a.text : ""}`;
     case "status": return `（查询状态${a.task ? " #" + a.task : ""}）`;
@@ -310,7 +318,11 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       await say(applyMemoryOps(chatId, ops, "lead") || (act.action === "forget" ? "没有找到这些编号的记忆。" : "没有新内容需要记录。"));
       return;
     }
-    case "submit": await say(`🧭 ${await submit(h, chatId, act.goal, act.preset, { criteria: act.criteria, constraints: act.constraints, sourceText: userText })}`); return;
+    case "submit": {
+      const r = await submit(h, chatId, act.goal, act.preset, { criteria: act.criteria, constraints: act.constraints, sourceText: userText, bar: act.bar, title: act.title });
+      if (r) await say(`🧭 ${r}`);
+      return;
+    }
     case "status": {
       const ts = act.task ? [o.store.getTask(act.task)].filter((t): t is NonNullable<typeof t> => !!t && t.chatId === chatId) : o.store.listTasks({ chatId, limit: 5 });
       await say(ts.length ? ts.map((t) => renderCard(t, o.store)).join("\n\n---\n\n") : "本群没有相关任务。");

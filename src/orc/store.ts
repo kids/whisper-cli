@@ -54,7 +54,7 @@ function rowToTask(r: any): Task {
   const preset = j(r.preset, null) as ResolvedPreset;
   if (preset && !preset.kind) preset.kind = "pipeline"; // snapshots frozen before loop presets existed
   return {
-    id: r.id, kind: r.kind === "loop" ? "loop" : "pipeline", parentId: r.parent_id ?? null, title: r.title, goal: r.goal, spec: r.spec,
+    id: r.id, kind: r.kind === "loop" ? "loop" : "pipeline", parentId: r.parent_id ?? null, title: r.title, goal: r.goal, spec: r.spec, bar: r.bar ?? "",
     repo: r.repo, baseRef: r.base_ref, branch: r.branch ?? null, worktree: r.worktree ?? null,
     preset, stageIdx: r.stage_idx, status: r.status,
     loops: j(r.loops, {}), deps: j(r.deps, []), feedback: r.feedback, inbox: j(r.inbox, []),
@@ -98,6 +98,8 @@ export class OrcStore {
     this.db.exec(SCHEMA);
     const cols = this.db.prepare("PRAGMA table_info(tasks)").all().map((c: any) => c.name);
     if (!cols.includes("kind")) this.db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'pipeline'");
+    // 评审口径: how strictly this task should be reviewed (written by the lead per task nature)
+    if (!cols.includes("bar")) this.db.exec("ALTER TABLE tasks ADD COLUMN bar TEXT NOT NULL DEFAULT ''");
   }
 
   /** Run fn in one transaction (nested calls join the outer one) */
@@ -123,15 +125,15 @@ export class OrcStore {
   createTask(t: {
     parentId?: number | null; title: string; goal: string; spec?: string; repo: string; baseRef: string;
     preset: ResolvedPreset; stageIdx?: number; deps?: number[]; chatId?: string | null; status?: Task["status"];
-    kind?: Task["kind"];
+    kind?: Task["kind"]; bar?: string;
   }): Task {
     const now = Date.now();
     const r = this.db.prepare(
-      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,bar,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       t.parentId ?? null, t.title, t.goal, t.spec ?? "", t.repo, t.baseRef, JSON.stringify(t.preset),
-      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", now, now,
+      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", t.bar ?? "", now, now,
     );
     return this.getTask(Number(r.lastInsertRowid))!;
   }

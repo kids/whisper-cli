@@ -10,7 +10,7 @@ import type { AgentConfig } from "../types";
 import { getChatInstructions } from "../announcement";
 import { formatMemory, joinInstructions } from "../memory";
 import { renderWatchCard, updateWatch } from "../watch";
-import { AGENT_CARDS_ON, AgentCards } from "./agent-cards";
+import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
 import { acceptable, stageName } from "./core";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { budgetState, clip, currentEvidence, type Ledger } from "./ledger";
@@ -244,12 +244,49 @@ async function ensureCard(t: Task, im: ImClient): Promise<string | undefined> {
   return id;
 }
 
+/** Statuses that really end a task (blocked still waits for the human) */
+const ENDED: Task["status"][] = ["ready", "failed", "dropped"];
+
+function renderCloseout(t: Task, store: OrcStore): string {
+  const all = store.listAttempts(t.id);
+  const tok = all.reduce((s, a) => s + (a.tokens || 0), 0);
+  const rounds = t.kind === "loop" ? (store.getLedger<Ledger>(t.id)?.step ?? 0) : all.length;
+  const head = t.status === "ready" ? "✅ 任务结束 · 结果可用"
+    : t.status === "dropped" ? "🛑 任务结束 · 已被终止"
+    : "❌ 任务结束 · 没能做完";
+  const meta = [`共 ${rounds} ${t.kind === "loop" ? "轮" : "次运行"}`, tok ? `${fmtTok(tok)} tokens` : "", `历时 ${fmtMin(Date.now() - t.createdAt)}`, t.branch ? `分支 \`${t.branch}\`` : ""].filter(Boolean);
+  return [
+    `**${head} · #${t.id} ${t.title}**`,
+    meta.join(" · "),
+    "",
+    t.status === "ready"
+      ? "团队已经收工，这段对话不影响后面的事；要接着改直接说要改哪里。"
+      : `分支 \`${t.branch ?? "-"}\` 里的改动都还在。想继续就说「重试 #${t.id}」并说明要改什么。`,
+  ].join("\n");
+}
+
+/** Close-out card: the thread's last message, so "the whole task is over" is unmistakable */
+function endCard(t: Task, im: ImClient): Promise<void> {
+  if (!orc || !t.chatId || t.parentId || !ENDED.includes(t.status)) return Promise.resolve();
+  const root = rootCardOf(t);
+  if (!root || !im.replyCardInThread) return Promise.resolve();
+  // key carries the run count so a retried task gets its own close-out
+  const runs = t.kind === "loop" ? (orc.store.getLedger<Ledger>(t.id)?.step ?? 0) : orc.store.listAttempts(t.id).length;
+  const key = `end:${t.id}:${runs}`;
+  const next = (syncChain.get(t.id) ?? Promise.resolve())
+    .then(() => cardsOf().upsert(im, root, key, renderCloseout(t, orc!.store), true))
+    .catch((e) => console.error(`[orc] closeout #${t.id}:`, (e as Error).message));
+  syncChain.set(t.id, next);
+  return next;
+}
+
 async function refreshCard(t: Task, force = false): Promise<void> {
   const im = clientFor(t.chatId);
   if (!im || !orc) return;
   const cardId = await ensureCard(t, im);
   if (!cardId) return;
   void syncAgentCards(t);
+  void endCard(t, im);
   const now = Date.now();
   if (!force && now - (cardTouched.get(t.id) ?? 0) < CARD_THROTTLE_MS) return;
   cardTouched.set(t.id, now);
@@ -366,13 +403,28 @@ export function availableClis(): string[] {
 /** Submit from chat: posts the progress card and binds it to the task */
 export async function submitFromChat(
   o: Orchestrator, im: ImClient, chatId: string, goal: string, repo: string, preset: ResolvedPreset,
-  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string } = {},
-): Promise<Task> {
+  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string } = {},
+  /** Receipt ("已交给团队…"): posted as the card's first thread reply so the chat reads submit → card → rounds */
+  opts: { receipt?: (t: Task) => string } = {},
+): Promise<{ task: Task; receiptInThread: boolean }> {
   bindChat(chatId, im);
   const task = o.submit({ goal, repo, preset, chatId, ...extra });
   const cardId = await im.sendCardAndGetId(chatId, renderCard(task, o.store)).catch(() => undefined);
-  if (cardId) { setCard(task.id, cardId); void syncAgentCards(o.store.getTask(task.id) ?? task); }
-  return task;
+  let receiptInThread = false;
+  if (cardId) {
+    setCard(task.id, cardId);
+    if (opts.receipt && im.replyCardInThread) {
+      const text = opts.receipt(task);
+      // Same chain as the per-agent cards: the receipt must land before the first round
+      const send = (syncChain.get(task.id) ?? Promise.resolve())
+        .then(async () => (await im.replyCardInThread!(cardId, text)) !== undefined)
+        .catch(() => false);
+      syncChain.set(task.id, send.then(() => undefined));
+      receiptInThread = await send;
+    }
+    void syncAgentCards(o.store.getTask(task.id) ?? task);
+  }
+  return { task, receiptInThread };
 }
 
 /** One-line-per-task summary of this chat's active orc tasks (for single-mode prompts) */
@@ -399,7 +451,7 @@ export function routeContext(chatId: string): { tasks: RouteTask[]; pendingPropo
 // ---- lead agent (intent → structured action; code executes) -----------------
 
 export type LeadAction =
-  | { action: "submit"; goal: string; preset?: string; criteria?: string[]; constraints?: string[] }
+  | { action: "submit"; goal: string; title?: string; preset?: string; criteria?: string[]; constraints?: string[]; bar?: string }
   | { action: "attach"; task: number; text: string; urgent?: boolean }
   | { action: "answer"; task: number; option?: string; text?: string }
   | { action: "status"; task?: number }
@@ -456,7 +508,8 @@ export function buildLeadPrompt(c: {
     `用户消息：\n${c.userText}`,
     "",
     "从下列动作中选**一个**，只输出一个 JSON 对象（不要别的文字）：",
-    '- {"action":"submit","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选，组合名","criteria":["可选：可检查的验收标准"],"constraints":["可选：必须遵守的约束"]}  —— 用户要团队去做一件新事情；用户说「把刚才这个交给团队」时，从「最近对话」里总结出目标、约束和已有结论',
+    '- {"action":"submit","title":"短标题，6~14 字，说清在做什么（群里认任务就靠它，别带编号和路径）","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选，组合名","criteria":["可选：可检查的验收标准"],"constraints":["可选：必须遵守的约束"],"bar":"评审口径：这份活该按什么标准判过不过"}  —— 用户要团队去做一件新事情；用户说「把刚才这个交给团队」时，从「最近对话」里总结出目标、约束和已有结论',
+    '- submit 的 bar 由你判断，别套固定模板：先想清楚这份东西是给谁用的。探索 / 一次性 / 备忘性质（做可行性判断、摸底、给人参考）→ 评审只该拦「会让结论错」的问题，统计严苛度、风格、可维护性一律算建议，写清楚这条界限；要进生产、要对外发布、别人要依赖它的代码 → 按工程标准全套卡。这份口径决定评审有多严，写偏了后面就会来回消耗。',
     '- {"action":"attach","task":12,"text":"给该任务的补充信息","urgent":false}  —— 对进行中任务的补充、纠偏、改口径；监督循环任务会在下一轮看到；urgent=true 表示立刻打断正在干活的 agent',
     '- {"action":"answer","task":12,"option":"a","text":"可选补充"}  —— 用户在回答某个任务「正在等人回答」的问题（选项 id 必须来自该问题；用户只说了想法没选项时 option 省略）',
     '- {"action":"status","task":12}  —— 问进展（task 可省略=全部）',
@@ -481,7 +534,7 @@ export function parseLeadAction(text: string): LeadAction | { error: string } {
   const strs = (v: any) => (Array.isArray(v) ? v.map(String).map((s: string) => s.trim()).filter(Boolean).slice(0, 12) : undefined);
   switch (a.action) {
     case "submit": return typeof a.goal === "string" && a.goal.trim()
-      ? { action: "submit", goal: a.goal.trim(), preset: a.preset || undefined, criteria: strs(a.criteria), constraints: strs(a.constraints) }
+      ? { action: "submit", goal: a.goal.trim(), title: typeof a.title === "string" && a.title.trim() ? a.title.trim().slice(0, 40) : undefined, preset: a.preset || undefined, criteria: strs(a.criteria), constraints: strs(a.constraints), bar: typeof a.bar === "string" && a.bar.trim() ? a.bar.trim() : undefined }
       : { error: "submit 缺少 goal" };
     case "attach": return num(a.task) && a.text ? { action: "attach", task: num(a.task)!, text: String(a.text), urgent: a.urgent === true } : { error: "attach 缺少 task/text" };
     case "answer": return num(a.task) && (a.option || a.text)

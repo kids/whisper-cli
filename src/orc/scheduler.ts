@@ -69,6 +69,8 @@ export class Orchestrator {
     goal: string; title?: string; repo: string; preset: ResolvedPreset; chatId?: string | null;
     /** loop presets: acceptance criteria / constraints known at submit time, and the human's own words */
     criteria?: string[]; constraints?: string[]; sourceText?: string;
+    /** how strictly review should judge this task, in the lead's words (see orc/chat.ts lead prompt) */
+    bar?: string;
   }): Task {
     const root = wt.repoRoot(input.repo);
     if (!root) throw new Error(`${input.repo} is not inside a git repository (orc needs git worktrees)`);
@@ -76,8 +78,8 @@ export class Orchestrator {
     const kind = input.preset.kind === "loop" ? "loop" : "pipeline";
     return this.store.tx(() => {
       const task = this.store.createTask({
-        title: input.title || input.goal.split("\n")[0].slice(0, 60), goal: input.goal, repo: root, baseRef,
-        preset: input.preset, chatId: input.chatId ?? null, kind,
+        title: input.title || shortTitle(input.goal), goal: input.goal, repo: root, baseRef,
+        preset: input.preset, chatId: input.chatId ?? null, kind, bar: input.bar ?? "",
       });
       if (kind === "loop") this.loop.init(task, input);
       else this.store.addEffect("launch", { taskId: task.id, stageIdx: 0 } satisfies LaunchPayload);
@@ -294,8 +296,8 @@ export class Orchestrator {
   /** Create the task worktree on first use (shared with the loop engine) */
   prepareWorktree(task: Task): Task {
     if (task.worktree && existsSync(task.worktree)) return task;
-    const path = wt.worktreePath(this.opts.orcHome, task.repo, task.id);
-    const branch = wt.branchName(task.id);
+    const path = wt.worktreePath(this.opts.orcHome, task.repo, task.title, task.id);
+    const branch = wt.branchName(task.title, task.id);
     const depBranches = task.deps.map((id) => this.store.getTask(id)?.branch).filter((b): b is string => !!b);
     const base = depBranches[0] ? wt.headSha(task.repo, depBranches[0]) : task.baseRef;
     wt.ensureWorktree(task.repo, path, branch, base);
@@ -409,7 +411,8 @@ export class Orchestrator {
       } else if (fresh.status === "dropped") {
         // stopped while running — nothing more to schedule
       } else {
-        const d = decideAfterAttempt(fresh, outcome);
+        const prevParsed = [...prior].reverse().find((a) => a.stageId === stage.id && a.parsed && a.id !== attempt.id)?.parsed ?? undefined;
+        const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed });
         if (violation) d.notifies.push({ taskId: task.id, kind: "info", text: `${role.name} 是只读角色却修改了文件，已回滚：\n${violation.slice(0, 500)}` });
         this.applyDecision(fresh, d);
         brief = d.brief;
@@ -423,7 +426,7 @@ export class Orchestrator {
       appendFileSync(resolve(artifactDir, "cases.jsonl"), parsed.value.cases.map((c: any) => JSON.stringify({ attempt: attempt.id, ...c })).join("\n") + "\n");
     }
     this.emitProgress(task.id);
-    if (brief) await this.writeBrief(task.id, brief.stageIdx);
+    if (brief) await this.writeBrief(task.id, brief);
   }
 
   /**
@@ -431,7 +434,8 @@ export class Orchestrator {
    * attempt), then either keep going on its recommendation or block and post the brief.
    * No advisor configured → block with the reviewer's own summary + issues.
    */
-  private async writeBrief(taskId: number, stageIdx: number): Promise<void> {
+  private async writeBrief(taskId: number, req: { stageIdx: number; mode?: "arbitrate" | "escalate"; rounds?: number }): Promise<void> {
+    const stageIdx = req.stageIdx;
     const task = this.store.getTask(taskId);
     if (!task) return;
     const stage = task.preset.stages[stageIdx];
@@ -452,7 +456,7 @@ export class Orchestrator {
     }));
     const notesPath = this.notesPath(task);
     const prompt = buildBriefPrompt({
-      task, role, stageName: stageName(stage.id), attempts: this.store.listAttempts(taskId),
+      task, role, stageName: stageName(stage.id), attempts: this.store.listAttempts(taskId), mode: req.mode, rounds: req.rounds,
       diff: task.worktree ? { ...wt.diffSince(task.worktree, task.baseRef, 60_000), log: wt.logSince(task.worktree, task.baseRef) } : undefined,
       notesPath, notesTail: existsSync(notesPath) ? readFileSync(notesPath, "utf8").split("\n").slice(-40).join("\n").trim() : "",
     });
@@ -523,7 +527,7 @@ export class Orchestrator {
       for (const c of d.children) {
         const child = this.store.createTask({
           parentId: task.id, title: c.title, goal: task.goal, spec: c.spec, repo: task.repo, baseRef: task.baseRef,
-          preset: task.preset, stageIdx: start, deps: c.deps.map((i) => ids[i]), chatId: task.chatId,
+          preset: task.preset, stageIdx: start, deps: c.deps.map((i) => ids[i]), chatId: task.chatId, bar: task.bar,
         });
         ids.push(child.id);
         this.store.addEffect("launch", { taskId: child.id, stageIdx: start } satisfies LaunchPayload);
@@ -551,6 +555,18 @@ export class Orchestrator {
     const t = this.store.getTask(taskId);
     if (t) try { this.opts.onProgress?.(t); } catch { /* sink errors must not break scheduling */ }
   }
+}
+
+/** A readable name when nobody supplied one: first clause, without the "在 … 工作区内" preamble */
+export function shortTitle(goal: string): string {
+  const line = (goal || "").split("\n").find((l) => l.trim()) ?? "";
+  const t = line
+    .replace(/^在\s*\S*\s*工作区(内|里)?[，,]?/, "")
+    .replace(/^(请|麻烦|帮我|先)?(做|跑|写|改|查|看)(一下|一个|一份)?/, "")
+    .split(/[。；;！!？?\n]/)[0]
+    .split(/[，,、]/)[0]
+    .trim();
+  return (t || line.trim() || "任务").slice(0, 24);
 }
 
 /** `c` waits (directly or through other siblings) on task `id` */

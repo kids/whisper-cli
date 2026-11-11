@@ -92,8 +92,11 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("plan → impl", d.patch.stageIdx === idx("impl") && d.patch.spec === "S" && d.launches[0].stageIdx === idx("impl"));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", '{"verdict":"revise","issues":["x"],"summary":"bad"}'));
   check("revise → back to impl with feedback", d.patch.stageIdx === idx("impl") && d.patch.loops!.review === 1 && /review 未通过/.test(d.patch.feedback!) && /- x/.test(d.patch.feedback!));
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 3 } }), parsed("verdict", '{"verdict":"revise"}'));
-  check("loop budget exhausted → brief requested", d.brief !== undefined && d.notifies.length === 0);
+  // round count alone no longer stops it; the cap is a runaway guard
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 5 } }), parsed("verdict", '{"verdict":"revise","issues":["x"]}'));
+  check("still reworks below the cap when nothing new appears", d.patch.stageIdx === idx("impl") && !d.brief, d);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", '{"verdict":"revise","issues":["x"]}'));
+  check("cap reached → escalate", d.brief?.mode === "escalate" && d.brief.rounds === 7, d.brief);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), feedback: "【review 未通过】x" }), parsed("verdict", '{"verdict":"approve"}'));
   check("approve clears own feedback", d.patch.feedback === "" && d.patch.stageIdx === idx("test"));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("test") }), parsed("test", '{"pass":true,"cases":[]}'));
@@ -134,7 +137,17 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
     notes: ["已确认修复：测试 107 个全绿"],
   });
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 3 }, branch: "orc/task-3" }), parsed("verdict", verdictJson));
-  check("exhausted: brief requested, no canned notify", d.brief?.stageIdx === idx("review") && d.notifies.length === 0 && d.patch.status === "running" && /正在整理决策说明/.test(d.patch.progress!), d);
+  check("first failure without history reworks", d.patch.stageIdx === idx("impl") && !d.brief, d.patch);
+  // new problems appear each round → arbitrate instead of another blind round
+  const sameBar = (issues: any[]) => parsed("verdict", JSON.stringify({ verdict: "revise", summary: "又有新问题", issues }));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), bar: "探索性分析，只拦会让结论错的问题" }), sameBar([{ severity: "major", file: "a.py", desc: "问题甲" }]), { prev: parseRoleOutput("verdict", JSON.stringify({ verdict: "revise", issues: [{ severity: "major", file: "b.py", desc: "问题乙" }] })) as any });
+  check("new problems each round → arbitrate (not another round)", d.brief?.mode === "arbitrate" && d.notifies.length === 0, d.brief);
+  // same set (nothing new) → keep reworking
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), sameBar([{ severity: "major", file: "a.py", desc: "问题甲" }]), { prev: parseRoleOutput("verdict", JSON.stringify({ verdict: "revise", issues: [{ severity: "major", file: "a.py", line: 9, desc: "问题甲" }] })) as any });
+  check("same problems, only moved → keep reworking", d.patch.stageIdx === idx("impl") && !d.brief && /问题从 1 条到 1 条/.test(d.patch.progress!), d.patch);
+  // only advisory left → the task's own bar makes it a pass
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", '{"verdict":"revise","summary":"只剩建议","issues":[{"severity":"minor","desc":"命名"}]}'));
+  check("only minor left → carry on, no block", d.patch.stageIdx === idx("test") && d.notifies[0].kind === "info" && /按口径继续/.test(d.notifies[0].text) && /建议/.test(d.patch.feedback!), d);
 
   const brief = parseRoleOutput("brief", JSON.stringify({
     situation: "在做分布预测的离线可行性检查，卡在归一化会把方向相反的数值当成同一件事。",

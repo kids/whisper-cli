@@ -5,6 +5,7 @@ dist/
 state/
 debug/
 .tasks.json
+.teams.json
 projects.json
 .feishu-uploads/
 

@@ -124,6 +124,8 @@ export interface Task {
   title: string;
   goal: string;
   spec: string;
+  /** 评审口径: how strict review should be for this task, in the lead agent's words (empty → default) */
+  bar?: string;
   repo: string;
   baseRef: string;
   branch: string | null;

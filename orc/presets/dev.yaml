@@ -7,7 +7,7 @@ roles:
   tester:      { count: 1 }
 stages:
   - { id: plan,          role: planner }
-  - { id: design_review, role: critic, optional: true, on_fail: plan, max_loops: 2 }
+  - { id: design_review, role: critic, optional: true, on_fail: plan, max_loops: 3 }
   - { id: impl,          role: implementer }
-  - { id: review,        role: critic, on_fail: impl, max_loops: 3 }
-  - { id: test,          role: tester, on_fail: impl, max_loops: 2 }
+  - { id: review,        role: critic, on_fail: impl, max_loops: 6 }
+  - { id: test,          role: tester, on_fail: impl, max_loops: 3 }

@@ -53,8 +53,8 @@ export interface Decision {
   patch: TaskPatch;
   launches: LaunchPayload[];
   notifies: NotifyPayload[];
-  /** ask the engine to write a 决策说明 (advisor role) and block with it instead of a canned line */
-  brief?: { stageIdx: number };
+  /** ask the engine to write a 决策说明 (advisor role): arbitrate the bar, or hand the decision to a human */
+  brief?: { stageIdx: number; mode?: "arbitrate" | "escalate"; rounds?: number };
   children: PlanSubtask[];
 }
 
@@ -63,7 +63,14 @@ export const AUTO_RETRY = 1;
 
 const empty = (): Decision => ({ patch: {}, launches: [], notifies: [], children: [] });
 
-export function decideAfterAttempt(task: Task, outcome: Outcome): Decision {
+export interface DecideCtx {
+  /** the previous failed verdict/test of the same stage — used to see whether the problem set is shrinking */
+  prev?: ParsedOutput;
+  /** safety cap on rework rounds regardless of progress (a runaway guard, not the normal exit) */
+  cap?: number;
+}
+
+export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx = {}): Decision {
   const d = empty();
   const stage = task.preset.stages[task.stageIdx];
   const loops = { ...task.loops };
@@ -141,26 +148,84 @@ export function decideAfterAttempt(task: Task, outcome: Outcome): Decision {
     return d;
   }
 
-  // Did not pass (verdict=revise / tests failed)
+  // ---- did not pass: judge by progress, not by counting rounds -----------------
   if (!stage.onFail) return block(`${stage.id} 未通过，且编排未定义退回目标：${p.summary}`);
+
+  const now = issueKeys(p);
+  const before = ctx.prev ? issueKeys(ctx.prev) : undefined;
+  const carry = (label: string, nextStageIdx: number) => {
+    // leftovers do not block: continue, with them written down where the next role sees them
+    d.patch = { ...d.patch, stageIdx: nextStageIdx, loops, progress: `${stage.id} 剩下的不是会让结论错的问题，带已知问题继续` };
+    if (nextStageIdx >= task.preset.stages.length) {
+      d.patch.status = "ready";
+      d.patch.feedback = "";
+      d.notifies.push({ taskId: task.id, kind: "ready", text: `剩下的都只是建议级问题，按评审口径不影响结论。\n${label}` });
+    } else {
+      d.patch.status = "running";
+      d.patch.feedback = `${label}`;
+      d.launches.push({ taskId: task.id, stageIdx: nextStageIdx });
+      d.notifies.push({ taskId: task.id, kind: "info", text: `${stageName(stage.id)}没给通过，但剩下的不是会让结论错的问题，按口径继续。\n${label}` });
+    }
+    return d;
+  };
+
+  // only advisory-level issues left → the task's own bar says that is a pass
+  if (!now.major.length && p.kind === "verdict") {
+    return carry(`【${stageName(stage.id)}的建议（不阻塞）】\n${formatFeedback(stage.id, { ...p, value: { ...p.value, issues: now.minor } }).replace(/^【[^】]*未通过】[^\n]*\n?/, "")}`, task.stageIdx + 1);
+  }
+  if (p.kind === "test" && now.major.length === 0 && p.pass === false && (p.value?.cases ?? []).length === 0) {
+    return carry(`【${stageName(stage.id)}未给出可复现的失败用例】`, task.stageIdx + 1);
+  }
+
   const used = bump(stage.id);
-  if (used > (stage.maxLoops ?? 1)) {
-    // hand the decision to the advisor: it surveys the whole history and writes what to decide
-    d.patch = { ...d.patch, status: "running", loops, progress: `${stageName(stage.id)}退回 ${used - 1} 次仍未通过，正在整理决策说明` };
-    d.brief = { stageIdx: task.stageIdx };
+  const cap = ctx.cap ?? stage.maxLoops ?? 8;
+  const fresh = before ? now.major.filter((k) => !before.major.includes(k)) : [];
+
+  // Nothing new (the set shrank or stayed the same) → keep reworking: that is progress.
+  // New problems keep appearing → the bar is the question, not the work: let the advisor arbitrate
+  // instead of spending another blind round. The cap is only a runaway guard.
+  const keepGoing = used <= cap && fresh.length === 0;
+  if (keepGoing) {
+    const target = task.preset.stages.findIndex((s) => s.id === stage.onFail);
+    d.patch = {
+      stageIdx: target,
+      status: "running",
+      loops,
+      feedback: formatFeedback(stage.id, p),
+      progress: `${stage.id} 未通过，退回 ${stage.onFail}（第 ${used} 次；问题从 ${before?.major.length ?? "?"} 条到 ${now.major.length} 条）`,
+    };
+    d.launches.push({ taskId: task.id, stageIdx: target });
     return d;
   }
-  const target = task.preset.stages.findIndex((s) => s.id === stage.onFail);
-  d.patch = {
-    stageIdx: target,
-    status: "running",
-    loops,
-    feedback: formatFeedback(stage.id, p),
-    progress: `${stage.id} 未通过，退回 ${stage.onFail}（${used}/${stage.maxLoops}）`,
-  };
-  d.launches.push({ taskId: task.id, stageIdx: target });
+
+  d.patch = { ...d.patch, status: "running", loops, progress: `${stageName(stage.id)}这一轮又换了新问题，正在核对评审口径` };
+  d.brief = { stageIdx: task.stageIdx, mode: before && used <= cap ? "arbitrate" : "escalate", rounds: used };
   return d;
 }
+
+/** normalize issues to comparable keys (file may move lines between rounds; description is the identity) */
+export function issueKeys(p: ParsedOutput): { major: string[]; minor: string[] } {
+  const out = { major: [] as string[], minor: [] as string[] };
+  if (p.kind === "verdict") {
+    for (const it of (p.value?.issues ?? []) as any[]) {
+      const key = typeof it === "string"
+        ? norm(it)
+        : norm(`${(it.file ?? "").split("/").pop() ?? ""} ${it.desc ?? it.description ?? it.issue ?? it.text ?? ""}`);
+      const hard = typeof it === "string" ? true : /blocker|major|critical|high|严重/i.test(String(it.severity ?? ""));
+      (hard ? out.major : out.minor).push(key);
+    }
+  }
+  if (p.kind === "test") {
+    for (const c of (p.value?.cases ?? []) as any[]) {
+      if (!c || c.result === "pass" || c.pass === true) continue;
+      out.major.push(norm(`${c.name ?? c.case ?? "case"} ${c.detail ?? c.error ?? ""}`));
+    }
+  }
+  return out;
+}
+
+const norm = (t: any) => String(t ?? "").toLowerCase().replace(/[\s`'"“”()（）：:，,。.;；、\-_/\\]+/g, "").slice(0, 40);
+
 
 /**
  * Parent of planner-split children. A blocked child is waiting for a human — the parent keeps

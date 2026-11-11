@@ -30,13 +30,30 @@ export function headSha(cwd: string, ref = "HEAD"): string {
   return git(cwd, ["rev-parse", ref]);
 }
 
-export function worktreePath(orcHome: string, repo: string, taskId: number): string {
-  const key = `${basename(repo)}-${createHash("sha1").update(resolve(repo)).digest("hex").slice(0, 8)}`;
-  return resolve(orcHome, "worktrees", key, `task-${taskId}`);
+/**
+ * A task's handle is its title, not a number: branch and directory are derived from it
+ * (`orc/分位数可行性-3f9a`). The 4-char tail is a hash of the internal id, so two tasks that
+ * happen to share a title still get separate branches. Numbers only exist inside a task
+ * (第 2 次评审、第 3 轮) and in the database.
+ */
+export function taskSlug(title: string, id: number): string {
+  const clean = (title || "task")
+    .replace(/\s+/g, "-")
+    .replace(/[\\:*?"<>|\u0000-\u001f]/g, "")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .replace(/-+/g, "-")
+    .slice(0, 24)
+    .replace(/[-.]+$/g, "");
+  return `${clean || "task"}-${createHash("sha1").update(String(id)).digest("hex").slice(0, 4)}`;
 }
 
-export function branchName(taskId: number): string {
-  return `orc/task-${taskId}`;
+export function worktreePath(orcHome: string, repo: string, title: string, id: number): string {
+  const key = `${basename(repo)}-${createHash("sha1").update(resolve(repo)).digest("hex").slice(0, 8)}`;
+  return resolve(orcHome, "worktrees", key, taskSlug(title, id));
+}
+
+export function branchName(title: string, id: number): string {
+  return `orc/${taskSlug(title, id)}`;
 }
 
 /** Create (or reuse) the task worktree on its own branch starting at `base` */

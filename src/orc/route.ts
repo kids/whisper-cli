@@ -121,7 +121,7 @@ export function routeMessage(text: string, c: RouteCtx): Route {
 
 // ---- single agent → team -------------------------------------------------------
 
-export interface TaskOp { goal?: string; preset?: string; criteria?: string[]; constraints?: string[]; error?: string }
+export interface TaskOp { goal?: string; title?: string; preset?: string; criteria?: string[]; constraints?: string[]; bar?: string; error?: string }
 
 /** Pull `[[task]] {...}` lines out of a single-agent reply */
 export function extractTaskOps(text: string): { text: string; ops: TaskOp[] } {
@@ -139,7 +139,7 @@ export function extractTaskOps(text: string): { text: string; ops: TaskOp[] } {
     const strs = (v: any) => (Array.isArray(v) ? v.map(String).map((x: string) => x.trim()).filter(Boolean).slice(0, 12) : undefined);
     const goal = typeof o.goal === "string" ? o.goal.trim() : "";
     ops.push(goal
-      ? { goal, preset: typeof o.preset === "string" && o.preset.trim() ? o.preset.trim() : undefined, criteria: strs(o.criteria), constraints: strs(o.constraints) }
+      ? { goal, title: typeof o.title === "string" && o.title.trim() ? o.title.trim().slice(0, 40) : undefined, preset: typeof o.preset === "string" && o.preset.trim() ? o.preset.trim() : undefined, criteria: strs(o.criteria), constraints: strs(o.constraints), bar: typeof o.bar === "string" && o.bar.trim() ? o.bar.trim() : undefined }
       : { error: "[[task]] 缺少 goal" });
   }
   return { text: keep.join("\n").replace(/\n{3,}/g, "\n\n").trim(), ops: ops.slice(0, 3) };
@@ -151,7 +151,8 @@ export function formatTaskHint(): string {
     "【交给多 agent 团队】",
     "这些情况不要自己做，交给团队：用户明确要求交给团队 / 多 agent；需要反复迭代直到满足可检查的验收标准（测试全过、指标达标等），一轮做不完；需要换别的模型交叉评审；需要长时间实验并根据结果调整方向。",
     "做法：回复里**单独占一行**写（这一行不会显示给人，代码会提交任务并在群里发进展卡片）：",
-    '[[task]] {"goal":"完整、可独立理解的目标（把对话里的上下文、已有结论写进去）","preset":"loop","criteria":["可检查的验收标准"],"constraints":["必须遵守的约束"]}',
+    '[[task]] {"goal":"完整、可独立理解的目标（把对话里的上下文、已有结论写进去）","preset":"loop","criteria":["可检查的验收标准"],"constraints":["必须遵守的约束"],"bar":"评审口径：这份活该按什么标准判过不过","title":"短标题，6~14 字，群里认任务靠它"}',
+    "bar 由你按任务性质写，评审会照着它把关：探索性、一次性的分析写「只拦会让结论错的问题（口径错、数据用了不该用的、结论被反例推翻），统计严谨性、风格、可维护性记为建议」；要进生产或对外交付的代码写「按工程标准全套卡：错误路径、并发、边界、测试覆盖」。不写就按验收目标的一般尺度。", 
     "preset：loop（反复试错 / 长实验，目标可能随讨论调整，默认）、dev（新功能：规划→实现→评审→测试）、fix（修 bug：复现→修复→回归→评审）、research（调研对比）、review（只审不改）。然后用一句话告诉用户已转交团队。",
     "用户提到「团队」（启动 / 用 / 交给团队等）时，指的就是这个 [[task]]：直接写这一行，不要自己动手做，也不要用你自带的子 agent、Task 工具或待办列表来代替。",
     "一轮能做完的事自己做，不要转交；只是后台跑个训练等结果，用 [[watch]] 即可。团队需要当前工作区是 git 仓库。",

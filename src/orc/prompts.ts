@@ -58,6 +58,9 @@ export function buildStagePrompt(c: PromptContext): string {
   if (c.history.length) {
     out.push(`## 之前阶段的结论\n` + c.history.map(historyLine).join("\n"));
   }
+  if (role.output === "verdict" || role.output === "test") {
+    out.push(`## 评审口径（按任务性质定的，以它为准）\n${task.bar || "没有特别说明：按「目标是否达成、结论是否站得住」把关。会让结论错的问题才算不过；风格、可维护性、更进一步的严谨性记为建议。"}`);
+  }
   if (task.feedback) out.push(`## 必须处理的反馈\n${task.feedback}`);
   if (c.inbox.length) out.push(`## 新增输入（来自人）\n${c.inbox.map((m) => `- ${m}`).join("\n")}`);
   if (c.diff) {
@@ -89,12 +92,15 @@ function historyLine(a: Attempt): string {
  */
 export function buildBriefPrompt(c: {
   task: Task; role: ResolvedRole; stageName: string; attempts: Attempt[]; diff?: { diff?: string; stat?: string; log?: string };
-  notesPath: string; notesTail?: string;
+  notesPath: string; notesTail?: string; mode?: "arbitrate" | "escalate"; rounds?: number;
 }): string {
   const { task, role } = c;
   const out: string[] = [];
   out.push(`# orc 任务 #${task.id} · 决策说明 · 你的角色：${role.name}`);
-  out.push(`## 为什么找你\n「${c.stageName}」这个环节已经退回几轮，还是没过。你要给人写一份说明，让他看完就能决定：接着改、换个做法、缩小范围，还是不做了。说不清就说明你没看清现场——先读文件、看提交和测试结果，再写。`);
+  out.push(c.mode === "arbitrate"
+    ? `## 为什么找你\n「${c.stageName}」第 ${c.rounds ?? "?"} 轮又没过，而且这次挑出来的问题跟上一轮不一样——是**每轮都在换新问题**，说明可能不是工作没做到位，而是评审的尺子跟任务的定位对不上。\n先判断：按这份任务的**评审口径**（见下），剩下这些问题里有哪些真的会让结论站不住？哪些只是更进一步的严谨性、按口径不该阻塞？\n- 如果按口径剩下的都不影响结论：auto 设 continue_with_known_issues，把不修的逐条写进 known_issues（人能看到）。\n- 如果确实还有影响结论的问题：auto 用 none，把剩下的路写清楚交给人决定。`
+    : `## 为什么找你\n「${c.stageName}」这个环节已经退回几轮，还是没过。你要给人写一份说明，让他看完就能决定：接着改、换个做法、缩小范围，还是不做了。说不清就说明你没看清现场——先读文件、看提交和测试结果，再写。`);
+  out.push(`## 这份任务的评审口径（主 agent 按任务性质定的）\n${c.task.bar || "（没写特别口径）按「目标是否达成、结论是否站得住」把关；更进一步的严谨性属于建议。"}`);
   out.push(`## 任务目标\n${task.goal}`);
   out.push(`## 规格（验收标准在这里面）\n${task.spec || "（没有单独写规格）"}`);
   if (task.branch) out.push(`## 工作区\n当前目录是本任务的分支 \`${task.branch}\`（基线 \`${task.baseRef.slice(0, 12)}\`）。仓库里的报告、代码、测试都在这里。`);
