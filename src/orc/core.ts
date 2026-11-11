@@ -6,8 +6,33 @@
 // record first, execute after commit). Easy to test with plain objects.
 // =============================================================================
 import { formatFeedback, type ParsedOutput, type PlanSubtask } from "./output";
-import type { LaunchPayload, NotifyPayload, Task, TaskStatus } from "./types";
+import type { LaunchPayload, NotifyPayload, StageDef, Task, TaskStatus } from "./types";
 import { TERMINAL } from "./types";
+
+/** Stages a human may 「接受」 past when they block: reviewer / tester verdicts */
+export function acceptable(task: Task): StageDef | undefined {
+  if (task.kind === "loop" || task.status !== "blocked" || !task.preset?.stages) return undefined;
+  const stage = task.preset.stages[task.stageIdx];
+  const out = stage && task.preset.roles[stage.role]?.output;
+  return out === "verdict" || out === "test" ? stage : undefined;
+}
+
+/** Human said 「接受」 on a blocked review / test stage: treat it as passed and move on */
+export function decideAccept(task: Task, note?: string): Decision | undefined {
+  const stage = acceptable(task);
+  if (!stage) return undefined;
+  const d: Decision = { patch: {}, launches: [], notifies: [], children: [] };
+  const next = task.stageIdx + 1;
+  const why = `人工接受${stageName(stage.id)}未通过的版本${note ? `：${note}` : ""}`;
+  if (next >= task.preset.stages.length) {
+    d.patch = { stageIdx: next, status: "ready", feedback: "", progress: why };
+    d.notifies.push({ taskId: task.id, kind: "ready", text: `按你的决定，接受了现在这版${task.branch ? `（分支 \`${task.branch}\`）` : ""}，任务完成。` });
+  } else {
+    d.patch = { stageIdx: next, status: "running", feedback: "", progress: why };
+    d.launches.push({ taskId: task.id, stageIdx: next, note: note ? `人接受了上一环节（${stageName(stage.id)}）未通过的版本，并补充：${note}` : undefined });
+  }
+  return d;
+}
 
 export type Outcome =
   | { kind: "parsed"; parsed: ParsedOutput }
@@ -28,6 +53,8 @@ export interface Decision {
   patch: TaskPatch;
   launches: LaunchPayload[];
   notifies: NotifyPayload[];
+  /** ask the engine to write a 决策说明 (advisor role) and block with it instead of a canned line */
+  brief?: { stageIdx: number };
   children: PlanSubtask[];
 }
 
@@ -118,7 +145,10 @@ export function decideAfterAttempt(task: Task, outcome: Outcome): Decision {
   if (!stage.onFail) return block(`${stage.id} 未通过，且编排未定义退回目标：${p.summary}`);
   const used = bump(stage.id);
   if (used > (stage.maxLoops ?? 1)) {
-    return block(`${stage.id} 已退回 ${used - 1} 次仍未通过，需要人来决定：${p.summary}`);
+    // hand the decision to the advisor: it surveys the whole history and writes what to decide
+    d.patch = { ...d.patch, status: "running", loops, progress: `${stageName(stage.id)}退回 ${used - 1} 次仍未通过，正在整理决策说明` };
+    d.brief = { stageIdx: task.stageIdx };
+    return d;
   }
   const target = task.preset.stages.findIndex((s) => s.id === stage.onFail);
   d.patch = {
@@ -132,15 +162,29 @@ export function decideAfterAttempt(task: Task, outcome: Outcome): Decision {
   return d;
 }
 
-/** Parent of planner-split children: settle once every child is terminal */
+/**
+ * Parent of planner-split children. A blocked child is waiting for a human — the parent keeps
+ * waiting too (progress only, no message: the child's own decision message is the one to act on).
+ * Settles once every child is final (ready / failed / dropped).
+ */
 export function decideParent(parent: Task, children: Task[]): Decision | null {
   if (!children.length || !children.every((c) => TERMINAL.includes(c.status))) return null;
   const d = empty();
+  const blocked = children.filter((c) => c.status === "blocked");
+  if (blocked.length) {
+    const waiting = children.filter((c) => c.status !== "ready" && c.status !== "blocked" && c.progress.startsWith("跳过"));
+    d.patch = { status: "waiting_children", progress: `等你决定 ${blocked.map((c) => `#${c.id}`).join("、")}${waiting.length ? `（${waiting.map((c) => `#${c.id}`).join("、")} 在等它）` : ""}` };
+    return d;
+  }
   const bad = children.filter((c) => c.status !== "ready");
   if (bad.length) {
-    const why = `子任务未全部完成：${bad.map((c) => `#${c.id} ${c.status}`).join("，")}`;
-    d.patch = { status: "blocked", progress: why };
-    d.notifies.push({ taskId: parent.id, kind: "decision", text: why });
+    const ok = children.filter((c) => c.status === "ready");
+    const why = [
+      `没有全部完成：${bad.map((c) => `#${c.id} ${c.title}（${c.status === "dropped" ? (c.progress.startsWith("跳过") ? "因前置任务没完成而跳过" : "已终止") : "已放弃"}）`).join("；")}`,
+      ok.length ? `已完成：${ok.map((c) => `#${c.id} ${c.title} → \`${c.branch}\``).join("；")}` : "",
+    ].filter(Boolean).join("\n");
+    d.patch = { status: "failed", progress: `子任务没有全部完成（${ok.length}/${children.length}）` };
+    d.notifies.push({ taskId: parent.id, kind: "info", text: why });
     return d;
   }
   const text = `全部 ${children.length} 个子任务已通过：\n` + children.map((c) => `- #${c.id} ${c.title} → \`${c.branch}\``).join("\n");
@@ -149,12 +193,32 @@ export function decideParent(parent: Task, children: Task[]): Decision | null {
   return d;
 }
 
-/** Deps gate for a child task: "go" | "wait" | blocked reason */
+/**
+ * Deps gate for a child task: "go" | "wait" | reason to skip it.
+ * A blocked dependency is waiting for a human and may still be retried / accepted → keep waiting.
+ */
 export function depsGate(deps: Task[]): "go" | "wait" | string {
-  const bad = deps.find((t) => t.status !== "ready" && TERMINAL.includes(t.status));
-  if (bad) return `依赖的子任务 #${bad.id} 状态为 ${bad.status}`;
+  const bad = deps.find((t) => t.status === "failed" || t.status === "dropped");
+  if (bad) return `跳过：前置任务 #${bad.id} ${bad.status === "dropped" ? "已终止" : "已放弃"}`;
   return deps.every((t) => t.status === "ready") ? "go" : "wait";
 }
+
+// ---- human-facing decision text ------------------------------------------------
+
+const STAGE_NAME: Record<string, string> = {
+  plan: "规划", design_review: "设计评审", impl: "实现", review: "评审", critique: "评审", test: "测试",
+  repro: "复现", fix: "修复", research: "调研", summary: "汇总", review_a: "评审", review_b: "第二评审",
+};
+export const stageName = (id: string) => STAGE_NAME[id] ?? id;
+const clipLine = (s: string, n: number) => { const t = (s || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
+const sv = (v: any) => (typeof v === "string" ? v : v == null ? "" : JSON.stringify(v));
+const isMajor = (it: any) => typeof it !== "string" && /blocker|major|critical|high|严重/i.test(String(it?.severity ?? ""));
+
+/** Stage after `stageIdx` that a human 「接受」 would continue with (undefined = task would be done) */
+export function nextStageAfter(task: Task, stageIdx: number): StageDef | undefined {
+  return task.preset.stages[stageIdx + 1];
+}
+
 
 /** Stage index children start from: the stage right after the planner stage */
 export function childStartStage(task: Task): number {

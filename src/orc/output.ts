@@ -28,6 +28,7 @@ const REQUIRED_KEY: Record<OutputKind, string> = {
   test: "pass",
   report: "summary",
   action: "action",
+  brief: "situation",
 };
 
 /** Every balanced top-level {...} in the text (string-aware), in order of appearance */
@@ -101,6 +102,10 @@ export function parseRoleOutput(kind: OutputKind, text: string): ParsedOutput | 
     case "action": {
       // validated by the loop's own action parser (ledger.ts)
       return { kind, pass: true, summary: str(v.action), notes, value: v };
+    }
+    case "brief": {
+      if (typeof v.situation !== "string" || !v.situation.trim()) return { error: `"situation" 必须是非空字符串` };
+      return { kind, pass: true, summary: v.situation.trim(), notes, value: v };
     }
   }
 }

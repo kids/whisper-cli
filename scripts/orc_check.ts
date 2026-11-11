@@ -7,7 +7,8 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyPatch, fallbackNote, loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
-import { decideAfterAttempt, decideParent } from "../src/orc/core";
+import { acceptable, decideAccept, decideAfterAttempt, decideParent, depsGate } from "../src/orc/core";
+import { knownIssues, renderAutoNote, renderBrief } from "../src/orc/brief";
 import { findJsonObjects, parseRoleOutput } from "../src/orc/output";
 import type { Executor, RunRequest, RunResult } from "../src/orc/runner";
 import { classifyResult, eventToProgress } from "../src/orc/runner";
@@ -92,7 +93,7 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", '{"verdict":"revise","issues":["x"],"summary":"bad"}'));
   check("revise → back to impl with feedback", d.patch.stageIdx === idx("impl") && d.patch.loops!.review === 1 && /review 未通过/.test(d.patch.feedback!) && /- x/.test(d.patch.feedback!));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 3 } }), parsed("verdict", '{"verdict":"revise"}'));
-  check("loop budget exhausted → blocked", d.patch.status === "blocked" && d.notifies[0].kind === "decision");
+  check("loop budget exhausted → brief requested", d.brief !== undefined && d.notifies.length === 0);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), feedback: "【review 未通过】x" }), parsed("verdict", '{"verdict":"approve"}'));
   check("approve clears own feedback", d.patch.feedback === "" && d.patch.stageIdx === idx("test"));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("test") }), parsed("test", '{"pass":true,"cases":[]}'));
@@ -113,7 +114,60 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   const kids = [mkTask({ id: 2, status: "ready", branch: "orc/task-2" }), mkTask({ id: 3, status: "running" })];
   check("parent waits", decideParent(mkTask(), kids) === null);
   kids[1].status = "blocked";
-  check("parent blocked by child", decideParent(mkTask(), kids)?.patch.status === "blocked");
+  const pw = decideParent(mkTask(), kids);
+  check("child blocked → parent keeps waiting, no message", pw?.patch.status === "waiting_children" && pw.notifies.length === 0 && /等你决定 #3/.test(pw.patch.progress!), pw);
+  kids[1].status = "failed";
+  const pf = decideParent(mkTask(), [...kids, mkTask({ id: 4, status: "dropped", progress: "跳过：前置任务 #3 已放弃" })]);
+  check("children settled, some not ready → one info summary", pf?.patch.status === "failed" && pf.notifies.length === 1 && pf.notifies[0].kind === "info" && /#4 t（因前置任务没完成而跳过）/.test(pf.notifies[0].text) && /已完成：#2/.test(pf.notifies[0].text), pf?.notifies[0]?.text);
+
+  // deps gate: a blocked dependency (waiting for a human) keeps dependents waiting
+  check("deps: blocked dep → wait", depsGate([mkTask({ id: 3, status: "blocked" })]) === "wait");
+  check("deps: running dep → wait", depsGate([mkTask({ id: 3, status: "running" })]) === "wait");
+  check("deps: failed dep → skip", depsGate([mkTask({ id: 3, status: "failed" })]) === "跳过：前置任务 #3 已放弃");
+  check("deps: all ready → go", depsGate([mkTask({ id: 3, status: "ready" })]) === "go");
+
+  // review budget used up → a message that says what to decide
+  // budget used up → ask the advisor for a 决策说明 instead of a canned line
+  const verdictJson = JSON.stringify({
+    verdict: "revise", summary: "测试全绿，但归一化会把相反的事实合并",
+    issues: [{ severity: "major", file: "src/extract/normalize.py", line: 88, desc: "sign() 归一化丢了方向", impact: "「利润增长 5%」和「利润下降 5%」会被当成同一条事实合并" }],
+    notes: ["已确认修复：测试 107 个全绿"],
+  });
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 3 }, branch: "orc/task-3" }), parsed("verdict", verdictJson));
+  check("exhausted: brief requested, no canned notify", d.brief?.stageIdx === idx("review") && d.notifies.length === 0 && d.patch.status === "running" && /正在整理决策说明/.test(d.patch.progress!), d);
+
+  const brief = parseRoleOutput("brief", JSON.stringify({
+    situation: "在做分布预测的离线可行性检查，卡在归一化会把方向相反的数值当成同一件事。",
+    state: { done: ["107 个测试全绿", "增益 6.3% 已按新口径重算并写入报告"], not_done: ["独立 baseline 没补，无法判断这是模型本身还是预处理带来的"] },
+    blockers: [{ what: "归一化丢方向", why_stuck: "当前特征设计里没有保留正负号的位置，改要动抽取层的 schema", evidence: "src/extract/normalize.py:88" }],
+    options: [
+      { name: "补 baseline", what: "按论文口径重建独立 baseline，再对比", cost: "约 2 天", risk: "结论可能整个回到不可行", reversible: "能补救", recommended: true },
+      { name: "带已知问题先交付", what: "把这版当探索性结论，报告里写明归一化缺陷", cost: "半天", risk: "被引用后可能误导", reversible: "能补救" },
+    ],
+    recommendation: "补 baseline：这一步不做，后面所有增益数字都说不清来源。",
+    needs_from_human: "这个报告是内部参考还是要对外发布？对外就必须先补 baseline。",
+    auto: "none", known_issues: [],
+  })) as any;
+  const briefText = renderBrief(mkTask({ id: 3, title: "分布预测可行性", branch: "orc/task-3" }), brief, "评审");
+  check("brief: header names the task and the stage", briefText.startsWith("**#3 分布预测可行性：评审反复没过，需要你定一件事**"), briefText);
+  check("brief: situation + what is done / not done", briefText.includes("在做分布预测") && /已经做到：\n- 107 个测试全绿/.test(briefText) && briefText.includes("还没做到："));
+  check("brief: blocker with why and evidence", /1\. 归一化丢方向\n   原因：当前特征设计/.test(briefText) && briefText.includes("依据：src/extract/normalize.py:88"));
+  check("brief: real options with cost/risk/undo", /1\. \*\*补 baseline\*\*（建议）：/.test(briefText) && briefText.includes("代价：约 2 天") && briefText.includes("风险：结论可能整个回到不可行") && briefText.includes("补救：能补救"));
+  check("brief: recommendation + what is needed from the human", briefText.includes("**建议**：补 baseline") && briefText.includes("**需要你给的**：这个报告是内部参考"));
+  check("brief: says how to answer", briefText.includes("直接说选哪个就行") && briefText.includes("orc/task-3"));
+  const auto = parseRoleOutput("brief", JSON.stringify({ situation: "x", auto: "continue_with_known_issues", known_issues: ["归一化丢方向，报告里已写明"], recommendation: "不影响主要结论" })) as any;
+  check("brief: auto only with known issues", knownIssues(auto).length === 1 && knownIssues(brief).length === 0);
+  check("brief: auto note lists what was deferred", renderAutoNote(mkTask({ id: 3, title: "t" }), auto, knownIssues(auto)).includes("归一化丢方向，报告里已写明"));
+
+  // 接受
+  const blockedReview = mkTask({ stageIdx: idx("review"), status: "blocked", loops: { review: 3 }, feedback: "【review 未通过】x" });
+  check("acceptable: blocked review", acceptable(blockedReview)?.id === "review");
+  check("acceptable: not on impl", !acceptable(mkTask({ stageIdx: idx("impl"), status: "blocked" })));
+  check("acceptable: not when running", !acceptable(mkTask({ stageIdx: idx("review"), status: "running" })));
+  const acc = decideAccept(blockedReview, "baseline 下次再补")!;
+  check("accept → next stage, feedback cleared, note passed on", acc.patch.stageIdx === idx("test") && acc.patch.status === "running" && acc.patch.feedback === "" && /baseline 下次再补/.test(acc.launches[0].note!), acc);
+  const accLast = decideAccept(mkTask({ stageIdx: idx("test"), status: "blocked", branch: "orc/task-1" }))!;
+  check("accept on last stage → ready", accLast.patch.status === "ready" && accLast.notifies[0].kind === "ready" && /orc\/task-1/.test(accLast.notifies[0].text));
 }
 
 
@@ -144,6 +198,7 @@ class FakeExec implements Executor {
   plan = '{"spec":"写 feature.txt","subtasks":[],"summary":"plan ok","notes":["用 txt 存特性"]}';
   implDelay = 20;
   hang = false;
+  alwaysRevise = new Set<number>();
   available() { return ["codebuddy", "codex", "claude"] as any; }
   stop(key: string) { this.stopped.add(key); return true; }
   async run(req: RunRequest): Promise<RunResult> {
@@ -166,6 +221,9 @@ class FakeExec implements Executor {
       if (role === "critic") {
         const n = (this.criticCalls.get(taskId) ?? 0) + 1;
         this.criticCalls.set(taskId, n);
+        if (this.alwaysRevise.has(taskId)) {
+          return this.ok('{"verdict":"revise","issues":[{"severity":"major","file":"feature.txt","desc":"still wrong","impact":"结果会算错"}],"summary":"还不行"}');
+        }
         if (n === 1) {
           writeFileSync(join(req.cwd, "critic-was-here.txt"), "oops");
           return this.ok('{"verdict":"revise","issues":[{"severity":"major","file":"feature.txt","desc":"needs two lines"}],"summary":"too short"}');
@@ -258,6 +316,45 @@ async function e2e() {
     check("C dep order", firstB > lastA, { firstB, lastA });
     check("C child B built on A", existsSync(join(kids[1].worktree!, `feature-${kids[0].id}.txt`)));
     check("C child starts after plan", store.listAttempts(kids[0].id)[0].stageId === "impl");
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // F: a child stuck on review waits for a human; its dependents wait quietly; 接受 lets everything continue
+  {
+    const { dir, repo, store, exec, notes, orc } = setup();
+    exec.plan = '{"spec":"two parts","subtasks":[{"title":"part A","spec":"A"},{"title":"part B","spec":"B","deps":[0]}]}';
+    exec.alwaysRevise.add(2);
+    const t = orc.submit({ goal: "big", repo, preset: devPreset });
+    const tick = () => (orc as any).tick();
+    for (let i = 0; i < 3000 && store.getTask(2)?.status !== "blocked"; i++) { await tick(); await sleep(5); }
+    for (let i = 0; i < 60; i++) { await tick(); await sleep(5); }
+    const decisions = notes.filter((n) => n.kind === "decision");
+    check("F one decision message, for the stuck child only", decisions.length === 1 && decisions[0].taskId === 2, notes.map((n) => `${n.taskId}:${n.kind}`));
+    check("F decision says what is held up", /这是 #1「big」的子任务；#3 part B 要等它定下来才会开始/.test(decisions[0]?.text ?? ""), decisions[0]?.text);
+    check("F dependent keeps waiting (not blocked / dropped)", store.getTask(3)!.status === "queued" && !store.listAttempts(3).length, store.getTask(3));
+    check("F parent keeps waiting", store.getTask(t.id)!.status === "waiting_children" && /等你决定 #2/.test(store.getTask(t.id)!.progress), store.getTask(t.id));
+    exec.alwaysRevise.delete(2);
+    check("F accept", orc.accept(2, "先这样"));
+    await orc.runUntilIdle(5);
+    check("F accepted child ran test and finished", store.getTask(2)!.status === "ready" && store.listAttempts(2).at(-1)!.stageId === "test");
+    check("F dependent ran after accept", store.getTask(3)!.status === "ready");
+    check("F parent ready", store.getTask(t.id)!.status === "ready");
+    check("F still only one decision message", notes.filter((n) => n.kind === "decision").length === 1);
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // G: the stuck child is given up → dependents skipped quietly, parent sends one summary
+  {
+    const { dir, repo, store, exec, notes, orc } = setup();
+    exec.plan = '{"spec":"two parts","subtasks":[{"title":"part A","spec":"A"},{"title":"part B","spec":"B","deps":[0]}]}';
+    exec.alwaysRevise.add(2);
+    const t = orc.submit({ goal: "big", repo, preset: devPreset });
+    const tick = () => (orc as any).tick();
+    for (let i = 0; i < 3000 && store.getTask(2)?.status !== "blocked"; i++) { await tick(); await sleep(5); }
+    orc.stop(2);
+    await orc.runUntilIdle(5);
+    check("G dependent skipped", store.getTask(3)!.status === "dropped" && /跳过：前置任务 #2 已终止/.test(store.getTask(3)!.progress), store.getTask(3));
+    const parentNotes = notes.filter((n) => n.taskId === t.id && n.kind !== "info" || (n.taskId === t.id && /没有全部完成/.test(n.text)));
+    check("G parent failed with one info summary", store.getTask(t.id)!.status === "failed" && parentNotes.length === 1 && parentNotes[0].kind === "info", parentNotes);
+    check("G no extra decision messages", notes.filter((n) => n.kind === "decision").length === 1);
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
   // D: stop a running task

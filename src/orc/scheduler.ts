@@ -11,13 +11,15 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
-import { childStartStage, decideAfterAttempt, decideParent, depsGate, type Decision, type Outcome } from "./core";
+import { knownIssues, renderAutoNote, renderBrief } from "./brief";
+import { stageName } from "./core";
+import { childStartStage, decideAccept, decideAfterAttempt, decideParent, depsGate, type Decision, type Outcome } from "./core";
 import { parseRoleOutput, lastProgressLine } from "./output";
-import { buildStagePrompt } from "./prompts";
+import { buildBriefPrompt, buildStagePrompt } from "./prompts";
 import { LoopEngine, type LoopOptions } from "./loop";
 import type { Executor } from "./runner";
 import type { OrcStore } from "./store";
-import type { Attempt, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, Task } from "./types";
+import type { Attempt, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, ResolvedRole, Task } from "./types";
 import { TERMINAL } from "./types";
 import * as wt from "./worktree";
 
@@ -30,6 +32,8 @@ export interface OrchestratorOptions {
   instructionsFor?: (task: Task) => Promise<string | undefined>;
   /** Called (throttled) whenever a task's visible progress changes */
   onProgress?: (task: Task) => void;
+  /** the advisor role that writes 决策说明 when a task cannot settle itself (orc/roles/advisor.md) */
+  briefRole?: (task: Task) => Promise<ResolvedRole | undefined> | ResolvedRole | undefined;
   tickMs?: number;
   progressThrottleMs?: number;
   /** Supervisor-loop hooks (watch routing etc.) */
@@ -85,7 +89,8 @@ export class Orchestrator {
   stop(taskId: number): boolean {
     const task = this.store.getTask(taskId);
     if (!task) return false;
-    const stoppable = !TERMINAL.includes(task.status) || (task.kind === "loop" && task.status === "blocked");
+    // blocked awaits a human: 放弃 must work for every kind, not just loop tasks
+    const stoppable = !TERMINAL.includes(task.status) || task.status === "blocked";
     this.store.tx(() => {
       this.store.cancelPendingLaunches(taskId);
       for (const child of this.store.listTasks({ parentId: taskId })) {
@@ -110,9 +115,23 @@ export class Orchestrator {
     const loops = { ...task.loops };
     for (const k of Object.keys(loops)) if (k === stage.id || k.endsWith(`:${stage.id}`)) delete loops[k];
     this.store.tx(() => {
+      if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务 #${taskId} 重试中` });
       this.store.updateTask(taskId, { status: "running", loops, stageIdx: task.preset.stages.indexOf(stage), progress: "人工重试" });
       this.store.addEffect("launch", { taskId, stageIdx: task.preset.stages.indexOf(stage), note } satisfies LaunchPayload);
     });
+    return true;
+  }
+
+  /** Human 「接受」 on a blocked review / test stage: count it as passed and continue */
+  accept(taskId: number, note?: string): boolean {
+    const task = this.store.getTask(taskId);
+    const d = task && decideAccept(task, note);
+    if (!task || !d) return false;
+    this.store.tx(() => {
+      if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务 #${taskId} 已接受，继续` });
+      this.applyDecision(task, d);
+    });
+    this.emitProgress(taskId);
     return true;
   }
 
@@ -209,13 +228,21 @@ export class Orchestrator {
     }
     // Dependency gate (planner-split children)
     if (task.deps.length) {
-      const gate = depsGate(task.deps.map((id) => this.store.getTask(id)!).filter(Boolean));
-      if (gate === "wait") { this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 3000 }); return; }
+      const deps = task.deps.map((id) => this.store.getTask(id)!).filter(Boolean);
+      const gate = depsGate(deps);
+      if (gate === "wait") {
+        // a blocked dependency waits for a human: poll slowly
+        const slow = deps.some((t) => t.status === "blocked");
+        this.store.markEffect(e.id, "pending", { nextAt: Date.now() + (slow ? 15_000 : 3000) });
+        return;
+      }
       if (gate !== "go") {
+        // dependency gave up → skip quietly; the parent sends one summary when all children settle
         this.store.tx(() => {
-          this.applyDecision(task, { patch: { status: "blocked", progress: gate }, launches: [], notifies: [{ taskId: task.id, kind: "decision", text: gate }], children: [] });
+          this.applyDecision(task, { patch: { status: "dropped", progress: gate }, launches: [], notifies: [], children: [] });
           this.store.markEffect(e.id, "done", { error: gate });
         });
+        this.emitProgress(task.id);
         return;
       }
     }
@@ -367,6 +394,7 @@ export class Orchestrator {
       else { parsed = p; outcome = { kind: "parsed", parsed: p }; }
     }
 
+    let brief: Decision["brief"];
     this.store.tx(() => {
       this.store.updateAttempt(attempt.id, {
         status: interrupted || outcome.kind === "cancelled" ? "cancelled" : outcome.kind === "run_error" ? "failed" : "done",
@@ -384,6 +412,7 @@ export class Orchestrator {
         const d = decideAfterAttempt(fresh, outcome);
         if (violation) d.notifies.push({ taskId: task.id, kind: "info", text: `${role.name} 是只读角色却修改了文件，已回滚：\n${violation.slice(0, 500)}` });
         this.applyDecision(fresh, d);
+        brief = d.brief;
       }
       this.store.markEffect(e.id, "done");
     });
@@ -394,6 +423,81 @@ export class Orchestrator {
       appendFileSync(resolve(artifactDir, "cases.jsonl"), parsed.value.cases.map((c: any) => JSON.stringify({ attempt: attempt.id, ...c })).join("\n") + "\n");
     }
     this.emitProgress(task.id);
+    if (brief) await this.writeBrief(task.id, brief.stageIdx);
+  }
+
+  /**
+   * A stage used up its rework budget. Ask the advisor to write the decision brief (it sees every
+   * attempt), then either keep going on its recommendation or block and post the brief.
+   * No advisor configured → block with the reviewer's own summary + issues.
+   */
+  private async writeBrief(taskId: number, stageIdx: number): Promise<void> {
+    const task = this.store.getTask(taskId);
+    if (!task) return;
+    const stage = task.preset.stages[stageIdx];
+    const last = [...this.store.listAttempts(taskId)].reverse().find((a) => a.stageId === stage?.id && a.parsed);
+    const role = await this.opts.briefRole?.(task);
+    if (!role || !stage || task.status === "dropped") {
+      const text = last ? `${stageName(stage.id)}连续没过：${last.parsed?.summary ?? ""}` : "任务卡住了，需要人看";
+      this.store.tx(() => this.applyDecision(task, {
+        patch: { status: "blocked", progress: text.slice(0, 120) }, launches: [], notifies: [{ taskId, kind: "decision", text }], children: [],
+      }));
+      this.emitProgress(taskId);
+      return;
+    }
+    const n = this.store.listAttempts(taskId).filter((a) => a.stageId === "brief").length + 1;
+    const sessionKey = `orc:${taskId}#advisor:${n}`;
+    const attempt = this.store.tx(() => this.store.createAttempt({
+      taskId, stageId: "brief", role: role.name, slot: 0, cli: role.cli, model: role.model ?? null, sessionKey, sessionId: null,
+    }));
+    const notesPath = this.notesPath(task);
+    const prompt = buildBriefPrompt({
+      task, role, stageName: stageName(stage.id), attempts: this.store.listAttempts(taskId),
+      diff: task.worktree ? { ...wt.diffSince(task.worktree, task.baseRef, 60_000), log: wt.logSince(task.worktree, task.baseRef) } : undefined,
+      notesPath, notesTail: existsSync(notesPath) ? readFileSync(notesPath, "utf8").split("\n").slice(-40).join("\n").trim() : "",
+    });
+    const res = await this.exec.run({
+      cli: role.cli, model: role.model, prompt, sessionKey, cwd: task.worktree!,
+      appendSystemPrompt: await this.opts.instructionsFor?.(task), readOnly: true,
+      hardTimeoutMs: role.hardTimeoutMin * 60_000, staleTimeoutMs: role.staleTimeoutMin * 60_000,
+      onProgress: (line) => { this.store.updateTask(taskId, { progress: `整理决策说明：${line}` }); this.emitProgress(taskId); },
+    }).catch((err) => ({ text: "", tokens: 0, timedOut: false, cancelled: false, error: (err as Error).message }));
+
+    const parsed = res.error || res.timedOut ? undefined : parseRoleOutput("brief", res.text);
+    const bad = !parsed || "error" in parsed;
+    this.store.tx(() => this.store.updateAttempt(attempt.id, {
+      status: bad ? "failed" : "done", output: res.text.slice(0, 200_000), parsed: bad ? null : parsed,
+      error: bad ? (res.error || (parsed as { error: string })?.error || "超时") : "", tokens: res.tokens, endedAt: Date.now(),
+    }));
+    if (bad) {
+      const why = last?.parsed?.summary || "评审连续没过";
+      this.store.tx(() => this.applyDecision(this.store.getTask(taskId)!, {
+        patch: { status: "blocked", progress: `决策说明没写成：${why.slice(0, 100)}` }, launches: [], children: [],
+        notifies: [{ taskId, kind: "decision", text: `**#${taskId} ${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（决策说明没能生成：${res.error || "输出不合约定"}。可以直接说「再试一次」「接受这版」或「放弃」。）` }],
+      }));
+      this.emitProgress(taskId);
+      return;
+    }
+    const kept = knownIssues(parsed);
+    const fresh = this.store.getTask(taskId)!;
+    if (kept.length && fresh.status !== "dropped") {
+      // advisor judged the leftovers acceptable to defer → framework continues, and says so
+      const next = task.preset.stages[stageIdx + 1];
+      const feedback = `【已知问题（人已被告知，可以以后再处理）】\n${kept.map((k) => `- ${k}`).join("\n")}`;
+      this.store.tx(() => {
+        this.store.updateTask(taskId, next
+          ? { stageIdx: stageIdx + 1, status: "running", feedback, progress: "按决策说明的建议继续（带已知问题）" }
+          : { stageIdx: stageIdx + 1, status: "ready", feedback, progress: "完成（带已知问题）" });
+        if (next) this.store.addEffect("launch", { taskId, stageIdx: stageIdx + 1 } satisfies LaunchPayload);
+        this.applyDecision(fresh, { patch: {}, launches: [], children: [], notifies: [{ taskId, kind: "info", text: renderAutoNote(task, parsed, kept) }] });
+      });
+    } else {
+      this.store.tx(() => this.applyDecision(fresh, {
+        patch: { status: "blocked", progress: `${stageName(stage.id)}反复没过，等你决定（决策说明见回复）` },
+        launches: [], children: [], notifies: [{ taskId, kind: "decision", text: renderBrief(task, parsed, stageName(stage.id)) }],
+      }));
+    }
+    this.emitProgress(taskId);
   }
 
   // ---- decisions ----------------------------------------------------------
@@ -402,7 +506,16 @@ export class Orchestrator {
   private applyDecision(task: Task, d: Decision): void {
     this.store.updateTask(task.id, d.patch as Partial<Task>);
     for (const l of d.launches) this.store.addEffect("launch", l);
-    for (const n of d.notifies) this.store.addEffect("notify", n);
+    for (const n of d.notifies) {
+      // a child waiting on a human: say what else is held up by it
+      if (n.kind === "decision" && task.parentId) {
+        const parent = this.store.getTask(task.parentId);
+        const sibs = this.store.listTasks({ parentId: task.parentId }).filter((c) => c.id !== task.id && c.status !== "ready" && !["failed", "dropped"].includes(c.status));
+        const held = sibs.filter((c) => dependsOn(c, task.id, sibs));
+        if (parent) n.text += `\n\n这是 #${parent.id}「${parent.title}」的子任务${held.length ? `；${held.map((c) => `#${c.id} ${c.title}`).join("、")} 要等它定下来才会开始` : ""}。`;
+      }
+      this.store.addEffect("notify", n);
+    }
 
     if (d.children.length) {
       const start = childStartStage(task);
@@ -428,6 +541,8 @@ export class Orchestrator {
       if (parent && parent.status === "waiting_children") {
         const pd = decideParent(parent, this.store.listTasks({ parentId: parent.id }));
         if (pd) this.applyDecision(parent, pd);
+        else if (after.status === "blocked") this.store.updateTask(parent.id, { progress: `等你决定 #${after.id}（${after.title}）` });
+        if (pd || after.status === "blocked") this.emitProgress(parent.id);
       }
     }
   }
@@ -436,4 +551,12 @@ export class Orchestrator {
     const t = this.store.getTask(taskId);
     if (t) try { this.opts.onProgress?.(t); } catch { /* sink errors must not break scheduling */ }
   }
+}
+
+/** `c` waits (directly or through other siblings) on task `id` */
+function dependsOn(c: Task, id: number, sibs: Task[], seen = new Set<number>()): boolean {
+  if (c.deps.includes(id)) return true;
+  if (seen.has(c.id)) return false;
+  seen.add(c.id);
+  return c.deps.some((d) => { const s = sibs.find((x) => x.id === d); return !!s && dependsOn(s, id, sibs, seen); });
 }

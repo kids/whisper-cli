@@ -9,7 +9,7 @@
 //   /orc confirm | cancel             apply / drop the lead agent's pending proposal
 //   /orc 播报 安静|正常|详细          per-agent thread cards for this chat's tasks
 //   /task <goal>                      submit to orc (any mode)
-//   /task <id> | stop|retry|attach <id> …
+//   /task <id> | stop|retry|accept|attach <id> …
 //   /tasks                            this chat's tasks
 // A lead turn only picks an action; the code below executes it (002 §2.3).
 // =============================================================================
@@ -20,6 +20,7 @@ import { appendAnnouncementText, fetchAnnouncement } from "../announcement";
 import { applyMemoryOps } from "../memory";
 import { formatRecent, recordTurn } from "../recent";
 import { fallbackNote, loadPresets, loadRoles, presetSummary } from "./config";
+import { acceptable, stageName } from "./core";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
   renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, type ChatProfile, type LeadAction,
@@ -162,13 +163,13 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
     const arg = (m[1] || "").trim();
     const o = orcOf(h);
     bindChat(chatId, h.im);
-    if (!arg) { await say("用法：`/task <目标>` 提交；`/task <id>` 查看；`/task stop|retry|attach <id> …`"); return true; }
-    const sm = arg.match(/^(stop|retry|attach)\s+#?(\d+)\s*([\s\S]*)$/i);
+    if (!arg) { await say("用法：`/task <目标>` 提交；`/task <id>` 查看；`/task stop|retry|accept|attach <id> …`"); return true; }
+    const sm = arg.match(/^(stop|retry|accept|attach)\s+#?(\d+)\s*([\s\S]*)$/i);
     if (sm) {
       const id = Number(sm[2]);
       const verb = sm[1].toLowerCase();
-      const ok = verb === "stop" ? o.stop(id) : verb === "retry" ? o.retry(id, sm[3] || undefined) : o.attach(id, sm[3], false);
-      await say(ok ? `#${id} ${verb === "stop" ? "已终止" : verb === "retry" ? "已重新排队" : "补充已排队，下一轮交给 agent"}` : `#${id} 当前状态不支持 ${verb}`);
+      const ok = verb === "stop" ? o.stop(id) : verb === "retry" ? o.retry(id, sm[3] || undefined) : verb === "accept" ? o.accept(id, sm[3] || undefined) : o.attach(id, sm[3], false);
+      await say(ok ? `#${id} ${verb === "stop" ? "已终止" : verb === "retry" ? "已重新排队" : verb === "accept" ? "已接受现在这版，继续后面的环节" : "补充已排队，下一轮交给 agent"}` : `#${id} 当前状态不支持 ${verb}`);
       return true;
     }
     if (/^#?\d+$/.test(arg)) {
@@ -257,6 +258,7 @@ export function describeAction(a: LeadAction): string {
     case "status": return `（查询状态${a.task ? " #" + a.task : ""}）`;
     case "stop": return `（终止 #${a.task}）`;
     case "retry": return `（重试 #${a.task}）${a.note ?? ""}`;
+    case "accept": return `（接受 #${a.task} 现在这版）${a.note ?? ""}`;
     case "config": return a.task ? `（调整 #${a.task}）${JSON.stringify({ ...a.patch, verbosity: a.verbosity })}` : `（拟调整编排）${JSON.stringify(a.patch)}`;
     case "confirm": return "（确认待定提议）";
     case "cancel": return "（放弃待定提议）";
@@ -316,6 +318,14 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
     }
     case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 #${act.task} 已终止` : `#${act.task} 无法终止`); return;
     case "retry": await say(own(act.task) && o.retry(act.task, act.note) ? `🔁 #${act.task} 已重新排队` : `#${act.task} 当前状态不能重试`); return;
+    case "accept": {
+      const t = own(act.task) ? o.store.getTask(act.task) : undefined;
+      const st = t && acceptable(t);
+      if (!t || !st || !o.accept(act.task, act.note)) { await say(`#${act.task} 现在没有卡在评审 / 测试上，没法「接受」`); return; }
+      const next = t.preset.stages[t.stageIdx + 1];
+      await say(next ? `✅ #${t.id} 接受现在这版，跳过这次${stageName(st.id)}，继续${stageName(next.id)}` : `✅ #${t.id} 接受现在这版，任务完成`);
+      return;
+    }
     case "attach": {
       const ok = own(act.task) && o.attach(act.task, act.text, act.urgent, userText);
       await say(ok ? (act.urgent ? `⚡ 已打断 #${act.task}，带着你的补充续接原会话重跑` : `📎 已把补充交给 #${act.task}，下一轮生效`) : `#${act.task} 不在进行中`);

@@ -11,6 +11,7 @@ import { getChatInstructions } from "../announcement";
 import { formatMemory, joinInstructions } from "../memory";
 import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards } from "./agent-cards";
+import { acceptable, stageName } from "./core";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { budgetState, clip, currentEvidence, type Ledger } from "./ledger";
 import { findJsonObjects } from "./output";
@@ -156,9 +157,17 @@ export function renderCard(t: Task, store: OrcStore, threaded = false): string {
   const stage = t.preset.stages[Math.min(t.stageIdx, t.preset.stages.length - 1)];
   const icon = STATUS_ICON[t.status];
   const lines = [
-    `**${icon} #${t.id} ${t.title}**`,
+    `**${icon} #${t.id} ${t.title}**${t.parentId ? `（#${t.parentId} 的子任务）` : ""}`,
     `${t.preset.name} · 阶段 ${t.status === "ready" ? "完成" : `${stage.id}(${t.stageIdx + 1}/${t.preset.stages.length})`} · ${STATUS_ZH[t.status]} · ${age(Date.now() - t.createdAt)}`,
   ];
+  // a split task: the whole structure on one card
+  const kids = t.parentId ? [] : store.listTasks({ parentId: t.id }).sort((a, b) => a.id - b.id);
+  if (kids.length) {
+    lines.push("", ...kids.map((c) => {
+      const dep = c.deps.length ? `（等 ${c.deps.map((d) => "#" + d).join(",")}）` : "";
+      return `${STATUS_ICON[c.status]} #${c.id} ${c.title} · ${STATUS_ZH[c.status]}${dep}`;
+    }));
+  }
   const loops = Object.entries(t.loops).filter(([k]) => !k.includes(":"));
   if (loops.length) lines.push(`退回：${loops.map(([k, v]) => `${k} ${v}/${t.preset.stages.find((s) => s.id === k)?.maxLoops ?? "?"}`).join("，")}`);
   const all = store.listAttempts(t.id);
@@ -209,10 +218,37 @@ export function renderLoopCard(t: Task, l: Ledger | undefined, threaded = false)
   return lines.join("\n");
 }
 
+/** Walk up to the task the human submitted (planner-split children hang off it) */
+function rootOf(t: Task): Task {
+  let cur = t;
+  for (let i = 0; i < 8 && cur.parentId; i++) {
+    const p = orc?.store.getTask(cur.parentId);
+    if (!p) break;
+    cur = p;
+  }
+  return cur;
+}
+
+/**
+ * Every task with a chat gets a card. The submitted task's card is posted in the chat (submitFromChat);
+ * a planner-split child's card goes into the root card's thread, next to the runs it spawns.
+ */
+async function ensureCard(t: Task, im: ImClient): Promise<string | undefined> {
+  const known = cardMap().get(t.id);
+  if (known) return known;
+  const root = rootOf(t);
+  const rootCard = root.id !== t.id ? cardMap().get(root.id) : undefined;
+  if (!rootCard || !im.replyCardInThread) return undefined;
+  const id = await im.replyCardInThread(rootCard, renderCard(t, orc!.store, true)).catch(() => undefined);
+  if (id) setCard(t.id, id);
+  return id;
+}
+
 async function refreshCard(t: Task, force = false): Promise<void> {
   const im = clientFor(t.chatId);
-  const cardId = cardMap().get(t.id);
-  if (!im || !cardId || !orc) return;
+  if (!im || !orc) return;
+  const cardId = await ensureCard(t, im);
+  if (!cardId) return;
   void syncAgentCards(t);
   const now = Date.now();
   if (!force && now - (cardTouched.get(t.id) ?? 0) < CARD_THROTTLE_MS) return;
@@ -235,11 +271,15 @@ function threadCards(t: Task): boolean {
   return v !== "quiet";
 }
 
+/** Everything about one submitted task lives in one thread: the root card's replies */
+const rootCardOf = (t: Task) => cardMap().get(rootOf(t).id);
+
 /** Pipeline: create / update / finalise the card of every attempt (serialised per task) */
 function syncAgentCards(t: Task): Promise<void> {
   if (t.kind === "loop" || !orc || !threadCards(t)) return Promise.resolve();
   const im = clientFor(t.chatId)!;
-  const root = cardMap().get(t.id)!;
+  const root = rootCardOf(t);
+  if (!root) return Promise.resolve();
   const store = orc.store;
   const next = (syncChain.get(t.id) ?? Promise.resolve())
     .then(() => cardsOf().syncAttempts(im, root, store.getTask(t.id) ?? t, store.listAttempts(t.id), ORC_HOME))
@@ -251,7 +291,8 @@ function syncAgentCards(t: Task): Promise<void> {
 function loopRunCard(t: Task, ev: LoopRunEvent): void {
   if (!threadCards(t)) return;
   const im = clientFor(t.chatId)!;
-  const root = cardMap().get(t.id)!;
+  const root = rootCardOf(t);
+  if (!root) return;
   const next = (syncChain.get(t.id) ?? Promise.resolve())
     .then(() => cardsOf().loopRun(im, root, ev))
     .catch((e) => console.error(`[orc] agent cards #${t.id}:`, (e as Error).message));
@@ -272,6 +313,11 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       return joinInstructions(ann, formatMemory(t.chatId)); // workers read group memory, never write it
     },
     onProgress: (t) => void refreshCard(t, TERMINAL.includes(t.status)),
+    // 决策说明 written by orc/roles/advisor.md (engine-level, not part of any preset)
+    briefRole: () => {
+      const r = loadRoles().get("advisor");
+      return r ? { ...r, count: 1 } : undefined;
+    },
     notify: async (t, n) => {
       if (!t.chatId) return; // CLI-submitted task: nothing to deliver
       const f = clientFor(t.chatId);
@@ -292,7 +338,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       await refreshCard(t, true);
       await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
-      const tail = n.kind === "decision" && t.kind !== "loop" ? `\n\n要重试就直接说「再试一次」，可以顺带补充要改的地方；不需要了就说「放弃」。` : "";
+      const tail = n.kind === "decision" && t.kind !== "loop" && !n.text.includes("你可以回复") ? `\n\n要重试就直接说「再试一次」，可以顺带补充要改的地方；不需要了就说「放弃」。` : "";
       await f.sendMarkdown(t.chatId, `**${head} · #${t.id} ${t.title}**\n\n${n.text}${tail}`);
     },
     loop: {
@@ -344,7 +390,8 @@ export function routeContext(chatId: string): { tasks: RouteTask[]; pendingPropo
   const store = orc.store;
   const tasks = store.listTasks({ chatId, limit: 10 }).filter((t) => !t.parentId).map((t) => ({
     id: t.id, title: t.title, status: t.status, updatedAt: t.updatedAt,
-    asking: t.kind === "loop" && t.status === "blocked" && !!store.getLedger<Ledger>(t.id)?.pendingAsk,
+    // waiting for a human: a loop question, or a pipeline stuck on review / test (再试一次 / 接受 / 放弃)
+    asking: t.status === "blocked" && (t.kind === "loop" ? !!store.getLedger<Ledger>(t.id)?.pendingAsk : !!acceptable(t)),
   }));
   return { tasks, pendingProposal };
 }
@@ -358,6 +405,7 @@ export type LeadAction =
   | { action: "status"; task?: number }
   | { action: "stop"; task: number }
   | { action: "retry"; task: number; note?: string }
+  | { action: "accept"; task: number; note?: string }
   | { action: "config"; patch: PresetPatch; reason?: string; task?: number; verbosity?: Verbosity }
   | { action: "confirm" }
   | { action: "cancel" }
@@ -368,12 +416,16 @@ export type LeadAction =
   | { action: "mode"; mode: ChatMode }
   | { action: "reply"; text: string };
 
-const ACTIONS = ["submit", "attach", "answer", "status", "stop", "retry", "config", "confirm", "cancel", "announce", "remember", "forget", "chat", "mode", "reply"];
+const ACTIONS = ["submit", "attach", "answer", "status", "stop", "retry", "accept", "config", "confirm", "cancel", "announce", "remember", "forget", "chat", "mode", "reply"];
 
 /** One task line for the lead; loop tasks carry their open question so the lead can map a reply onto it */
 function leadTaskLine(t: Task, store?: OrcStore): string {
   const head = `- #${t.id} [${t.status}] ${t.kind === "loop" ? "（监督循环）" : ""}${t.title} —— ${t.progress}`;
-  if (t.kind !== "loop" || !store) return head;
+  if (t.kind !== "loop") {
+    const st = acceptable(t);
+    return st ? `${head}\n  ⚠️ 卡在${stageName(st.id)}上等人决定：可 retry（再试一次）/ accept（接受这版，继续后面）/ stop（放弃）` : head;
+  }
+  if (!store) return head;
   const l = store.getLedger<Ledger>(t.id);
   if (!l) return head;
   const roles = `  角色：${Object.values(t.preset.roles).map((r) => `${r.name}=${r.cli}${r.model ? ":" + r.model : ""}`).join("，")}；播报：${l.verbosity}`;
@@ -408,7 +460,8 @@ export function buildLeadPrompt(c: {
     '- {"action":"attach","task":12,"text":"给该任务的补充信息","urgent":false}  —— 对进行中任务的补充、纠偏、改口径；监督循环任务会在下一轮看到；urgent=true 表示立刻打断正在干活的 agent',
     '- {"action":"answer","task":12,"option":"a","text":"可选补充"}  —— 用户在回答某个任务「正在等人回答」的问题（选项 id 必须来自该问题；用户只说了想法没选项时 option 省略）',
     '- {"action":"status","task":12}  —— 问进展（task 可省略=全部）',
-    '- {"action":"stop","task":12} / {"action":"retry","task":12,"note":"补充说明"}',
+    '- {"action":"stop","task":12} / {"action":"retry","task":12,"note":"补充说明"}  —— 放弃 / 再试一次（note 里写清人说的哪些要改、哪些不用管）',
+    '- {"action":"accept","task":12,"note":"可选"}  —— 任务卡在评审 / 测试上等人决定，人说「接受」「就用这版」「不用改了，继续」：按通过处理，继续后面的环节',
     '- {"action":"config","patch":{"preset":"fix","roles":{"critic":{"cli":"claude","count":1},"tester":null},"enable":["design_review"],"disable":[],"maxLoops":{"review":2}},"reason":"…"}  —— 调整本群之后新任务的编排；只能用角色库里已有的角色（需要用户确认）',
     '- {"action":"config","task":12,"patch":{"roles":{"implementer":{"cli":"cursor","model":"auto"}}},"verbosity":"quiet|normal|verbose","reason":"…"}  —— 调整**进行中**任务的角色模型或播报详细程度，立即生效（下一次运行起）',
     '- {"action":"confirm"} / {"action":"cancel"}  —— 用户同意 / 拒绝「待用户确认的提议」（如“好的”“确认”“算了”）',
@@ -437,6 +490,7 @@ export function parseLeadAction(text: string): LeadAction | { error: string } {
     case "status": return { action: "status", task: num(a.task) };
     case "stop": return num(a.task) ? { action: "stop", task: num(a.task)! } : { error: "stop 缺少 task" };
     case "retry": return num(a.task) ? { action: "retry", task: num(a.task)!, note: a.note ? String(a.note) : undefined } : { error: "retry 缺少 task" };
+    case "accept": return num(a.task) ? { action: "accept", task: num(a.task)!, note: a.note ? String(a.note) : undefined } : { error: "accept 缺少 task" };
     case "config": {
       const vb = a.verbosity ?? a.patch?.verbosity;
       const verbosity = ["quiet", "normal", "verbose"].includes(vb) ? vb as Verbosity : undefined;

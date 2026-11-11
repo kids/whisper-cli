@@ -16,7 +16,7 @@ import type {
 export const ORC_CONFIG_DIR = resolve(import.meta.dirname, "../../orc");
 
 const CLIS: CliName[] = ["codebuddy", "codex", "claude", "gemini", "cursor", "pi"];
-const OUTPUTS: OutputKind[] = ["plan", "impl", "verdict", "test", "report", "action"];
+const OUTPUTS: OutputKind[] = ["plan", "impl", "verdict", "test", "report", "action", "brief"];
 const ISOLATIONS: Isolation[] = ["worktree", "readonly", "fresh"];
 export const MAX_ROLE_COUNT = 8;
 export const MAX_LOOPS_CAP = 10;

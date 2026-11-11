@@ -5,7 +5,7 @@
 export type CliName = "codebuddy" | "codex" | "claude" | "gemini" | "cursor" | "pi";
 
 /** What a role's final message must contain; drives the pass rule in core */
-export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report" | "action";
+export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report" | "action" | "brief";
 
 export type Isolation =
   | "worktree"  // writes in the task worktree; changes are committed after the attempt
