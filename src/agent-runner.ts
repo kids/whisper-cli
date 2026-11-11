@@ -961,14 +961,13 @@ export class AgentRunner {
     return true;
   }
 
-  /** A watch hit its condition: tell the chat, then (if the agent left instructions) wake it */
+  /**
+   * A watch hit its condition. Do NOT paste probe dumps into the chat — that was the
+   * unreadable "监控更新". Evidence stays internal for the agent/orc; humans only see
+   * what the agent later writes (note / report / orc card).
+   */
   private async onWatchFire(w: Watch, r: CheckResult): Promise<void> {
-    const im = this.im;
-    if (!im) return;
     const loopTask = w.sessionKey.match(/^orc-loop:(\d+)$/)?.[1];
-    const tail = r.evidence ? `\n\n\`\`\`\n${r.evidence.split("\n").slice(-15).join("\n").slice(-2500)}\n\`\`\`` : "";
-    const next = loopTask ? `\n\n交回 orc 任务 #${loopTask} 的监督者接着处理…` : w.spec.onWake ? "\n\n正在唤醒 agent 接着处理…" : "";
-    await im.sendMarkdown(w.chatId, `**${w.status === "expired" ? "⌛" : "🔔"} 监控 #${w.id} ${w.spec.title}**\n${w.fired?.reason ?? ""}${tail}${next}`);
     // a supervisor-loop task parked on this watch: hand the result to its ledger, not to a chat agent
     if (loopTask) {
       const h = this.orcHost();
@@ -976,7 +975,11 @@ export class AgentRunner {
       catch (e) { console.warn(`[orc] watch #${w.id} → task #${loopTask} failed: ${(e as Error).message}`); }
       return;
     }
-    if (!w.spec.onWake) return;
+    if (!w.spec.onWake) {
+      // notify-only: one short line, no log/metrics dump
+      await this.im?.sendMarkdown(w.chatId, `监控 #${w.id} ${w.spec.title}：${w.fired?.reason ?? r.fire?.reason ?? "已触发"}`).catch(() => {});
+      return;
+    }
     const ev: ChatEvent = {
       messageId: `watch-${w.id}`, chatId: w.chatId, chatType: "group", messageType: "text",
       text: buildWakePrompt(w, r), senderOpenId: "", content: "", attachments: [],
