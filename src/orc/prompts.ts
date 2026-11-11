@@ -71,7 +71,7 @@ export function buildStagePrompt(c: PromptContext): string {
     (c.notesTail ? `\n最近内容：\n${c.notesTail}` : ""));
 
   out.push(`## 角色说明\n${role.prompt}`);
-  out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会显示在任务卡片上。`);
+  out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
   out.push(`## 输出约定（必须遵守）\n你的**最后一条回复**必须以一个 JSON 对象结尾（可放在 \`\`\`json 代码块里），格式：\n${CONTRACT[role.output]}`);
   return out.join("\n\n");
 }

@@ -171,7 +171,7 @@ const v = (l: any, o: object, c: Partial<typeof ctx> = {}) => L.validateAction(l
   check("lead prompt shows thread task + pending", prompt.includes("任务 #5 卡片的回复串") && prompt.includes("待用户确认的提议"));
   check("lead prompt shows roles", /implementer=\w+/.test(prompt));
   const card = renderCard(t, { getLedger: () => l } as any);
-  check("loop card", /监督循环/.test(card) && /等你决定：要推送/.test(card) && /预算/.test(card), card);
+  check("loop card is identity + progress only", card === "#5 调参\n等你决定" && !/预算|监督循环|验收标准/.test(card), card);
 }
 
 // ---- engine end-to-end (scripted CLIs) -----------------------------------------

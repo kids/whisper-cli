@@ -15,7 +15,7 @@ import { classifyResult, eventToProgress } from "../src/orc/runner";
 import { Orchestrator } from "../src/orc/scheduler";
 import { OrcStore } from "../src/orc/store";
 import type { NotifyPayload, Task } from "../src/orc/types";
-import { parseLeadAction, renderCard, resolveChatPreset } from "../src/orc/chat";
+import { parseLeadAction, resolveChatPreset } from "../src/orc/chat";
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail?: unknown) {

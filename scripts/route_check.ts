@@ -55,11 +55,15 @@ const cases: [string, RouteCtx, "single" | "lead"][] = [
   ["12 号那个怎么样了", busy, "lead"],
   ["限流那个改用 redis 令牌桶", busy, "lead"],
   ["登录接口限流先别做了", busy, "lead"],
-  ["进展如何", busy, "lead"],
+  ["这个任务进展如何", busy, "lead"],
+  ["正在训练的任务有什么进展", busy, "lead"],
   ["再试一次，评审意见里的编码问题用 utf-8-sig 解决", busy, "lead"],
   ["放弃吧", busy, "lead"],
   ["执行者换成 claude", busy, "lead"],
   ["别每轮都刷屏了", busy, "lead"],
+  // progress without a task anchor → single agent (experiment / code Q&A, not team steer)
+  ["进展如何", busy, "single"],
+  ["效果有任何进展吗", busy, "single"],
   // ...but ordinary chat while tasks run stays with the single agent
   ["这段正则怎么写：匹配邮箱", busy, "single"],
   ["帮我解释一下 src/route.ts 的作用", busy, "single"],

@@ -1,7 +1,7 @@
 // =============================================================================
 // orc — one card per agent run, posted in the task card's reply thread
 // =============================================================================
-// The task card (chat.ts renderCard) is the index: status, stage, loops, budget.
+// The task card (chat.ts renderCard) is a thin index: `#N title` + progress text.
 // Each agent run gets its own card in that card's thread (Feishu 话题 /
 // Telegram reply): live while running (elapsed, tokens, last progress lines),
 // then only the conclusion — summary + artifacts for writers, verdict + issue

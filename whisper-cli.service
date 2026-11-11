@@ -1,23 +1,24 @@
 [Unit]
-Description=whisper-feishu (Feishu bot -> AI CLI / whisper-cli)
+Description=whisper-cli (Feishu bot -> AI CLI)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/data/dev/whisper-cli
-Environment=PATH=/root/.nvm/versions/node/v20.19.0/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=/data/whisper-cli
+Environment=PATH=/usr/local/lib/nodejs/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
 Environment=HOME=/root
-EnvironmentFile=-/data/dev/whisper-cli/.env
-ExecStart=/data/dev/whisper-cli/node_modules/.bin/tsx src/index.ts
+EnvironmentFile=-/data/whisper-cli/.env
+ExecStart=/usr/local/lib/nodejs/current/bin/node /data/whisper-cli/node_modules/tsx/dist/cli.mjs src/index.ts
 Restart=on-failure
 RestartSec=5
 # 飞书长连接 + agent 子进程可能较长
 TimeoutStopSec=30
+KillSignal=SIGTERM
 
-StandardOutput=append:/data/dev/whisper-cli/whisper-cli.log
-StandardError=append:/data/dev/whisper-cli/whisper-cli.log
+StandardOutput=append:/data/whisper-cli/whisper-cli.log
+StandardError=append:/data/whisper-cli/whisper-cli.log
 
 [Install]
 WantedBy=multi-user.target

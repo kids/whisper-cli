@@ -58,14 +58,25 @@ export const TEAM_PATTERNS: [RegExp, string][] = [
 /** Switching the chat's mode in plain words */
 export const MODE_PATTERN = /((切|换|改|调)(到|成|回)?|进入|回到|退出|打开|开启|关闭|关掉)[^。！？\n]{0,4}(单聊|单\s*agent|普通|编排|团队|orc|自动)模式|(编排|团队|orc)模式(关|退出|别用)/i;
 
-/** Steering / asking about work that is already in progress */
-export const STEER_PATTERN = new RegExp([
+/**
+ * Progress / status questions — only team-route when the message anchors a task
+ * (#N, title hit, or 任务/执行者…). Bare「进展如何」「效果有进展吗」stay with the single agent
+ * (experiment Q&A), matching Thread-subscription fast path: ownership first, not keywords alone.
+ */
+export const PROGRESS_PATTERN = new RegExp([
   "进展", "进度", "到哪(了|一步)", "怎么样了", "(做|跑|弄)完了(吗|没)", "完成了(吗|没)", "结果(呢|如何|怎么样)",
+].join("|"));
+
+/** Steering / controlling work already in progress (stop, retry, verbosity, …) */
+export const CONTROL_PATTERN = new RegExp([
   "先别", "停(下|掉|一下)", "别(做|跑|弄)了", "放弃", "不要了", "继续", "再试", "重试", "再跑", "再来一次",
   "接受", "就用(这|现在|当前)(一)?版", "不用(再)?改了",
   "换成", "改用", "换(个|一个)?模型", "刷屏", "安静(点|些)?", "少发", "详细(点|些)", "多汇报",
   "推(吧|送)", "可以推", "发布", "补充(一下|一点|一条)?",
 ].join("|"));
+
+/** Union — used when a loop task is waiting for a human answer */
+export const STEER_PATTERN = new RegExp(`(?:${PROGRESS_PATTERN.source})|(?:${CONTROL_PATTERN.source})`);
 const STEER_LEAD = /^(再试|重试|继续|放弃|停|先别|算了|不用了|别做了|接受|就用)/;
 
 /** Bare yes / no to a pending proposal (words can be chained: 「好，就这么改」「算了，不改了」) */
@@ -112,7 +123,11 @@ export function routeMessage(text: string, c: RouteCtx): Route {
   if (WATCH_TALK.test(s) && !ref && !TASK_WORDS.test(s)) return { to: "single", why: "说的是监控" };
   if (live.length) {
     if (ref) return { to: "lead", why: `提到 #${ref.id}` };
-    if (STEER_LEAD.test(s) || (STEER_PATTERN.test(s) && (s.length <= SHORT || TASK_WORDS.test(s)))) {
+    // Control verbs can go to lead on a short line; progress questions need a task anchor.
+    if (STEER_LEAD.test(s) || (CONTROL_PATTERN.test(s) && (s.length <= SHORT || TASK_WORDS.test(s)))) {
+      return { to: "lead", why: "调整进行中的任务" };
+    }
+    if (PROGRESS_PATTERN.test(s) && TASK_WORDS.test(s)) {
       return { to: "lead", why: "调整进行中的任务" };
     }
   }

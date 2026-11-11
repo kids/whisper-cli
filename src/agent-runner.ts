@@ -249,6 +249,12 @@ function formatUsageFooter(
 
   const fmt = (n: number) => n.toLocaleString("en-US");
   const cumTotal = cum.inputTokens + cum.outputTokens + cum.cacheReadTokens + cum.cacheWriteTokens;
+  const bj = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  }).format(new Date()).replace(", ", " ");
 
   const parts: string[] = [`\`${model || "default"}\``];
   let turnStr = `🎫 本轮 ${fmt(turnTotal)} tokens`;
@@ -259,6 +265,7 @@ function formatUsageFooter(
   if (detail.length) turnStr += `（${detail.join(" ")}）`;
   parts.push(turnStr);
   parts.push(`📊 累计 ${fmt(cumTotal)} tokens / ${cum.turns} 条`);
+  parts.push(`🕒 ${bj}`);
 
   return `\n\n---\n${parts.join("  ·  ")}`;
 }

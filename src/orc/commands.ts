@@ -263,7 +263,6 @@ export function describeAction(a: LeadAction): string {
     case "submit": return `（提交任务）${a.goal}${a.bar ? `\n评审口径：${a.bar}` : ""}`;
     case "attach": return `（补充给 #${a.task}${a.urgent ? "，打断" : ""}）${a.text}`;
     case "answer": return `（回答 #${a.task} 的问题）${a.option ?? ""}${a.text ? " " + a.text : ""}`;
-    case "status": return `（查询状态${a.task ? " #" + a.task : ""}）`;
     case "stop": return `（终止 #${a.task}）`;
     case "retry": return `（重试 #${a.task}）${a.note ?? ""}`;
     case "accept": return `（接受 #${a.task} 现在这版）${a.note ?? ""}`;
@@ -321,11 +320,6 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
     case "submit": {
       const r = await submit(h, chatId, act.goal, act.preset, { criteria: act.criteria, constraints: act.constraints, sourceText: userText, bar: act.bar, title: act.title });
       if (r) await say(`🧭 ${r}`);
-      return;
-    }
-    case "status": {
-      const ts = act.task ? [o.store.getTask(act.task)].filter((t): t is NonNullable<typeof t> => !!t && t.chatId === chatId) : o.store.listTasks({ chatId, limit: 5 });
-      await say(ts.length ? ts.map((t) => renderCard(t, o.store)).join("\n\n---\n\n") : "本群没有相关任务。");
       return;
     }
     case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 #${act.task} 已终止` : `#${act.task} 无法终止`); return;

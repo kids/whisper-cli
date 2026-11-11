@@ -13,7 +13,7 @@ import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
 import { acceptable, stageName } from "./core";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
-import { budgetState, clip, currentEvidence, type Ledger } from "./ledger";
+import { clip, type Ledger } from "./ledger";
 import { findJsonObjects } from "./output";
 import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
@@ -144,78 +144,15 @@ export function hasOrcState(): boolean {
   return existsSync(resolve(ORC_HOME, "orc.db"));
 }
 
-const STATUS_ICON: Record<Task["status"], string> = { queued: "⏳", running: "🛠", waiting: "⏳", waiting_children: "🧩", ready: "✅", blocked: "✋", failed: "❌", dropped: "🛑" };
-const STATUS_ZH: Record<Task["status"], string> = { queued: "排队中", running: "进行中", waiting: "等待外部作业", waiting_children: "等子任务", ready: "完成", blocked: "等你决定", failed: "已放弃", dropped: "已终止" };
-const roleLabel = (t: Task, name?: string) => {
-  const r = name ? t.preset.roles[name] : undefined;
-  return r ? `${r.cli}${r.model ? ":" + r.model : ""}` : "-";
-};
-const age = (ms: number) => { const m = Math.round(ms / 60_000); return m < 90 ? `${m}m` : `${(m / 60).toFixed(1)}h`; };
-
-export function renderCard(t: Task, store: OrcStore, threaded = false): string {
-  if (t.kind === "loop") return renderLoopCard(t, store.getLedger<Ledger>(t.id), threaded);
-  const stage = t.preset.stages[Math.min(t.stageIdx, t.preset.stages.length - 1)];
-  const icon = STATUS_ICON[t.status];
-  const lines = [
-    `**${icon} #${t.id} ${t.title}**${t.parentId ? `（#${t.parentId} 的子任务）` : ""}`,
-    `${t.preset.name} · 阶段 ${t.status === "ready" ? "完成" : `${stage.id}(${t.stageIdx + 1}/${t.preset.stages.length})`} · ${STATUS_ZH[t.status]} · ${age(Date.now() - t.createdAt)}`,
-  ];
-  // a split task: the whole structure on one card
-  const kids = t.parentId ? [] : store.listTasks({ parentId: t.id }).sort((a, b) => a.id - b.id);
-  if (kids.length) {
-    lines.push("", ...kids.map((c) => {
-      const dep = c.deps.length ? `（等 ${c.deps.map((d) => "#" + d).join(",")}）` : "";
-      return `${STATUS_ICON[c.status]} #${c.id} ${c.title} · ${STATUS_ZH[c.status]}${dep}`;
-    }));
-  }
-  const loops = Object.entries(t.loops).filter(([k]) => !k.includes(":"));
-  if (loops.length) lines.push(`退回：${loops.map(([k, v]) => `${k} ${v}/${t.preset.stages.find((s) => s.id === k)?.maxLoops ?? "?"}`).join("，")}`);
-  const all = store.listAttempts(t.id);
-  const atts = all.slice(-6);
-  const role = t.preset.roles[stage.role];
-  const others = (t.status === "running" || t.status === "queued") && !all.some((a) => a.status === "running")
-    ? store.runningAttempts().filter((a) => a.role === stage.role && a.taskId !== t.id) : [];
-  if (role && others.length >= role.count) {
-    lines.push(`⏳ 排队等 ${stage.role}：名额被 ${others.map((a) => `#${a.taskId}`).join("、")} 占着`);
-  } else {
-    lines.push(`最近：${t.progress || "-"}`);
-  }
-  const tok = all.reduce((s, a) => s + (a.tokens || 0), 0);
-  if (tok) lines.push(`已用 ${(tok / 1e6).toFixed(1)}M tokens · ${all.length} 次运行`);
-  if (atts.length) {
-    lines.push("", ...atts.map((a) => {
-      const mark = a.status === "running" ? "▶" : a.parsed?.pass ? "✓" : a.status === "done" ? "✗" : "·";
-      const tail = threaded ? "" : ` ${(a.parsed?.summary || a.progress || a.error || "").slice(0, 80)}`;
-      return `${mark} ${a.stageId}/${a.role} \`${a.cli}${a.model ? ":" + a.model : ""}\`${tail}`;
-    }));
-  }
-  if (t.branch) lines.push("", `分支 \`${t.branch}\``);
-  if (threaded) lines.push("", "每个 agent 的过程和结论在这条消息的回复串里。");
-  return lines.join("\n");
-}
-
-export function renderLoopCard(t: Task, l: Ledger | undefined, threaded = false): string {
-  const loop = t.preset.loop;
-  const lines = [
-    `**${STATUS_ICON[t.status]} #${t.id} ${t.title}**`,
-    `监督循环 · 第 ${l?.step ?? 0} 轮 · ${STATUS_ZH[t.status]} · ${age(Date.now() - t.createdAt)}`,
-    `监督 \`${roleLabel(t, loop?.supervisor)}\` · 执行 \`${roleLabel(t, loop?.worker)}\`${loop?.reviewer ? ` · 审查 \`${roleLabel(t, loop.reviewer)}\`` : ""}`,
-  ];
-  if (l) {
-    const passed = currentEvidence(l).filter((e) => e.pass).map((e) => e.id);
-    lines.push(`验收标准：${l.criteria.length ? l.criteria.map((c) => c.id).join(" ") : "待定"}；当前版本通过的证据：${passed.join(" ") || "无"}`);
-    lines.push(`预算：${budgetState(l).line}`);
-    if (l.pendingAsk) lines.push(`✋ 等你决定：${clip(l.pendingAsk.question, 120)}`);
-    if (l.waitWatch) lines.push(`⏳ 等待监控 #${l.waitWatch}`);
-  }
-  lines.push(`最近：${clip(t.progress || "-", 160)}`);
-  if (l?.plan.length) {
-    const mark = { todo: "○", doing: "▶", done: "✓", dropped: "✗" } as const;
-    lines.push("", ...l.plan.slice(0, 8).map((p) => `${mark[p.status]} ${clip(p.text, 80)}`));
-  }
-  if (t.branch) lines.push("", `分支 \`${t.branch}\``);
-  if (!TERMINAL.includes(t.status) || t.status === "blocked") lines.push("", `${threaded ? "每轮一张卡片（监督者和执行者各跑了什么、结论是什么）" : "每轮的主 ↔ 子交互"}在这条消息的回复串里。直接在群里说话就能影响它：补充要求、改口径、换模型、叫停都行。`);
-  return lines.join("\n");
+/**
+ * Index card == identity + current progress text. Same idea as watch cards:
+ * no status/stage/budget/plan shell — humans read what agents wrote into `progress`
+ * (and `[[progress]]` / supervisor reports). The card is mainly a thread anchor.
+ */
+export function renderCard(t: Task, _store?: OrcStore, _threaded = false): string {
+  const head = `#${t.id} ${t.title}`;
+  const body = (t.progress || "").trim();
+  return body ? `${head}\n${clip(body, 500)}` : head;
 }
 
 /** Walk up to the task the human submitted (planner-split children hang off it) */
@@ -454,7 +391,6 @@ export type LeadAction =
   | { action: "submit"; goal: string; title?: string; preset?: string; criteria?: string[]; constraints?: string[]; bar?: string }
   | { action: "attach"; task: number; text: string; urgent?: boolean }
   | { action: "answer"; task: number; option?: string; text?: string }
-  | { action: "status"; task?: number }
   | { action: "stop"; task: number }
   | { action: "retry"; task: number; note?: string }
   | { action: "accept"; task: number; note?: string }
@@ -468,7 +404,7 @@ export type LeadAction =
   | { action: "mode"; mode: ChatMode }
   | { action: "reply"; text: string };
 
-const ACTIONS = ["submit", "attach", "answer", "status", "stop", "retry", "accept", "config", "confirm", "cancel", "announce", "remember", "forget", "chat", "mode", "reply"];
+const ACTIONS = ["submit", "attach", "answer", "stop", "retry", "accept", "config", "confirm", "cancel", "announce", "remember", "forget", "chat", "mode", "reply"];
 
 /** One task line for the lead; loop tasks carry their open question so the lead can map a reply onto it */
 function leadTaskLine(t: Task, store?: OrcStore): string {
@@ -512,7 +448,6 @@ export function buildLeadPrompt(c: {
     '- submit 的 bar 由你判断，别套固定模板：先想清楚这份东西是给谁用的。探索 / 一次性 / 备忘性质（做可行性判断、摸底、给人参考）→ 评审只该拦「会让结论错」的问题，统计严苛度、风格、可维护性一律算建议，写清楚这条界限；要进生产、要对外发布、别人要依赖它的代码 → 按工程标准全套卡。这份口径决定评审有多严，写偏了后面就会来回消耗。',
     '- {"action":"attach","task":12,"text":"给该任务的补充信息","urgent":false}  —— 对进行中任务的补充、纠偏、改口径；监督循环任务会在下一轮看到；urgent=true 表示立刻打断正在干活的 agent',
     '- {"action":"answer","task":12,"option":"a","text":"可选补充"}  —— 用户在回答某个任务「正在等人回答」的问题（选项 id 必须来自该问题；用户只说了想法没选项时 option 省略）',
-    '- {"action":"status","task":12}  —— 问进展（task 可省略=全部）',
     '- {"action":"stop","task":12} / {"action":"retry","task":12,"note":"补充说明"}  —— 放弃 / 再试一次（note 里写清人说的哪些要改、哪些不用管）',
     '- {"action":"accept","task":12,"note":"可选"}  —— 任务卡在评审 / 测试上等人决定，人说「接受」「就用这版」「不用改了，继续」：按通过处理，继续后面的环节',
     '- {"action":"config","patch":{"preset":"fix","roles":{"critic":{"cli":"claude","count":1},"tester":null},"enable":["design_review"],"disable":[],"maxLoops":{"review":2}},"reason":"…"}  —— 调整本群之后新任务的编排；只能用角色库里已有的角色（需要用户确认）',
@@ -522,7 +457,7 @@ export function buildLeadPrompt(c: {
     '- {"action":"remember","items":["一句话"]} / {"action":"forget","ids":[3]}  —— 用户要你记住/忘掉本群的背景信息、偏好（软信息，编号见【本群记忆】）；分不清是规则还是记忆时，用 remember',
     '- {"action":"mode","mode":"auto|single|orc"}  —— 用户要切换本群的工作方式：auto=自动判断（默认）；single=只用单 agent；orc=所有消息先经过你、干活都交给团队',
     '- {"action":"chat"}  —— 把这条消息原样交给本群的单 agent（它能读写工作区、续接本群对话）：普通问答、讨论、一轮就能做完的改动或查询',
-    '- {"action":"reply","text":"直接回答"}  —— 关于任务 / 编排的简单问题，或意图不清时向用户澄清（宁可问，不要猜）',
+    '- {"action":"reply","text":"直接回答"}  —— 问任务进展、关于编排的简单问题，或意图不清时向用户澄清（宁可问，不要猜）。进展用人话写一两句（上下文「本群任务」里已有编号、标题和最近进展），不要复述卡片模板，也不要叫代码再发一遍任务卡',
   ].filter(Boolean).join("\n");
 }
 
@@ -540,7 +475,6 @@ export function parseLeadAction(text: string): LeadAction | { error: string } {
     case "answer": return num(a.task) && (a.option || a.text)
       ? { action: "answer", task: num(a.task)!, option: a.option ? String(a.option) : undefined, text: a.text ? String(a.text) : undefined }
       : { error: "answer 缺少 task 或 option/text" };
-    case "status": return { action: "status", task: num(a.task) };
     case "stop": return num(a.task) ? { action: "stop", task: num(a.task)! } : { error: "stop 缺少 task" };
     case "retry": return num(a.task) ? { action: "retry", task: num(a.task)!, note: a.note ? String(a.note) : undefined } : { error: "retry 缺少 task" };
     case "accept": return num(a.task) ? { action: "accept", task: num(a.task)!, note: a.note ? String(a.note) : undefined } : { error: "accept 缺少 task" };
