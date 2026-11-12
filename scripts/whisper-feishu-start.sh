@@ -1,7 +1,8 @@
 #!/bin/bash
 # Canonical copy of the launchd wrapper. Install:
 #   cp scripts/whisper-feishu-start.sh "$HOME/Library/Application Support/whisper-feishu/start.sh"
-#   cp com.r.whisper-feishu.plist "$HOME/Library/LaunchAgents/"
+#   cp com.r.whisper-feishu.plist.example "$HOME/Library/LaunchAgents/com.r.whisper-feishu.plist"
+#   # edit __HOME__ / APP paths for this machine; real plist is gitignored
 #   launchctl bootout "gui/$(id -u)/com.r.whisper-feishu" 2>/dev/null || true
 #   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.r.whisper-feishu.plist"
 #   launchctl kickstart -k "gui/$(id -u)/com.r.whisper-feishu"

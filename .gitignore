@@ -9,5 +9,8 @@ debug/
 projects.json
 .feishu-uploads/
 
+# machine-local LaunchAgent (see com.r.whisper-feishu.plist.example)
+com.r.whisper-feishu.plist
+
 # generated design pages (docs/**/*.html are local-only)
 docs/**/*.html

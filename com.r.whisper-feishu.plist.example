@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent template for whisper-feishu.
+  Install:
+    1. cp scripts/whisper-feishu-start.sh "$HOME/Library/Application Support/whisper-feishu/start.sh"
+       (edit APP / ENV_FILE paths inside the script for this machine)
+    2. cp com.r.whisper-feishu.plist.example "$HOME/Library/LaunchAgents/com.r.whisper-feishu.plist"
+       (replace __HOME__ below; Label may stay com.r.whisper-feishu or be renamed)
+    3. launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.r.whisper-feishu.plist"
+    4. launchctl kickstart -k "gui/$(id -u)/com.r.whisper-feishu"
+
+  The real ~/Library/LaunchAgents/*.plist is machine-local and gitignored.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.r.whisper-feishu</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/Library/Application Support/whisper-feishu/start.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>NSAppSleepDisabled</key>
+    <string>YES</string>
+    <key>AGENT_CLI_CREDENTIAL_STORE</key>
+    <string>file</string>
+    <key>NODE_OPTIONS</key>
+    <string>--trace-uncaught</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- KeepAlive=true — do not use PathState on an external volume (hiccups kill the bot). -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <!-- Default ExitTimeOut is 5s; longer so graceful shutdown is not hard-killed. -->
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  <!-- Do not reap detached agent children when the job exits. -->
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <!-- Interactive: avoid the Standard-daemon jetsam thread cap (~32). -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+    <key>NumberOfProcesses</key>
+    <integer>4096</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/whisper-feishu.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/whisper-feishu.log</string>
+</dict>
+</plist>
