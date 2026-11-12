@@ -110,6 +110,16 @@ import {
 // Serial queue — per chat (replaces busy lock; messages queue up)
 // ---------------------------------------------------------------------------
 
+/** Strip [[watch]] / [[image]] / … protocol lines so streaming cards never show them raw. */
+function stripProtocolForDisplay(text: string): string {
+  let t = text || "";
+  t = extractMemoryOps(t).text;
+  t = extractWatchOps(t).text;
+  t = extractTaskOps(t).text;
+  t = extractSendOps(t).text;
+  return t.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 const CHAT_QUEUES = new Map<string, Promise<void>>();
 function enqueue(chatId: string, task: () => Promise<void>): void {
   const prev = CHAT_QUEUES.get(chatId) ?? Promise.resolve();
@@ -1002,7 +1012,8 @@ export class AgentRunner {
       messageId: `watch-report-${w.id}-${Date.now()}`, chatId: w.chatId, chatType: "group", messageType: "text",
       text: buildReportPrompt(w, r), senderOpenId: "", content: "", attachments: [],
     };
-    enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "wake" }));
+    // kind=report: no streaming placeholder card; [[watch]] note updates stay on the watch card only
+    enqueue(w.chatId, () => this.runAiAndReply(ev, { kind: "report" }));
   }
 
   private async handleModelCommand(ev: ChatEvent): Promise<boolean> {
@@ -1087,11 +1098,13 @@ export class AgentRunner {
 
   private async runAiAndReply(
     ev: ChatEvent,
-    opts?: { kind?: "normal" | "review" | "wake"; rawPrompt?: boolean },
+    opts?: { kind?: "normal" | "review" | "wake" | "report"; rawPrompt?: boolean },
   ): Promise<void> {
     const im = this.im!;
     const chatId = ev.chatId;
     const isReview = opts?.kind === "review";
+    const isReport = opts?.kind === "report";
+    const isWakeLike = opts?.kind === "wake" || isReport;
 
     // Resolve workspace via projects.json routing
     const fallback = this.workspaceOf(chatId);
@@ -1131,12 +1144,14 @@ export class AgentRunner {
       }
     }
 
-    // Streaming card
+    // Streaming card — skip for soft report refreshes (they only update the watch card).
     let cardId: string | undefined;
-    try {
-      const init = isReview ? `🔍 审视中 [${label}]…` : `⚙️ 正在生成 [${label}]…`;
-      cardId = await im.sendCardAndGetId(chatId, init, { replyTo: ev.messageId, placeholder: true });
-    } catch { /* fallback */ }
+    if (!isReport) {
+      try {
+        const init = isReview ? `🔍 审视中 [${label}]…` : `⚙️ 正在生成 [${label}]…`;
+        cardId = await im.sendCardAndGetId(chatId, init, { replyTo: ev.messageId, placeholder: true });
+      } catch { /* fallback */ }
+    }
 
     // Telegram rate-limits edits (≈20/min in groups); others take 2/s fine
     const streamEveryMs = im.platform === "telegram" ? 3000 : 500;
@@ -1147,7 +1162,9 @@ export class AgentRunner {
       if (updateTimer) return;
       updateTimer = setTimeout(() => {
         updateTimer = null;
-        void im.updateCardMessage(cardId!, pendingText).catch(() => false);
+        // Never stream raw [[watch]] / [[image]] / … protocol lines into the group card.
+        const shown = stripProtocolForDisplay(pendingText);
+        if (shown) void im.updateCardMessage(cardId!, shown).catch(() => false);
       }, streamEveryMs);
     };
 
@@ -1178,6 +1195,7 @@ export class AgentRunner {
     // `[[watch]]` / `[[unwatch]]` lines → durable monitors (src/watch.ts)
     const watchNotes: string[] = [];
     const newWatches: Watch[] = [];
+    let silentWatchUpdates = 0;
     if (!isReview) {
       const wops = extractWatchOps(result.text || "");
       if (wops.add.length || wops.remove.length) {
@@ -1192,7 +1210,9 @@ export class AgentRunner {
               const w = setWatchNote(id, note, chatId);
               if (!w) throw new Error(`监控 #${id} 不存在或不属于本群`);
               if (w.cardId) void this.im?.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
-              watchNotes.push(`👀 已更新监控 #${id} 的说明`);
+              // Note refresh belongs on the watch card only — never echo [[watch]] / "已更新" into the chat.
+              silentWatchUpdates++;
+              console.log(`[watch] #${id} note updated (${note.length} chars)`);
               continue;
             }
             const note = parseWatchNote(a.raw);
@@ -1232,8 +1252,8 @@ export class AgentRunner {
 
     // shared short transcript after protocol lines are stripped
     if (!isReview) {
-      recordTurn(chatId, "user", opts?.kind === "wake" ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
-      recordTurn(chatId, "agent", result.text || "");
+      recordTurn(chatId, "user", isWakeLike ? `（监控唤醒）${ev.text.split("\n")[0]}` : ev.text);
+      recordTurn(chatId, "agent", result.text || (silentWatchUpdates ? `（已更新 ${silentWatchUpdates} 条监控说明）` : ""));
     }
 
     if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
@@ -1247,14 +1267,28 @@ export class AgentRunner {
     const usage = result.usage && result.usage.totalTokens > 0 ? result.usage : undefined;
     const header = isReview ? `**🔍 审视 [${label}]**\n\n` : "";
     const nOut = outgoing.images.length + outgoing.files.length;
-    let body = header + (result.text || (nOut || sendOps.ops.length ? `📎 附件 ×${nOut || sendOps.ops.length}` : "(empty)"));
+    const mainText = (result.text || "").trim();
+    const extras = [
+      ...watchNotes,
+      ...taskNotes,
+      ...outgoing.notes,
+    ];
+    // Protocol-only turns (soft report [[watch]] note refresh): update the watch card, post nothing.
+    const hasVisible = !!(mainText || nOut || extras.length);
+    if (!hasVisible) {
+      if (cardId) {
+        await im.finalizeCard(cardId, silentWatchUpdates ? "👀 监控卡片已更新" : "✅ 完成").catch(() => false);
+      }
+      return;
+    }
+
+    let body = header + (mainText || (nOut || sendOps.ops.length ? `📎 附件 ×${nOut || sendOps.ops.length}` : extras.join("\n")));
+    if (mainText && extras.length) body += `\n\n${extras.join("\n")}`;
+    else if (!mainText && extras.length && (nOut || sendOps.ops.length)) body += `\n\n${extras.join("\n")}`;
     if (usage) {
       const displayModel = result.model || this.getDefaultModelName() || null;
       body += formatUsageFooter(chatId, displayModel, usage);
     }
-    if (watchNotes.length) body += `\n\n${watchNotes.join("\n")}`;
-    if (taskNotes.length) body += `\n\n${taskNotes.join("\n")}`;
-    if (outgoing.notes.length) body += `\n\n${outgoing.notes.join("\n")}`;
 
     // Feishu cards reject some markdown (e.g. too many tables → ErrCode 11310) and truncate
     // poorly when oversized. Never put the full reply on both card and post. Other platforms

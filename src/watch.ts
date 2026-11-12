@@ -513,7 +513,7 @@ export function formatWatchContext(chatId: string): string {
     "2. 末尾行登记监控。代码只负责探测（零 token）；**群卡片 = 你写的 `note` 原文，代码不加任何壳**：",
     '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl"},"every":"10m","timeout":"2d","report":"1h","note":"刚启动 Adam，目标 ≥100k step。","on_wake":"跑 eval 并汇报"}`',
     "   至少 pid/log/metrics/file/cmd 之一；`note` 写给人看的关键进展（不要贴大表）；可选 `report`（≥30m）到点叫醒你改 note；无 on_wake 则只通知；",
-    "3. 更新进展：`[[watch]] {\"id\":编号,\"note\":\"…这段话会原样出现在卡片上\"}`。取消：`[[unwatch]] 编号`。",
+    "3. 更新进展：`[[watch]] {\"id\":编号,\"note\":\"…这段话会原样出现在监控卡片上\"}`（这一行不会出现在群聊正文里，只更新卡片）。取消：`[[unwatch]] 编号`。",
     active.length
       ? `本群进行中的监控：\n${active.map((w) => `- #${w.id} ${w.spec.title}${w.note ? "：" + w.note.replace(/\s+/g, " ").slice(0, 120) : "（还没写 note）"}`).join("\n")}`
       : "",
