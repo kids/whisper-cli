@@ -13,7 +13,7 @@ import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
 import { acceptable, stageName } from "./core";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
-import { clip, type Ledger } from "./ledger";
+import { clip, type Ledger , markerBlocks } from "./ledger";
 import { findJsonObjects } from "./output";
 import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
@@ -463,7 +463,7 @@ function leadTaskLine(t: Task, store?: OrcStore): string {
   const head = `- #${t.id} [${t.status}] ${t.kind === "loop" ? "（监督循环）" : ""}${t.title} —— ${t.progress}`;
   if (t.kind !== "loop") {
     const st = acceptable(t);
-    return st ? `${head}\n  ⚠️ 卡在${stageName(st.id)}上等人决定：可 retry（再试一次）/ accept（接受这版，继续后面）/ stop（放弃）` : head;
+    return st ? `${head}\n  ⚠️ 卡在${stageName(st.id)}上等人决定：人说「再试一次」就 [[retry]]，「接受这版」就 [[accept]]，「放弃」就 [[stop]]` : head;
   }
   if (!store) return head;
   const l = store.getLedger<Ledger>(t.id);
@@ -486,7 +486,7 @@ export function buildLeadPrompt(c: {
     : `本群是${MODE_LABEL[mode]}模式：这条消息转给你，是因为它看起来和团队任务有关（${c.routeWhy || "规则命中"}）。如果其实只是普通对话、问答，或一个 agent 一轮就能做完的事，用 chat 交回给单 agent。`;
   return [
     "你是本群的 orc 主 agent，只负责**理解意图并选择动作**，不亲自写代码、不改文件。",
-    "群里一律用任务标题指代任务，不要写 #编号（编号只用于动作 JSON 里的 task 字段，用户看不到也不用看）。",
+    "群里一律用任务标题指代任务，不要写 #编号（编号只用在标记 / JSON 里的任务号，用户看不到也不用看）。",
     modeLine,
     `当前编排：${c.presetLine}`,
     `可选组合：${c.presets.join(" / ")}（loop = 监督循环：监督者反复下指令、取证、汇报，适合要反复试错、长时间实验、目标可能随讨论调整的任务）；角色库：${c.roles.join(" / ")}`,
@@ -496,25 +496,66 @@ export function buildLeadPrompt(c: {
     c.threadTask ? `（这条消息是在「${c.tasks.find((t) => t.id === c.threadTask)?.title ?? "某个任务"}」卡片的回复串里发的，多半是对这个任务说的）` : "",
     `用户消息：\n${c.userText}`,
     "",
-    "从下列动作中选**一个**，只输出一个 JSON 对象（不要别的文字）：",
-    '- {"action":"submit","title":"短标题，6~14 字，说清在做什么（群里认任务就靠它，别带编号和路径）","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选，组合名","criteria":["可选：可检查的验收标准"],"constraints":["可选：必须遵守的约束"],"bar":"评审口径：这份活该按什么标准判过不过"}  —— 用户要团队去做一件新事情；用户说「把刚才这个交给团队」时，从「最近对话」里总结出目标、约束和已有结论',
-    '- submit 的 bar 由你判断，别套固定模板：先想清楚这份东西是给谁用的。探索 / 一次性 / 备忘性质（做可行性判断、摸底、给人参考）→ 评审只该拦「会让结论错」的问题，统计严苛度、风格、可维护性一律算建议，写清楚这条界限；要进生产、要对外发布、别人要依赖它的代码 → 按工程标准全套卡。这份口径决定评审有多严，写偏了后面就会来回消耗。',
-    '- {"action":"attach","task":12,"text":"给该任务的补充信息","urgent":false}  —— 对进行中任务的补充、纠偏、改口径；监督循环任务会在下一轮看到；urgent=true 表示立刻打断正在干活的 agent',
-    '- {"action":"answer","task":12,"option":"a","text":"可选补充"}  —— 用户在回答某个任务「正在等人回答」的问题（选项 id 必须来自该问题；用户只说了想法没选项时 option 省略）',
-    '- {"action":"stop","task":12} / {"action":"retry","task":12,"note":"补充说明"}  —— 放弃 / 再试一次（note 里写清人说的哪些要改、哪些不用管）',
-    '- {"action":"accept","task":12,"note":"可选"}  —— 任务卡在评审 / 测试上等人决定，人说「接受」「就用这版」「不用改了，继续」：按通过处理，继续后面的环节',
-    '- {"action":"config","patch":{"preset":"fix","roles":{"critic":{"cli":"claude","count":1},"tester":null},"enable":["design_review"],"disable":[],"maxLoops":{"review":2}},"reason":"…"}  —— 调整本群之后新任务的编排；只能用角色库里已有的角色（需要用户确认）',
-    '- {"action":"config","task":12,"patch":{"roles":{"implementer":{"cli":"cursor","model":"auto"}}},"verbosity":"quiet|normal|verbose","reason":"…"}  —— 调整**进行中**任务的角色模型或播报详细程度，立即生效（下一次运行起）',
-    '- {"action":"confirm"} / {"action":"cancel"}  —— 用户同意 / 拒绝「待用户确认的提议」（如“好的”“确认”“算了”）',
-    '- {"action":"announce","paragraphs":["要追加到群公告（=本群长期指令）的规则，每段一句"],"reason":"…"}  —— 用户想修改本群的长期约束/规则（人人可见、约束所有 agent 的硬规则）',
-    '- {"action":"remember","items":["一句话"]} / {"action":"forget","ids":[3]}  —— 用户要你记住/忘掉本群的背景信息、偏好（软信息，编号见【本群记忆】）；分不清是规则还是记忆时，用 remember',
-    '- {"action":"mode","mode":"auto|single|orc"}  —— 用户要切换本群的工作方式：auto=自动判断（默认）；single=只用单 agent；orc=所有消息先经过你、干活都交给团队',
-    '- {"action":"chat"}  —— 把这条消息原样交给本群的单 agent（它能读写工作区、续接本群对话）：普通问答、讨论、一轮就能做完的改动或查询',
-    '- {"action":"reply","text":"直接回答"}  —— 问任务进展、关于编排的简单问题，或意图不清时向用户澄清（宁可问，不要猜）。进展用人话写一两句（上下文「本群任务」里已有标题和最近进展），提任务就用标题，不要写编号；不要复述卡片模板，也不要叫代码再发一遍任务卡',
+    "要做的事：简单动作写一行标记（`[[动作]] 任务号 一句话`），建任务 / 改编排 / 改公告用 JSON；两种可以混用，代码取最后一个：",
+    '- `[[stop]] 12` / `[[retry]] 12 补充说明` / `[[accept]] 12` —— 放弃 / 再试一次 / 接受这版继续',
+    '- `[[attach]] 12 补充或纠偏的话` —— 给进行中的任务补信息；想立刻打断加一句「打断」',
+    '- `[[answer]] 12 你的回答` —— 回答任务「正在等人回答」的问题（人怎么说就怎么写，不用选项）',
+    '- `[[remember]] 一句话` / `[[forget]] 3` —— 记 / 忘本群背景（编号见【本群记忆】）；分不清是规则还是记忆时用 remember',
+    '- `[[mode]] auto|single|orc` —— 切本群工作方式（auto=自动判断；single=只用单 agent；orc=都先经过你）',
+    '- `[[chat]]` —— 交给单 agent：普通问答、讨论、一轮就能做完的改动或查询',
+    '- `[[reply]] 直接回答` —— 问任务进展、关于编排的简单问题，或意图不清时澄清（宁可问，不要猜）。用人话写，提任务就用标题',
+    '- `[[confirm]]` / `[[cancel]]` —— 同意 / 拒绝「待用户确认的提议」',
+    '- `{"action":"submit","title":"短标题，6~14 字","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选","criteria":["可选：可检查的验收标准"],"constraints":["可选"],"bar":"评审口径：这份活该按什么标准判过不过"}` —— 用户要团队去做一件新事情；「把刚才这个交给团队」时从「最近对话」里总结目标、约束和已有结论',
+    '- submit 的 bar 由你判断，别套固定模板：先想清楚这份东西是给谁用的。探索 / 一次性 / 备忘（可行性判断、摸底、给人参考）→ 评审只该拦「会让结论错」的问题，统计严苛度、风格、可维护性一律算建议；要进生产、要对外发布、别人要依赖它的代码 → 按工程标准全套卡。口径决定评审有多严，写偏了后面会来回消耗。',
+    '- `{"action":"config","patch":{"preset":"fix","roles":{"critic":{"cli":"claude"}},"enable":["design_review"],"disable":[],"maxLoops":{"review":2}},"reason":"…"}` —— 调整本群之后新任务的编排（需要用户确认）',
+    '- `{"action":"config","task":12,"patch":{"roles":{"implementer":{"cli":"cursor","model":"auto"}}},"verbosity":"quiet|normal|verbose","reason":"…"}` —— 调整**进行中**任务的角色或播报，立即生效',
+    '- `{"action":"announce","paragraphs":["要追加到群公告的规则，每段一句"],"reason":"…"}` —— 改本群的长期约束（人人可见）',
   ].filter(Boolean).join("\n");
 }
 
+const SIMPLE = ["attach", "answer", "stop", "retry", "accept", "remember", "forget", "mode", "chat", "reply", "confirm", "cancel"];
+
+/**
+ * 简单动作（动词 + 任务号 + 一句话）用一行标记就够，不必塞 JSON：
+ *   [[stop]] 12 / [[attach]] 12 改用 redis / [[reply]] 直接回答
+ */
+function parseSimpleAction(text: string): LeadAction | undefined {
+  const blocks = markerBlocks(text || "").filter((b) => SIMPLE.includes(b.name));
+  const b = blocks[blocks.length - 1];
+  if (!b) return undefined;
+  const body = b.body.trim();
+  const m = /^#?(\d+)\b[ \t]*([\s\S]*)$/.exec(body);
+  const task = m ? Number(m[1]) : undefined;
+  const rest = (m ? m[2] : body).trim();
+  switch (b.name) {
+    case "attach": return task ? { action: "attach", task, text: rest || body, urgent: /\b紧急\b|\burgent\b|打断/.test(body) || undefined } : undefined;
+    case "answer": return task && rest ? { action: "answer", task, text: rest } : undefined;
+    case "stop": return task ? { action: "stop", task } : undefined;
+    case "retry": return task ? { action: "retry", task, note: rest || undefined } : undefined;
+    case "accept": return task ? { action: "accept", task, note: rest || undefined } : undefined;
+    case "remember": {
+      const items = body.split(/\r?\n/).map((x) => x.replace(/^[-*·]\s*/, "").trim()).filter(Boolean).slice(0, 10);
+      return items.length ? { action: "remember", items } : undefined;
+    }
+    case "forget": {
+      const ids = body.split(/[,，\s]+/).map((x) => Number(x.replace(/^#/, ""))).filter((n) => Number.isInteger(n) && n > 0);
+      return ids.length ? { action: "forget", ids } : undefined;
+    }
+    case "mode": {
+      const mode = body.toLowerCase();
+      return mode === "auto" || mode === "single" || mode === "orc" ? { action: "mode", mode } : undefined;
+    }
+    case "chat": return { action: "chat" };
+    case "confirm": return { action: "confirm" };
+    case "cancel": return { action: "cancel" };
+    case "reply": return rest ? { action: "reply", text: rest } : undefined;
+  }
+  return undefined;
+}
+
 export function parseLeadAction(text: string): LeadAction | { error: string } {
+  const simple = parseSimpleAction(text);
+  if (simple) return simple;
   const objs = findJsonObjects(text || "").filter((o) => typeof o.action === "string" && ACTIONS.includes(o.action));
   const a = objs[objs.length - 1];
   if (!a) return { error: "主 agent 没有给出可识别的动作" };

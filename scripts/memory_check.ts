@@ -77,7 +77,7 @@ check("lead remember (text fallback)", "action" in r2 && r2.action === "remember
 const r3 = parseLeadAction('{"action":"forget","ids":[2,"3"]}');
 check("lead forget", "action" in r3 && r3.action === "forget" && JSON.stringify(r3.ids) === "[2,3]");
 check("lead forget invalid", "error" in parseLeadAction('{"action":"forget","ids":["x"]}'));
-check("lead prompt mentions remember", buildLeadPrompt({ userText: "x", presetLine: "", tasks: [], presets: [], roles: [] }).includes('"action":"remember"'));
+check("lead prompt mentions remember", buildLeadPrompt({ userText: "x", presetLine: "", tasks: [], presets: [], roles: [] }).includes("[[remember]]"));
 
 console.log(failed ? `\n${failed} FAILED` : "\nall passed");
 process.exit(failed ? 1 : 0);

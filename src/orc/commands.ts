@@ -249,8 +249,8 @@ export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): 
   if (!("error" in act) && act.action === "chat") { await h.runSingle(ev); return; }
   recordTurn(chatId, "user", ev.text);
   if ("error" in act) {
-    recordTurn(chatId, "lead", raw);
-    await say(`🧭 ${raw.trim().slice(0, 1500) || act.error}`);
+    // 没给出可执行动作：当作普通消息交给单 agent（它看得到工作区和上下文），不把原文甩进群
+    await h.runSingle(ev);
     return;
   }
   recordTurn(chatId, "lead", describeAction(act));

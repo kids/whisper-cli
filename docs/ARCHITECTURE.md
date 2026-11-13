@@ -322,6 +322,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | | `[[instruct]]` `[[verify]]` `[[review]]` `[[wait]]` `[[ask]]` `[[finish]]` `[[abort]]` | 监督者 | `ledger.ts` | 这一轮执行什么 |
 | | `[[replan]]` | 监督者（人来改了口径 / 验收 / 目标时） | `ledger.ts:applyChange` | 增量替换验收与约束、作废指定证据、worker 开新会话 |
 | | `[[continue_with_known_issues]]` | 决策说明 | `brief.ts` | 允许带着遗留问题继续 |
+| | `[[attach]]` `[[answer]]` `[[stop]]` `[[retry]]` `[[accept]]` `[[mode]]` `[[chat]]` `[[reply]]` `[[confirm]]` `[[cancel]]` | 主 agent | `chat.ts:parseLeadAction` | 给任务补信息 / 回答 / 停 / 重试 / 接受 / 切模式 / 交给单 agent / 直接回答 / 确认或放弃提议 |
 | **L3 记账 / 展示** | `[[major]]` `[[minor]]` | 评审 | `output.ts` | 问题分级，不影响流程 |
 | | `[[note]]` | worker、单 agent | `output.ts`、卡片 | 团队笔记 |
 | | `[[progress]]` | 任意 agent | `agent-runner.ts` | 刷卡片进度，不进群 |

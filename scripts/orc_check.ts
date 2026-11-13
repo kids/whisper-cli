@@ -210,6 +210,20 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("lead submit", a.action === "submit" && a.goal === "加登录限流" && a.preset === "dev", a);
   check("lead attach urgent", (parseLeadAction('{"action":"attach","task":"7","text":"改用 redis","urgent":true}') as any).urgent === true);
   check("lead bad task id", "error" in parseLeadAction('{"action":"stop","task":"x"}'));
+  // 简单动作用一行标记，不必 JSON
+  const pa = (t: string) => parseLeadAction(t) as any;
+  check("marker: stop", pa("[[stop]] 12").action === "stop" && pa("[[stop]] 12").task === 12);
+  check("marker: attach keeps the words", pa("[[attach]] 12 改用 redis，别动测试").text === "改用 redis，别动测试");
+  check("marker: attach interrupt", pa("[[attach]] 12 改用 redis 打断").urgent === true && !pa("[[attach]] 12 改用 redis").urgent);
+  check("marker: answer", pa("[[answer]] 12 可以推").task === 12 && pa("[[answer]] 12 可以推").text === "可以推");
+  check("marker: retry with note", pa("[[retry]] 12 只改口径").note === "只改口径");
+  check("marker: mode", pa("[[mode]] orc").mode === "orc" && "error" in parseLeadAction("[[mode]] 随便"));
+  check("marker: remember lines", pa("[[remember]]\n- 以后训练日志放 /data/logs\n- 别动 main").items.length === 2);
+  check("marker: forget ids", pa("[[forget]] 3, 5").ids.join() === "3,5");
+  check("marker: reply", pa("[[reply]] 任务在跑，预计半小时").text === "任务在跑，预计半小时");
+  check("marker: confirm/cancel/chat", pa("[[confirm]]").action === "confirm" && pa("[[cancel]]").action === "cancel" && pa("[[chat]]").action === "chat");
+  check("unknown marker is not an action", "error" in parseLeadAction("[[dance]] 12"));
+  check("JSON submit still works", pa('{"action":"submit","goal":"加登录限流"}').action === "submit");
   check("lead unknown action ignored", "error" in parseLeadAction('{"action":"rm -rf"}'));
   check("lead announce trims", (parseLeadAction('{"action":"announce","paragraphs":[" 结论先行 ",""]}') as any).paragraphs.join() === "结论先行");
   check("lead config", (parseLeadAction('{"action":"config","patch":{"roles":{"critic":{"cli":"claude"}}}}') as any).patch.roles.critic.cli === "claude");

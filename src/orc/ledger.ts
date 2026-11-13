@@ -252,17 +252,17 @@ export function parseChange(body: string): ChangeSet {
   return out;
 }
 
-const SIGNAL_RE = /^[ \t]*\[\[\s*(instruct|replan|verify|review|wait|ask|finish|abort)\s*\]\][ \t]*(.*)$/i;
+const MARKER_RE = /^[ \t]*\[\[\s*([a-z_]+)\s*\]\][ \t]*(.*)$/i;
 const CLEAN = (t: string) => t.replace(/^[\s\-*>`]+/, "").replace(/`/g, "").trim();
 
-interface Block { name: string; body: string }
+export interface Block { name: string; body: string }
 
-/** 把回复切成"正文 + 若干 [[标记]] 块" */
-function signalBlocks(text: string): Block[] {
+/** 把回复切成"正文 + 若干 [[标记]] 块"（chat.ts 也用它解析主 agent 的简单动作） */
+export function markerBlocks(text: string): Block[] {
   const out: Block[] = [];
   let cur: Block | undefined;
   for (const line of (text || "").split(/\r?\n/)) {
-    const m = SIGNAL_RE.exec(line);
+    const m = MARKER_RE.exec(line);
     if (m) { cur = { name: m[1].toLowerCase(), body: m[2] ?? "" }; out.push(cur); }
     else if (cur) cur.body += `\n${line}`;
   }
@@ -271,7 +271,7 @@ function signalBlocks(text: string): Block[] {
 
 /** 这一轮想做什么；没有标记 / 标记内容为空 = 它还在想（undefined，不当错误） */
 export function parseSignal(text: string): LoopAction | undefined {
-  const blocks = signalBlocks(text);
+  const blocks = markerBlocks(text);
   const b = blocks[blocks.length - 1];
   if (!b || !b.body) return undefined;
   switch (b.name) {
