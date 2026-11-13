@@ -56,10 +56,9 @@ export interface AttemptCtx {
 }
 
 function verdictBlock(p: any): string[] {
-  const issues: any[] = Array.isArray(p.value?.issues) ? p.value.issues : [];
-  const sev = (it: any) => String(typeof it === "string" ? "" : it.severity ?? "").toLowerCase();
-  const major = issues.filter((it) => /major|high|critical|blocker|严重/.test(sev(it)));
-  const rest = issues.filter((it) => !major.includes(it));
+  const issues: any[] = Array.isArray(p.issues) ? p.issues : [];
+  const major = issues.filter((it) => it.severity === "major");
+  const rest = issues.filter((it) => it.severity !== "major");
   const show = major.length ? major : rest.slice(0, 5);
   const out: string[] = [];
   const notes: string[] = Array.isArray(p.notes) ? p.notes : [];
@@ -68,9 +67,8 @@ function verdictBlock(p: any): string[] {
   if (show.length) {
     out.push("", major.length ? "**问题（major）**" : "**问题**");
     show.slice(0, 12).forEach((it, k) => {
-      if (typeof it === "string") { out.push(`${k + 1}. ${firstSentence(it, 140)}`); return; }
       const f = it.file ? String(it.file).split("/").pop() + (it.line ? ":" + it.line : "") : "";
-      out.push(`${k + 1}. ${f ? `\`${f}\` ` : ""}${firstSentence(str(it.desc ?? it.description ?? it.issue ?? it.text ?? it), 140)}`);
+      out.push(`${k + 1}. ${f ? `\`${f}\` ` : ""}${firstSentence(str(it.desc), 140)}`);
     });
     if (show.length > 12) out.push(`…另有 ${show.length - 12} 条`);
   }
@@ -79,15 +77,7 @@ function verdictBlock(p: any): string[] {
   return out;
 }
 
-function testBlock(p: any): string[] {
-  const cases: any[] = Array.isArray(p.value?.cases) ? p.value.cases : [];
-  if (!cases.length) return [];
-  const bad = cases.filter((c) => c && c.result !== "pass" && c.pass !== true);
-  const out = ["", `用例：${cases.length - bad.length}/${cases.length} 通过`];
-  bad.slice(0, 8).forEach((c) => out.push(`- ✗ ${clipText(str(c.name ?? c.case ?? "case"), 60)}：${firstSentence(str(c.detail ?? c.error ?? c.result ?? ""), 100)}`));
-  if (bad.length > 8) out.push(`…另有 ${bad.length - 8} 个失败`);
-  return out;
-}
+
 
 /** State word for the header line */
 function stateOf(a: Attempt): string {
@@ -99,7 +89,7 @@ function stateOf(a: Attempt): string {
   if (!p) return "⚠️ 没按约定输出";
   if (p.kind === "verdict") {
     if (p.pass) return "✓ 通过";
-    const n = (p.value?.issues ?? []).filter((it: any) => typeof it !== "string" && /major|high|critical|blocker|严重/i.test(String(it.severity ?? ""))).length;
+    const n = (p.issues ?? []).filter((it: any) => it.severity === "major").length;
     return `✗ 退回${n ? `（${n} 条 major）` : ""}`;
   }
   if (p.kind === "test") return p.pass ? "✓ 通过" : "✗ 未通过";
@@ -129,11 +119,10 @@ export function renderAttemptCard(a: Attempt, c: AttemptCtx): string {
   if (a.status === "failed" || a.status === "cancelled" || a.status === "interrupted") {
     if (a.error) lines.push("", clipText(a.error, 600));
   } else if (!p) {
-    lines.push("", `输出里没找到约定的 JSON 结论，下面是结尾部分：`, "", clipText(a.output.trim().slice(-600), 600) || "（空）");
+    lines.push("", `输出里没找到结论行，下面是结尾部分：`, "", clipText(a.output.trim().slice(-600), 600) || "（空）");
   } else {
     if (p.summary) lines.push("", p.kind === "verdict" ? `**结论**：${clipText(p.summary, 600)}` : clipText(p.summary, 1400));
     if (p.kind === "verdict") lines.push(...verdictBlock(p));
-    else if (p.kind === "test") lines.push(...testBlock(p));
     else if (p.kind === "plan" && p.subtasks?.length) lines.push("", `拆成 ${p.subtasks.length} 个子任务：`, ...p.subtasks.slice(0, 8).map((s: any, i: number) => `${i + 1}. ${clipText(str(s.title), 80)}`));
   }
   lines.push("", `完整输出：\`${c.outputPath}\``);
@@ -149,9 +138,7 @@ export function attemptCtx(t: Task, all: Attempt[], a: Attempt, orcHome: string,
   if (!readOnly && nth > 1) {
     const prev = [...all].reverse().find((x) => x.id < a.id && x.parsed && (x.parsed.kind === "verdict" || x.parsed.kind === "test") && x.parsed.pass === false);
     if (prev) {
-      const count = prev.parsed.kind === "verdict"
-        ? (prev.parsed.value?.issues ?? []).length
-        : (prev.parsed.value?.cases ?? []).filter((c: any) => c && c.result !== "pass" && c.pass !== true).length;
+      const count = (prev.parsed.issues ?? []).length;
       if (count) prior = { what: prev.parsed.kind === "verdict" ? "评审" : "测试", count };
     }
   }

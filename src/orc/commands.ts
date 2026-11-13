@@ -153,7 +153,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
       const v = VERBOSITY_WORDS[(m[2] || "").toLowerCase()];
       if (!v) { await say(`本群团队任务的播报：**${VERBOSITY_ZH[p.verbosity ?? "normal"]}**\n用法：\`/orc 播报 安静|正常|详细\``); return true; }
       setProfile(chatId, { ...p, verbosity: v });
-      await say(`📣 本群团队任务的播报改为 **${VERBOSITY_ZH[v]}**（流水线任务立即生效；监督循环任务对新任务生效，进行中的可以说「#N 播报改成…」）`);
+      await say(`📣 本群团队任务的播报改为 **${VERBOSITY_ZH[v]}**（流水线任务立即生效；监督循环任务对新任务生效，进行中的可以直接说「把播报改成…」）`);
       return true;
     }
     return false;
@@ -161,7 +161,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
 
   if (/^\/tasks\s*$/i.test(text)) {
     const ts = orcOf(h).store.listTasks({ chatId, limit: 15 });
-    await say(ts.length ? ts.map((t) => `- #${t.id} [${t.status}] ${t.title} —— ${t.progress}`).join("\n") : "本群还没有团队任务。想交给团队做，直接说「这个交给团队做」即可。");
+    await say(ts.length ? ts.map((t) => `- ${t.title} [${t.status}] —— ${t.progress}`).join("\n") : "本群还没有团队任务。想交给团队做，直接说「这个交给团队做」即可。");
     return true;
   }
 
@@ -175,8 +175,9 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
     if (sm) {
       const id = Number(sm[2]);
       const verb = sm[1].toLowerCase();
+      const name = o.store.getTask(id)?.title ?? "这个任务";
       const ok = verb === "stop" ? o.stop(id) : verb === "retry" ? o.retry(id, sm[3] || undefined) : verb === "accept" ? o.accept(id, sm[3] || undefined) : o.attach(id, sm[3], false);
-      await say(ok ? `#${id} ${verb === "stop" ? "已终止" : verb === "retry" ? "已重新排队" : verb === "accept" ? "已接受现在这版，继续后面的环节" : "补充已排队，下一轮交给 agent"}` : `#${id} 当前状态不支持 ${verb}`);
+      await say(ok ? `「${name}」${verb === "stop" ? "已终止" : verb === "retry" ? "已重新排队" : verb === "accept" ? "已接受现在这版，继续后面的环节" : "补充已排队，下一轮交给 agent"}` : `「${name}」当前状态不支持 ${verb}`);
       return true;
     }
     if (/^#?\d+$/.test(arg)) {
@@ -281,8 +282,8 @@ export function describeAction(a: LeadAction): string {
 function configTask(h: OrcChatHost, chatId: string, act: Extract<LeadAction, { action: "config" }>): string {
   const o = orcOf(h);
   const t = o.store.getTask(act.task!);
-  if (!t || t.chatId !== chatId) return `本群没有任务 #${act.task}`;
-  if (t.kind !== "loop") return `#${t.id} 是流水线任务，运行中不能换角色；可以让我先停掉它，再用新的安排重新提交`;
+  if (!t || t.chatId !== chatId) return "本群没有这个任务";
+  if (t.kind !== "loop") return `「${t.title}」是流水线任务，运行中不能换角色；可以让我先停掉它，再用新的安排重新提交`;
   const out: string[] = [];
   const roles = act.patch.roles ?? {};
   const ignored = Object.keys(act.patch).filter((k) => k !== "roles");
@@ -291,12 +292,12 @@ function configTask(h: OrcChatHost, chatId: string, act: Extract<LeadAction, { a
     for (const [name, v] of Object.entries(roles)) {
       edits[name] = v ? { cli: (v as any).cli, model: (v as any).model === undefined ? undefined : (v as any).model } : null;
     }
-    try { out.push(`🔀 #${t.id} ${o.loop.setRoles(t.id, edits, availableClis())}`); }
+    try { out.push(`🔀 「${t.title}」${o.loop.setRoles(t.id, edits, availableClis())}`); }
     catch (e) { return `🧭 没有采纳：${(e as Error).message}`; }
   }
   if (act.verbosity) {
     o.loop.setVerbosity(t.id, act.verbosity);
-    out.push(`📣 #${t.id} 播报改为 ${{ quiet: "安静（只发汇报、提问和结果）", normal: "正常（每轮一条摘要）", verbose: "详细（含指令原文和监督者分析）" }[act.verbosity]}`);
+    out.push(`📣 「${t.title}」播报改为 ${{ quiet: "安静（只发汇报、提问和结果）", normal: "正常（每轮一条摘要）", verbose: "详细（含指令原文和监督者分析）" }[act.verbosity]}`);
   }
   if (ignored.length) out.push(`（${ignored.join("、")} 只对新任务有效，这里没有采纳）`);
   return out.join("\n") || "没有变化";
@@ -307,6 +308,7 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
   const say = (md: string) => h.im.sendMarkdown(chatId, md);
   const p = getProfile(chatId);
   const own = (id: number) => o.store.getTask(id)?.chatId === chatId;
+  const name = (id: number) => o.store.getTask(id)?.title ?? "这个任务";
   switch (act.action) {
     case "reply": await say(act.text || "（空）"); return;
     case "chat": return; // handled in runLeadTurn
@@ -322,23 +324,23 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       if (r) await say(`🧭 ${r}`);
       return;
     }
-    case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 #${act.task} 已终止` : `#${act.task} 无法终止`); return;
-    case "retry": await say(own(act.task) && o.retry(act.task, act.note) ? `🔁 #${act.task} 已重新排队` : `#${act.task} 当前状态不能重试`); return;
+    case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 「${name(act.task)}」已终止` : `「${name(act.task)}」无法终止`); return;
+    case "retry": await say(own(act.task) && o.retry(act.task, act.note) ? `🔁 「${name(act.task)}」已重新排队` : `「${name(act.task)}」当前状态不能重试`); return;
     case "accept": {
       const t = own(act.task) ? o.store.getTask(act.task) : undefined;
       const st = t && acceptable(t);
-      if (!t || !st || !o.accept(act.task, act.note)) { await say(`#${act.task} 现在没有卡在评审 / 测试上，没法「接受」`); return; }
+      if (!t || !st || !o.accept(act.task, act.note)) { await say(`「${name(act.task)}」现在没有卡在评审 / 测试上，没法「接受」`); return; }
       const next = t.preset.stages[t.stageIdx + 1];
-      await say(next ? `✅ #${t.id} 接受现在这版，跳过这次${stageName(st.id)}，继续${stageName(next.id)}` : `✅ #${t.id} 接受现在这版，任务完成`);
+      await say(next ? `✅ 「${t.title}」接受现在这版，跳过这次${stageName(st.id)}，继续${stageName(next.id)}` : `✅ 「${t.title}」接受现在这版，任务完成`);
       return;
     }
     case "attach": {
       const ok = own(act.task) && o.attach(act.task, act.text, act.urgent, userText);
-      await say(ok ? (act.urgent ? `⚡ 已打断 #${act.task}，带着你的补充续接原会话重跑` : `📎 已把补充交给 #${act.task}，下一轮生效`) : `#${act.task} 不在进行中`);
+      await say(ok ? (act.urgent ? `⚡ 已打断「${name(act.task)}」，带着你的补充续接原会话重跑` : `📎 已把补充交给「${name(act.task)}」，下一轮生效`) : `「${name(act.task)}」不在进行中`);
       return;
     }
     case "answer": {
-      if (!own(act.task)) { await say(`本群没有任务 #${act.task}`); return; }
+      if (!own(act.task)) { await say("本群没有这个任务"); return; }
       await say(o.loop.answer(act.task, act.option, act.text, userText));
       return;
     }

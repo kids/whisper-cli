@@ -168,10 +168,10 @@ const v = (l: any, o: object, c: Partial<typeof ctx> = {}) => L.validateAction(l
   const t: any = { id: 5, title: "调参", status: "blocked", progress: "等你决定", kind: "loop", preset: loopPreset, createdAt: Date.now(), chatId: "c" };
   const prompt = buildLeadPrompt({ userText: "推吧", presetLine: "loop", tasks: [t], presets: ["loop"], roles: ["supervisor"], store: { getLedger: () => l } as any, pending: "调整编排 {}", threadTask: 5 });
   check("lead prompt shows open question + options", prompt.includes("要推送到远端吗") && prompt.includes("b) 推送") && prompt.includes("默认 a"));
-  check("lead prompt shows thread task + pending", prompt.includes("任务 #5 卡片的回复串") && prompt.includes("待用户确认的提议"));
+  check("lead prompt shows thread task + pending", prompt.includes("「调参」卡片的回复串") && prompt.includes("待用户确认的提议"));
   check("lead prompt shows roles", /implementer=\w+/.test(prompt));
   const card = renderCard(t, { getLedger: () => l } as any);
-  check("loop card is identity + progress only", card === "#5 调参\n等你决定" && !/预算|监督循环|验收标准/.test(card), card);
+  check("loop card is identity + progress only", card === "调参\n等你决定" && !/预算|监督循环|验收标准/.test(card), card);
 }
 
 // ---- engine end-to-end (scripted CLIs) -----------------------------------------
@@ -182,7 +182,7 @@ class LoopFake implements Executor {
   calls: Call[] = [];
   sup = new Map<number, Reply[]>();
   worker = new Map<number, ((req: RunRequest, n: number) => string | Promise<string>)>();
-  review: Reply = '{"verdict":"approve","issues":[],"summary":"看过了，没问题"}';
+  review: Reply = '[[approve]] 看过了，没问题';
   stopped = new Set<string>();
   available() { return ["codebuddy", "codex", "claude"] as any; }
   stop(key: string) { this.stopped.add(key); return true; }
@@ -255,7 +255,7 @@ async function e2e() {
     const testCmd = `node -e "process.exit(require('./add.js')(2,3)===5?0:1)"`;
     exec.worker.set(id, (req, n) => {
       writeFileSync(join(req.cwd, "add.js"), n === 1 ? "module.exports=(a,b)=>a-b\n" : "module.exports=(a,b)=>a+b\n");
-      return J({ status: "done", summary: n === 1 ? "写好了 add.js" : "修好了符号" });
+      return `[[done]] ${n === 1 ? "写好了 add.js" : "修好了符号"}`;
     });
     exec.sup.set(id, [
       S({ action: "instruct", text: "新建 add.js，导出 add(a,b)", plan: [{ text: "实现 add", status: "doing" }] }),
@@ -300,7 +300,7 @@ async function e2e() {
     exec.worker.set(id, (req, n) => {
       if (n === 1) switched = orc.loop.setRoles(id, { implementer: { cli: "claude" } }, ["codebuddy", "codex", "claude"]);
       writeFileSync(join(req.cwd, `f${n}.txt`), "x");
-      return J({ status: "done", summary: `第 ${n} 次完成` });
+      return `[[done]] 第 ${n} 次完成`;
     });
     exec.sup.set(id, [
       S({ action: "update_constraints", changes: [{ op: "remove", target: "constraint", id: "K1" }], reason: "人说不限语言了", source: "human", quote: "K1 不要了" }),
@@ -354,7 +354,7 @@ async function e2e() {
     });
     exec.worker.set(id, (req) => {
       writeFileSync(join(req.cwd, "train.sh"), "sleep 1\n");
-      return J({ status: "done", summary: "已后台启动", job: { pid: 4242, log: "out/train.log" } });
+      return "[[done]] 已后台启动\n[[note]] 后台作业 pid=4242 日志=out/train.log";
     });
     exec.sup.set(id, [
       S({ action: "instruct", text: "后台启动训练，报告 pid 和日志" }),
@@ -364,7 +364,7 @@ async function e2e() {
     let l = orc.loop.ledger(id)!;
     const wid = l.waitWatch!;
     check("C parked on watch", store.getTask(id)!.status === "waiting" && !!wid && watches.includes(wid) && W.getWatch(wid)?.sessionKey === `orc-loop:${id}`);
-    check("C worker reported job", l.observations.some((o) => /后台作业：.*4242/.test(o.text)));
+    check("C worker reported job", l.observations.some((o) => /4242/.test(o.text)));
     check("C heartbeat ≥ 10min", l.heartbeatS === 600 && store.pendingLoopEffects(id).some((e) => e.payload.reason === "heartbeat" && e.nextAt > Date.now() + 500_000));
     const before = exec.of(id, "supervisor").length;
     for (let i = 0; i < 20; i++) { await orc.tick(); await sleep(10); }

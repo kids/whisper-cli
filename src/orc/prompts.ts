@@ -4,23 +4,38 @@
 // Agents get everything they need in the prompt (goal, spec, feedback, diff,
 // notes path) instead of task-board tools, so any CLI can fill any role (002 §4.2).
 // =============================================================================
+import type { Issue } from "./output";
 import type { Attempt, LaunchPayload, OutputKind, ResolvedRole, StageDef, Task } from "./types";
 
 export const CONTRACT: Record<OutputKind, string> = {
   plan: `{"spec": "可验收的规格：要做什么、不做什么、验收标准", "subtasks": [{"title": "…", "spec": "…", "deps": [0]}], "summary": "一句话", "notes": ["值得团队记住的发现/决策"]}
 - 只有当工作确实可以并行、且每块能独立验收时才拆 subtasks（2～5 个）；否则 subtasks 给空数组 []。
 - deps 是本数组里**排在前面**的子任务下标。`,
-  impl: `{"status": "done" | "blocked", "summary": "改了什么 / 为什么卡住", "known_issues": ["这次没做或做不彻底的，写清影响"], "notes": ["…"]}
+  impl: `最后**单独一行**写结论（这是唯一判定依据，不要放进代码块）：
+[[done]] 改了什么、怎么验证的
+或
+[[blocked]] 卡在哪、需要人做什么
+- 想给团队留笔记，就单独写 [[note]] 一句话（会进共享笔记），可以写多行。
 - 不要自己 git commit / push，orc 会在你结束后提交工作区。
-- 只有在缺信息、缺权限、需要人做决定时才用 "blocked"。`,
-  verdict: `{"verdict": "approve" | "revise", "issues": [{"severity": "blocker" | "major" | "minor", "file": "路径", "line": 12, "desc": "问题与建议（给实现者看，可以用术语）", "impact": "给不看代码的人看：不修会出什么实际问题，举一个具体例子"}], "summary": "一句大白话结论：现在能不能用、差在哪", "notes": ["…"]}
-- 只有存在 blocker / major 问题时才给 "revise"；minor 只记录，不阻塞。
-- blocker / major 必须写 impact：不用术语和代码名，说清后果并举例（如「"利润增长 5%"和"利润下降 5%"会被当成同一条事实合并」）。人要靠它决定是继续改还是接受现状。
+- 只有在缺信息、缺权限、需要人做决定时才用 [[blocked]]。`,
+  verdict: `最后**单独一行**写结论（这是唯一判定依据，不要放进代码块）：
+[[approve]] 一句大白话结论：现在能不能用
+或
+[[revise]] 一句大白话结论：差在哪
+- 每条问题单独一行：[[major]] 文件:行 问题与建议，并写清不修会出什么实际问题、举一个具体例子；次要的用 [[minor]] 文件:行 建议。
+- 只有 major 才算不过；minor 只记录，不阻塞。
+- 后果不用术语和代码名（如「"利润增长 5%"和"利润下降 5%"会被当成同一条事实合并」）。人要靠它决定继续改还是接受现状。
+- 想留笔记给团队就单独写 [[note]] 一句话。
 - 你是只读角色：不要修改任何文件（改了会被 orc 回滚并记为违规）。`,
-  test: `{"pass": true | false, "cases": [{"name": "…", "cmd": "如何复现", "result": "pass" | "fail", "detail": "…"}], "summary": "一句话", "notes": ["…"]}
+  test: `最后**单独一行**写结论（这是唯一判定依据，不要放进代码块）：
+[[pass]] 一句话
+或
+[[fail]] 一句话：哪条没过
+- 没过的用例逐条写在正文里（名称 / 怎么复现 / 实际结果）。
 - 用例要覆盖规格里的验收标准与边界/异常；你新增的测试文件会被 orc 单独提交。
-- 不要修改业务代码；发现缺陷就 pass=false 并写清复现方式。`,
-  report: `{"summary": "完整结论（markdown）", "notes": ["…"]}`,
+- 不要修改业务代码；发现缺陷就 [[fail]] 并写清复现方式。`,
+  report: `最后**单独一行**写 [[report]] 一句话摘要，正文写完整结论（markdown）。`,
+
   brief: `{"situation": "一两句话：现在在做什么、卡在哪", "state": {"done": ["已经做到并验证过的事（带证据：测试名/数字/提交号）"], "not_done": ["还没做到或没验证的，以及为什么重要"]}, "blockers": [{"what": "卡点", "why_stuck": "为什么改不动：技术约束 / 缺信息 / 评审口径不一致", "evidence": "文件:行号 或 命令输出"}], "options": [{"name": "简短名字", "what": "具体怎么做", "cost": "要花的时间/代价", "risk": "风险", "reversible": "能补救 / 不能补救", "recommended": true}], "recommendation": "建议哪条，为什么", "needs_from_human": "要他补的一句话、一个口径或一个选择", "auto": "none" | "continue_with_known_issues", "known_issues": ["auto=continue_with_known_issues 时逐条写清放弃/暂缓的是什么，用户会看到"]}
 - 2～4 个方案，必须是真有差别的路，不是同一个方向的微调。
 - 拿不准能不能带着问题继续时，auto 用 "none"。`.replace("$",""),
@@ -67,22 +82,22 @@ export function buildStagePrompt(c: PromptContext): string {
     out.push(`## 本任务相对基线的改动\n提交：\n\`\`\`\n${c.diff.log || "(无提交)"}\n\`\`\`\n统计：\n\`\`\`\n${c.diff.stat || "(无改动)"}\n\`\`\``);
     if (c.diff.diff) out.push(`\`\`\`diff\n${c.diff.diff}\n\`\`\``);
   }
-  out.push(`## 团队共享笔记\n路径：\`${c.notesPath}\`（只读参考；要新增笔记请写进最终 JSON 的 notes，orc 会追加）` +
+  out.push(`## 团队共享笔记\n路径：\`${c.notesPath}\`（只读参考；要新增笔记就写 \`[[note]] 一句话\`，orc 会追加进去）` +
     (c.notesTail ? `\n最近内容：\n${c.notesTail}` : ""));
 
   out.push(`## 角色说明\n${role.prompt}`);
   out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
-  out.push(`## 输出约定（必须遵守）\n你的**最后一条回复**必须以一个 JSON 对象结尾（可放在 \`\`\`json 代码块里），格式：\n${CONTRACT[role.output]}`);
+  out.push(`## 输出约定（必须遵守）\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}`);
   return out.join("\n\n");
 }
 
 function historyLine(a: Attempt): string {
   const head = `- ${a.stageId}（${a.role}）：${a.parsed?.summary || "(无摘要)"}`;
-  const issues: any[] = a.parsed?.kind === "verdict" ? a.parsed.value?.issues ?? [] : [];
+  const issues: Issue[] = a.parsed?.issues ?? [];
   if (!issues.length) return head;
-  const verdict = a.parsed.value?.verdict ? ` [${a.parsed.value.verdict}]` : "";
+  const verdict = a.parsed?.kind === "verdict" ? ` [${a.parsed.pass ? "approve" : "revise"}]` : "";
   return head + verdict + "\n" + issues.slice(0, 15).map((it) =>
-    typeof it === "string" ? `  - ${it}` : `  - [${it.severity ?? "issue"}] ${it.file ? it.file + (it.line ? ":" + it.line : "") + " " : ""}${it.desc ?? JSON.stringify(it)}`,
+    `  - [${it.severity}] ${it.file ? `${it.file}${it.line ? ":" + it.line : ""} ` : ""}${it.desc}`,
   ).join("\n");
 }
 
@@ -117,15 +132,8 @@ function briefAttemptLine(a: Attempt): string {
   const head = `- 第 ${a.id} 次 · ${a.stageId}（${a.role}）· ${a.status === "done" ? "完成" : a.status}`;
   if (!p) return `${head}${a.error ? `：${a.error.slice(0, 200)}` : ""}`;
   const lines = [`${head}：${p.summary || "(无摘要)"}`];
-  const issues: any[] = p.kind === "verdict" ? p.value?.issues ?? [] : [];
-  for (const it of issues.slice(0, 12)) {
-    if (typeof it === "string") { lines.push(`  - ${it}`); continue; }
-    lines.push(`  - [${it.severity ?? "issue"}] ${it.file ? it.file + (it.line ? ":" + it.line : "") + " " : ""}${it.desc ?? ""}${it.impact ? `（后果：${it.impact}）` : ""}`);
+  for (const it of (p.issues ?? []).slice(0, 12)) {
+    lines.push(`  - [${it.severity}] ${it.file ? `${it.file}${it.line ? ":" + it.line : ""} ` : ""}${it.desc}`);
   }
-  const cases: any[] = p.kind === "test" ? p.value?.cases ?? [] : [];
-  for (const x of cases.filter((x: any) => x && x.result !== "pass" && x.pass !== true).slice(0, 8)) {
-    lines.push(`  - ✗ ${x.name ?? "case"}：${x.detail ?? x.result ?? ""}`);
-  }
-  if (p.kind === "impl" && p.value?.known_issues?.length) lines.push(`  - 自报的已知问题：${p.value.known_issues.join("；")}`);
   return lines.join("\n");
 }

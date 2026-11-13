@@ -150,7 +150,7 @@ export function hasOrcState(): boolean {
  * (and `[[progress]]` / supervisor reports). The card is mainly a thread anchor.
  */
 export function renderCard(t: Task, _store?: OrcStore, _threaded = false): string {
-  const head = `#${t.id} ${t.title}`;
+  const head = t.title;
   const body = (t.progress || "").trim();
   return body ? `${head}\n${clip(body, 500)}` : head;
 }
@@ -193,12 +193,12 @@ function renderCloseout(t: Task, store: OrcStore): string {
     : "❌ 任务结束 · 没能做完";
   const meta = [`共 ${rounds} ${t.kind === "loop" ? "轮" : "次运行"}`, tok ? `${fmtTok(tok)} tokens` : "", `历时 ${fmtMin(Date.now() - t.createdAt)}`, t.branch ? `分支 \`${t.branch}\`` : ""].filter(Boolean);
   return [
-    `**${head} · #${t.id} ${t.title}**`,
+    `**${head} · ${t.title}**`,
     meta.join(" · "),
     "",
     t.status === "ready"
       ? "团队已经收工，这段对话不影响后面的事；要接着改直接说要改哪里。"
-      : `分支 \`${t.branch ?? "-"}\` 里的改动都还在。想继续就说「重试 #${t.id}」并说明要改什么。`,
+      : `分支 \`${t.branch ?? "-"}\` 里的改动都还在。想继续就说「再试一次」并说明要改什么。`,
   ].join("\n");
 }
 
@@ -306,14 +306,14 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
           if (await cardsOf().loopTurn(f, cardId, t.id, n.round, n.text)) return;
         }
         if (cardId && await f.replyInThread(cardId, n.text)) return;
-        await f.sendMarkdown(t.chatId, `**#${t.id}** ${n.text}`);
+        await f.sendMarkdown(t.chatId, `**${t.title}**\n\n${n.text}`);
         return;
       }
       await refreshCard(t, true);
       await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
       const tail = n.kind === "decision" && t.kind !== "loop" && !n.text.includes("你可以回复") ? `\n\n要重试就直接说「再试一次」，可以顺带补充要改的地方；不需要了就说「放弃」。` : "";
-      await f.sendMarkdown(t.chatId, `**${head} · #${t.id} ${t.title}**\n\n${n.text}${tail}`);
+      await f.sendMarkdown(t.chatId, `**${head} · ${t.title}**\n\n${n.text}${tail}`);
     },
     loop: {
       watchBot: (t) => {
@@ -369,7 +369,7 @@ export function activeTaskSummary(chatId: string): string | undefined {
   if (!orc) return undefined;
   const ts = orc.store.listTasks({ chatId, status: ["queued", "running", "waiting", "waiting_children", "blocked"], limit: 5 });
   if (!ts.length) return undefined;
-  return "【本群后台 orc 任务】\n" + ts.map((t) => `- #${t.id} [${t.status}] ${t.title}：${t.progress}`).join("\n");
+  return "【本群后台 orc 任务】\n" + ts.map((t) => `- ${t.title} [${t.status}]：${t.progress}`).join("\n") + "\n（跟用户提这些任务时用标题，不要写编号）";
 }
 
 /** What the router needs about this chat: recent tasks (+ open questions) and a pending proposal */
@@ -434,13 +434,14 @@ export function buildLeadPrompt(c: {
     : `本群是${MODE_LABEL[mode]}模式：这条消息转给你，是因为它看起来和团队任务有关（${c.routeWhy || "规则命中"}）。如果其实只是普通对话、问答，或一个 agent 一轮就能做完的事，用 chat 交回给单 agent。`;
   return [
     "你是本群的 orc 主 agent，只负责**理解意图并选择动作**，不亲自写代码、不改文件。",
+    "群里一律用任务标题指代任务，不要写 #编号（编号只用于动作 JSON 里的 task 字段，用户看不到也不用看）。",
     modeLine,
     `当前编排：${c.presetLine}`,
     `可选组合：${c.presets.join(" / ")}（loop = 监督循环：监督者反复下指令、取证、汇报，适合要反复试错、长时间实验、目标可能随讨论调整的任务）；角色库：${c.roles.join(" / ")}`,
     `本群任务：\n${tasks}`,
     c.pending ? `待用户确认的提议：${c.pending}` : "",
     c.history ? `最近对话：\n${c.history}` : "",
-    c.threadTask ? `（这条消息是在任务 #${c.threadTask} 卡片的回复串里发的，多半是对这个任务说的）` : "",
+    c.threadTask ? `（这条消息是在「${c.tasks.find((t) => t.id === c.threadTask)?.title ?? "某个任务"}」卡片的回复串里发的，多半是对这个任务说的）` : "",
     `用户消息：\n${c.userText}`,
     "",
     "从下列动作中选**一个**，只输出一个 JSON 对象（不要别的文字）：",
@@ -457,7 +458,7 @@ export function buildLeadPrompt(c: {
     '- {"action":"remember","items":["一句话"]} / {"action":"forget","ids":[3]}  —— 用户要你记住/忘掉本群的背景信息、偏好（软信息，编号见【本群记忆】）；分不清是规则还是记忆时，用 remember',
     '- {"action":"mode","mode":"auto|single|orc"}  —— 用户要切换本群的工作方式：auto=自动判断（默认）；single=只用单 agent；orc=所有消息先经过你、干活都交给团队',
     '- {"action":"chat"}  —— 把这条消息原样交给本群的单 agent（它能读写工作区、续接本群对话）：普通问答、讨论、一轮就能做完的改动或查询',
-    '- {"action":"reply","text":"直接回答"}  —— 问任务进展、关于编排的简单问题，或意图不清时向用户澄清（宁可问，不要猜）。进展用人话写一两句（上下文「本群任务」里已有编号、标题和最近进展），不要复述卡片模板，也不要叫代码再发一遍任务卡',
+    '- {"action":"reply","text":"直接回答"}  —— 问任务进展、关于编排的简单问题，或意图不清时向用户澄清（宁可问，不要猜）。进展用人话写一两句（上下文「本群任务」里已有标题和最近进展），提任务就用标题，不要写编号；不要复述卡片模板，也不要叫代码再发一遍任务卡',
   ].filter(Boolean).join("\n");
 }
 

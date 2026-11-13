@@ -561,9 +561,9 @@ export function buildWorkerPrompt(l: Ledger, text: string, o: { taskId: number; 
   out.push(`## 角色说明\n${o.rolePrompt}`);
   out.push([
     "## 长时间作业",
-    "需要跑很久的程序（训练、批处理、超过几分钟的脚本）不要在前台等：用 `setsid nohup <命令> > <日志> 2>&1 < /dev/null & echo $!` 在后台启动，确认已经开始输出后就结束本轮，在 JSON 的 job 里报告 pid 和日志路径，监督者会负责等待。",
+    "需要跑很久的程序（训练、批处理、超过几分钟的脚本）不要在前台等：用 `setsid nohup <命令> > <日志> 2>&1 < /dev/null & echo $!` 在后台启动，确认已经开始输出后就结束本轮，并写一行 `[[note]] 后台作业 pid=… 日志=…`，监督者会负责等待。",
   ].join("\n"));
-  out.push(`## 输出约定（必须遵守）\n最后一条回复以一个 JSON 对象结尾：\n{"status":"done" | "blocked","summary":"做了什么、怎么验证的、还有什么问题","job":{"pid":123,"log":"out/x.log"},"notes":["值得记住的发现"]}\n- job 只在启动了后台作业时填写；只有缺信息、缺权限、需要人做决定时才用 "blocked"。`);
+  out.push(`## 输出约定（必须遵守）\n最后**单独一行**写结论（这是唯一判定依据，不要放进代码块）：\n[[done]] 做了什么、怎么验证的\n或\n[[blocked]] 卡在哪、需要人做什么\n- 想留笔记（含后台作业的 pid / 日志）就单独写 [[note]] 一句话，可以写多行。\n- 只有缺信息、缺权限、需要人做决定时才用 [[blocked]]。`);
   return out.join("\n\n");
 }
 
@@ -577,6 +577,6 @@ export function buildReviewPrompt(l: Ledger, o: { taskId: number; rolePrompt: st
     `## 相对基线的改动\n提交：\n\`\`\`\n${o.diff.log || "(无提交)"}\n\`\`\`\n统计：\n\`\`\`\n${o.diff.stat || "(无改动)"}\n\`\`\``,
     o.diff.diff ? `\`\`\`diff\n${o.diff.diff}\n\`\`\`` : "",
     `## 角色说明\n${o.rolePrompt}`,
-    `## 输出约定（必须遵守）\n最后一条回复以一个 JSON 对象结尾：\n${o.contract}`,
+    `## 输出约定（必须遵守）\n最后一条回复要给出结论：\n${o.contract}`,
   ].filter(Boolean).join("\n\n");
 }

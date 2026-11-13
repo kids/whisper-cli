@@ -5,7 +5,7 @@
 // return the task patch + effects to persist in the same transaction (001 §4.5:
 // record first, execute after commit). Easy to test with plain objects.
 // =============================================================================
-import { formatFeedback, type ParsedOutput, type PlanSubtask } from "./output";
+import { conclusionHint, formatFeedback, type ParsedOutput, type PlanSubtask } from "./output";
 import type { LaunchPayload, NotifyPayload, StageDef, Task, TaskStatus } from "./types";
 import { TERMINAL } from "./types";
 
@@ -108,11 +108,12 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     const k = `parse:${stage.id}`;
     if ((loops[k] ?? 0) < AUTO_RETRY) {
       bump(k);
+      const kind = task.preset.roles[stage.role]?.output;
       d.patch = { loops, progress: `${stage.id} 输出格式不符，要求补交结论` };
       d.launches.push({
         taskId: task.id,
         stageIdx: task.stageIdx,
-        note: `你上一次的回复不符合输出约定（${outcome.error}）。不要重做工作，直接按约定补交最终 JSON。`,
+        note: `你上一次的回复不符合输出约定（${outcome.error}）。不要重做工作，直接补交最终结论：${kind ? conclusionHint(kind) : "按约定给结论"}。`,
       });
       return d;
     }
@@ -171,10 +172,7 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
 
   // only advisory-level issues left → the task's own bar says that is a pass
   if (!now.major.length && p.kind === "verdict") {
-    return carry(`【${stageName(stage.id)}的建议（不阻塞）】\n${formatFeedback(stage.id, { ...p, value: { ...p.value, issues: now.minor } }).replace(/^【[^】]*未通过】[^\n]*\n?/, "")}`, task.stageIdx + 1);
-  }
-  if (p.kind === "test" && now.major.length === 0 && p.pass === false && (p.value?.cases ?? []).length === 0) {
-    return carry(`【${stageName(stage.id)}未给出可复现的失败用例】`, task.stageIdx + 1);
+    return carry(`【${stageName(stage.id)}的建议（不阻塞）】\n${formatFeedback(stage.id, p, p.issues?.filter((it) => it.severity === "minor")).replace(/^【[^】]*未通过】[^\n]*\n?/, "")}`, task.stageIdx + 1);
   }
 
   const used = bump(stage.id);
@@ -206,20 +204,9 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
 /** normalize issues to comparable keys (file may move lines between rounds; description is the identity) */
 export function issueKeys(p: ParsedOutput): { major: string[]; minor: string[] } {
   const out = { major: [] as string[], minor: [] as string[] };
-  if (p.kind === "verdict") {
-    for (const it of (p.value?.issues ?? []) as any[]) {
-      const key = typeof it === "string"
-        ? norm(it)
-        : norm(`${(it.file ?? "").split("/").pop() ?? ""} ${it.desc ?? it.description ?? it.issue ?? it.text ?? ""}`);
-      const hard = typeof it === "string" ? true : /blocker|major|critical|high|严重/i.test(String(it.severity ?? ""));
-      (hard ? out.major : out.minor).push(key);
-    }
-  }
-  if (p.kind === "test") {
-    for (const c of (p.value?.cases ?? []) as any[]) {
-      if (!c || c.result === "pass" || c.pass === true) continue;
-      out.major.push(norm(`${c.name ?? c.case ?? "case"} ${c.detail ?? c.error ?? ""}`));
-    }
+  for (const it of p.issues ?? []) {
+    const key = norm(`${(it.file ?? "").split("/").pop() ?? ""} ${it.desc}`);
+    (it.severity === "major" ? out.major : out.minor).push(key);
   }
   return out;
 }
@@ -238,21 +225,21 @@ export function decideParent(parent: Task, children: Task[]): Decision | null {
   const blocked = children.filter((c) => c.status === "blocked");
   if (blocked.length) {
     const waiting = children.filter((c) => c.status !== "ready" && c.status !== "blocked" && c.progress.startsWith("跳过"));
-    d.patch = { status: "waiting_children", progress: `等你决定 ${blocked.map((c) => `#${c.id}`).join("、")}${waiting.length ? `（${waiting.map((c) => `#${c.id}`).join("、")} 在等它）` : ""}` };
+    d.patch = { status: "waiting_children", progress: `等你决定 ${blocked.map((c) => c.title).join("、")}${waiting.length ? `（${waiting.map((c) => c.title).join("、")} 在等它）` : ""}` };
     return d;
   }
   const bad = children.filter((c) => c.status !== "ready");
   if (bad.length) {
     const ok = children.filter((c) => c.status === "ready");
     const why = [
-      `没有全部完成：${bad.map((c) => `#${c.id} ${c.title}（${c.status === "dropped" ? (c.progress.startsWith("跳过") ? "因前置任务没完成而跳过" : "已终止") : "已放弃"}）`).join("；")}`,
-      ok.length ? `已完成：${ok.map((c) => `#${c.id} ${c.title} → \`${c.branch}\``).join("；")}` : "",
+      `没有全部完成：${bad.map((c) => `${c.title}（${c.status === "dropped" ? (c.progress.startsWith("跳过") ? "因前置任务没完成而跳过" : "已终止") : "已放弃"}）`).join("；")}`,
+      ok.length ? `已完成：${ok.map((c) => `${c.title} → \`${c.branch}\``).join("；")}` : "",
     ].filter(Boolean).join("\n");
     d.patch = { status: "failed", progress: `子任务没有全部完成（${ok.length}/${children.length}）` };
     d.notifies.push({ taskId: parent.id, kind: "info", text: why });
     return d;
   }
-  const text = `全部 ${children.length} 个子任务已通过：\n` + children.map((c) => `- #${c.id} ${c.title} → \`${c.branch}\``).join("\n");
+  const text = `全部 ${children.length} 个子任务已通过：\n` + children.map((c) => `- ${c.title} → \`${c.branch}\``).join("\n");
   d.patch = { status: "ready", stageIdx: parent.preset.stages.length, progress: "子任务全部通过" };
   d.notifies.push({ taskId: parent.id, kind: "ready", text });
   return d;
@@ -264,7 +251,7 @@ export function decideParent(parent: Task, children: Task[]): Decision | null {
  */
 export function depsGate(deps: Task[]): "go" | "wait" | string {
   const bad = deps.find((t) => t.status === "failed" || t.status === "dropped");
-  if (bad) return `跳过：前置任务 #${bad.id} ${bad.status === "dropped" ? "已终止" : "已放弃"}`;
+  if (bad) return `跳过：前置任务 ${bad.title} ${bad.status === "dropped" ? "已终止" : "已放弃"}`;
   return deps.every((t) => t.status === "ready") ? "go" : "wait";
 }
 

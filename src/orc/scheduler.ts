@@ -117,7 +117,7 @@ export class Orchestrator {
     const loops = { ...task.loops };
     for (const k of Object.keys(loops)) if (k === stage.id || k.endsWith(`:${stage.id}`)) delete loops[k];
     this.store.tx(() => {
-      if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务 #${taskId} 重试中` });
+      if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务「${task.title}」重试中` });
       this.store.updateTask(taskId, { status: "running", loops, stageIdx: task.preset.stages.indexOf(stage), progress: "人工重试" });
       this.store.addEffect("launch", { taskId, stageIdx: task.preset.stages.indexOf(stage), note } satisfies LaunchPayload);
     });
@@ -130,7 +130,7 @@ export class Orchestrator {
     const d = task && decideAccept(task, note);
     if (!task || !d) return false;
     this.store.tx(() => {
-      if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务 #${taskId} 已接受，继续` });
+      if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务「${task.title}」已接受，继续` });
       this.applyDecision(task, d);
     });
     this.emitProgress(taskId);
@@ -422,9 +422,6 @@ export class Orchestrator {
     if (parsed?.notes?.length) {
       appendFileSync(this.notesPath(task), parsed.notes.map((x: string) => `- [#${task.id} ${stage.id}/${role.name}] ${x}`).join("\n") + "\n");
     }
-    if (role.output === "test" && parsed?.value?.cases?.length) {
-      appendFileSync(resolve(artifactDir, "cases.jsonl"), parsed.value.cases.map((c: any) => JSON.stringify({ attempt: attempt.id, ...c })).join("\n") + "\n");
-    }
     this.emitProgress(task.id);
     if (brief) await this.writeBrief(task.id, brief);
   }
@@ -477,7 +474,7 @@ export class Orchestrator {
       const why = last?.parsed?.summary || "评审连续没过";
       this.store.tx(() => this.applyDecision(this.store.getTask(taskId)!, {
         patch: { status: "blocked", progress: `决策说明没写成：${why.slice(0, 100)}` }, launches: [], children: [],
-        notifies: [{ taskId, kind: "decision", text: `**#${taskId} ${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（决策说明没能生成：${res.error || "输出不合约定"}。可以直接说「再试一次」「接受这版」或「放弃」。）` }],
+        notifies: [{ taskId, kind: "decision", text: `**${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（决策说明没能生成：${res.error || "输出不合约定"}。可以直接说「再试一次」「接受这版」或「放弃」。）` }],
       }));
       this.emitProgress(taskId);
       return;
@@ -516,7 +513,7 @@ export class Orchestrator {
         const parent = this.store.getTask(task.parentId);
         const sibs = this.store.listTasks({ parentId: task.parentId }).filter((c) => c.id !== task.id && c.status !== "ready" && !["failed", "dropped"].includes(c.status));
         const held = sibs.filter((c) => dependsOn(c, task.id, sibs));
-        if (parent) n.text += `\n\n这是 #${parent.id}「${parent.title}」的子任务${held.length ? `；${held.map((c) => `#${c.id} ${c.title}`).join("、")} 要等它定下来才会开始` : ""}。`;
+        if (parent) n.text += `\n\n这是「${parent.title}」的子任务${held.length ? `；${held.map((c) => c.title).join("、")} 要等它定下来才会开始` : ""}。`;
       }
       this.store.addEffect("notify", n);
     }
@@ -534,7 +531,7 @@ export class Orchestrator {
       }
       this.store.addEffect("notify", {
         taskId: task.id, kind: "info",
-        text: `已拆成 ${ids.length} 个子任务：\n` + d.children.map((c, i) => `- #${ids[i]} ${c.title}${c.deps.length ? `（依赖 ${c.deps.map((x) => "#" + ids[x]).join(",")}）` : ""}`).join("\n"),
+        text: `已拆成 ${ids.length} 个子任务：\n` + d.children.map((c) => `- ${c.title}${c.deps.length ? `（依赖 ${c.deps.map((x) => d.children[x].title).join("、")}）` : ""}`).join("\n"),
       } satisfies NotifyPayload);
     }
 
@@ -545,7 +542,7 @@ export class Orchestrator {
       if (parent && parent.status === "waiting_children") {
         const pd = decideParent(parent, this.store.listTasks({ parentId: parent.id }));
         if (pd) this.applyDecision(parent, pd);
-        else if (after.status === "blocked") this.store.updateTask(parent.id, { progress: `等你决定 #${after.id}（${after.title}）` });
+        else if (after.status === "blocked") this.store.updateTask(parent.id, { progress: `等你决定 ${after.title}` });
         if (pd || after.status === "blocked") this.emitProgress(parent.id);
       }
     }

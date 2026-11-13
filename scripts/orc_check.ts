@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { applyPatch, fallbackNote, loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
 import { acceptable, decideAccept, decideAfterAttempt, decideParent, depsGate } from "../src/orc/core";
 import { knownIssues, renderAutoNote, renderBrief } from "../src/orc/brief";
-import { findJsonObjects, parseRoleOutput } from "../src/orc/output";
+import { findJsonObjects, formatFeedback, parseRoleOutput } from "../src/orc/output";
 import type { Executor, RunRequest, RunResult } from "../src/orc/runner";
 import { classifyResult, eventToProgress } from "../src/orc/runner";
 import { Orchestrator } from "../src/orc/scheduler";
@@ -27,18 +27,27 @@ function throws(fn: () => unknown, re: RegExp): boolean {
 
 // ---- output parser ----------------------------------------------------------
 {
-  const t = 'blah {"x":1} more\n```json\n{"verdict":"revise","issues":[{"severity":"major","desc":"a}b"}],"summary":"s"}\n```\ntrailing';
+  const t = 'blah {"x":1} more\n```json\n{"verdict":"revise"}\n```\ntrailing';
   check("findJsonObjects string-aware", findJsonObjects(t).length === 2);
-  const p: any = parseRoleOutput("verdict", t);
-  check("verdict parse", p.pass === false && p.value.issues[0].desc === "a}b", p);
-  check("verdict last wins", (parseRoleOutput("verdict", '{"verdict":"revise"} {"verdict":"approve"}') as any).pass === true);
-  check("missing key", "error" in parseRoleOutput("test", '{"summary":"x"}'));
-  check("bad enum", "error" in parseRoleOutput("verdict", '{"verdict":"lgtm"}'));
-  check("test bool", (parseRoleOutput("test", '{"pass":false,"cases":[]}') as any).pass === false);
-  check("test non-bool", "error" in parseRoleOutput("test", '{"pass":"yes"}'));
+  // judgment stages: one conclusion line + prose; only plan/brief/action still use JSON
+  const v: any = parseRoleOutput("verdict", "看完了\n[[revise]] 归一化丢了方向\n[[major]] src/extract/normalize.py:88 sign() 归一化丢了方向\n[[minor]] 命名\n[[note]] 已确认修复：测试全绿");
+  check("verdict: conclusion line + issue lines", v.pass === false && v.issues.length === 2 && v.issues[0].file === "src/extract/normalize.py" && v.issues[0].line === 88, v);
+  check("verdict: notes + prose body", v.notes[0] === "已确认修复：测试全绿" && v.body === "看完了", v);
+  check("conclusion last wins", (parseRoleOutput("verdict", "[[revise]] 甲\n[[approve]] 乙") as any).pass === true);
+  check("unknown marker is not a conclusion", "error" in parseRoleOutput("verdict", "[[lgtm]] 甲"));
+  check("no conclusion line → error", "error" in parseRoleOutput("impl", "改完了，没问题"));
+  const implBlocked: any = parseRoleOutput("impl", "缺凭据，跑不起来\n[[blocked]] 需要 API key");
+  check("impl: [[blocked]]", implBlocked.pass === false && implBlocked.summary === "需要 API key", implBlocked);
+  check("impl: code sample cannot hijack the verdict", (parseRoleOutput("impl", '接口样例：{"status":"ok"}\n\n[[done]] 加了幂等校验') as any).pass === true);
+  check("test: [[fail]]", (parseRoleOutput("test", "用例 3 挂了\n[[fail]] 边界用例 3 没通过") as any).pass === false);
+  check("report: [[report]] is always a pass", (parseRoleOutput("report", "正文\n[[report]] 结论") as any).pass === true);
+  const tFail: any = parseRoleOutput("test", "跑了 pytest，用例 3 挂了\n[[fail]] 边界用例 3 没通过");
+  check("feedback falls back to the prose body", /用例 3 挂了/.test(formatFeedback("test", tFail)), formatFeedback("test", tFail));
+  check("feedback lists issue lines", /src\/extract\/normalize\.py:88/.test(formatFeedback("review", v)), formatFeedback("review", v));
   const plan: any = parseRoleOutput("plan", '{"spec":"S","subtasks":[{"title":"a","deps":[1]},{"title":"b","deps":[0,0,5]}]}');
   check("plan deps sanitized", JSON.stringify(plan.subtasks.map((s: any) => s.deps)) === "[[],[0]]", plan.subtasks);
-  check("impl blocked", (parseRoleOutput("impl", '{"status":"BLOCKED","summary":"need key"}') as any).pass === false);
+  check("plan still needs JSON", "error" in parseRoleOutput("plan", "[[done]] 拆好了"));
+  check("brief still needs JSON", "error" in parseRoleOutput("brief", "[[done]] 写完了"));
   check("classify timeout", classifyResult("⏱️ 任务超过 30 分钟").timedOut);
   check("classify cancel", classifyResult("🛑 任务已被用户终止。").cancelled);
   check("progress from cb tool_use", eventToProgress({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } }) === "Bash: npm test");
@@ -85,21 +94,23 @@ const mkTask = (over: Partial<Task> = {}): Task => ({
   preset: devPreset, stageIdx: 0, status: "running", loops: {}, deps: [], feedback: "", inbox: [], chatId: null,
   progress: "", createdAt: 0, updatedAt: 0, ...over,
 });
+const issuesText = (summary: string, issues: any[]) =>
+  `[[revise]] ${summary}\n` + issues.map((i) => `[[${i.severity === "minor" ? "minor" : "major"}]] ${i.file ?? "-"}:${i.line ?? 1} ${i.desc}`).join("\n");
 const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: parseRoleOutput(kind, text) as any });
 {
   const idx = (id: string) => devPreset.stages.findIndex((s) => s.id === id);
   let d = decideAfterAttempt(mkTask(), parsed("plan", '{"spec":"S","subtasks":[]}'));
   check("plan → impl", d.patch.stageIdx === idx("impl") && d.patch.spec === "S" && d.launches[0].stageIdx === idx("impl"));
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", '{"verdict":"revise","issues":["x"],"summary":"bad"}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", "[[revise]] bad\n[[major]] x"));
   check("revise → back to impl with feedback", d.patch.stageIdx === idx("impl") && d.patch.loops!.review === 1 && /review 未通过/.test(d.patch.feedback!) && /- x/.test(d.patch.feedback!));
   // round count alone no longer stops it; the cap is a runaway guard
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 5 } }), parsed("verdict", '{"verdict":"revise","issues":["x"]}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 5 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"));
   check("still reworks below the cap when nothing new appears", d.patch.stageIdx === idx("impl") && !d.brief, d);
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", '{"verdict":"revise","issues":["x"]}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"));
   check("cap reached → escalate", d.brief?.mode === "escalate" && d.brief.rounds === 7, d.brief);
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), feedback: "【review 未通过】x" }), parsed("verdict", '{"verdict":"approve"}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), feedback: "【review 未通过】x" }), parsed("verdict", "[[approve]] 可以"));
   check("approve clears own feedback", d.patch.feedback === "" && d.patch.stageIdx === idx("test"));
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("test") }), parsed("test", '{"pass":true,"cases":[]}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("test") }), parsed("test", "[[pass]] 全绿"));
   check("last stage pass → ready", d.patch.status === "ready" && d.notifies[0].kind === "ready");
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), { kind: "unparseable", error: "no json" });
   check("unparseable → one retry with note", d.launches.length === 1 && /补交/.test(d.launches[0].note!));
@@ -107,46 +118,46 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("unparseable twice → blocked", d.patch.status === "blocked");
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), { kind: "run_error", error: "x", timedOut: true });
   check("timeout → retry with split hint", /拆小步骤/.test(d.launches[0]?.note ?? ""));
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), parsed("impl", '{"status":"blocked","summary":"need creds"}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), parsed("impl", "[[blocked]] need creds"));
   check("impl blocked → decision", d.patch.status === "blocked" && /need creds/.test(d.notifies[0].text));
   d = decideAfterAttempt(mkTask(), parsed("plan", '{"spec":"S","subtasks":[{"title":"a"},{"title":"b","deps":[0]}]}'));
   check("plan split → waiting_children", d.patch.status === "waiting_children" && d.children.length === 2);
   const rv = resolvePreset(presets.get("review")!, roles);
-  d = decideAfterAttempt(mkTask({ preset: rv, stageIdx: 0 }), parsed("verdict", '{"verdict":"revise","summary":"meh"}'));
+  d = decideAfterAttempt(mkTask({ preset: rv, stageIdx: 0 }), parsed("verdict", "[[revise]] meh"));
   check("advisory verdict does not gate", d.patch.stageIdx === 1 && d.patch.status === "running");
   const kids = [mkTask({ id: 2, status: "ready", branch: "orc/task-2" }), mkTask({ id: 3, status: "running" })];
   check("parent waits", decideParent(mkTask(), kids) === null);
   kids[1].status = "blocked";
   const pw = decideParent(mkTask(), kids);
-  check("child blocked → parent keeps waiting, no message", pw?.patch.status === "waiting_children" && pw.notifies.length === 0 && /等你决定 #3/.test(pw.patch.progress!), pw);
+  check("child blocked → parent keeps waiting, no message", pw?.patch.status === "waiting_children" && pw.notifies.length === 0 && /等你决定 t/.test(pw.patch.progress!), pw);
   kids[1].status = "failed";
-  const pf = decideParent(mkTask(), [...kids, mkTask({ id: 4, status: "dropped", progress: "跳过：前置任务 #3 已放弃" })]);
-  check("children settled, some not ready → one info summary", pf?.patch.status === "failed" && pf.notifies.length === 1 && pf.notifies[0].kind === "info" && /#4 t（因前置任务没完成而跳过）/.test(pf.notifies[0].text) && /已完成：#2/.test(pf.notifies[0].text), pf?.notifies[0]?.text);
+  const pf = decideParent(mkTask(), [...kids, mkTask({ id: 4, status: "dropped", progress: "跳过：前置任务 t 已放弃" })]);
+  check("children settled, some not ready → one info summary", pf?.patch.status === "failed" && pf.notifies.length === 1 && pf.notifies[0].kind === "info" && /t（因前置任务没完成而跳过）/.test(pf.notifies[0].text) && /已完成：t/.test(pf.notifies[0].text), pf?.notifies[0]?.text);
 
   // deps gate: a blocked dependency (waiting for a human) keeps dependents waiting
   check("deps: blocked dep → wait", depsGate([mkTask({ id: 3, status: "blocked" })]) === "wait");
   check("deps: running dep → wait", depsGate([mkTask({ id: 3, status: "running" })]) === "wait");
-  check("deps: failed dep → skip", depsGate([mkTask({ id: 3, status: "failed" })]) === "跳过：前置任务 #3 已放弃");
+  check("deps: failed dep → skip", depsGate([mkTask({ id: 3, status: "failed" })]) === "跳过：前置任务 t 已放弃");
   check("deps: all ready → go", depsGate([mkTask({ id: 3, status: "ready" })]) === "go");
 
   // review budget used up → a message that says what to decide
   // budget used up → ask the advisor for a 决策说明 instead of a canned line
-  const verdictJson = JSON.stringify({
-    verdict: "revise", summary: "测试全绿，但归一化会把相反的事实合并",
-    issues: [{ severity: "major", file: "src/extract/normalize.py", line: 88, desc: "sign() 归一化丢了方向", impact: "「利润增长 5%」和「利润下降 5%」会被当成同一条事实合并" }],
-    notes: ["已确认修复：测试 107 个全绿"],
-  });
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 3 }, branch: "orc/task-3" }), parsed("verdict", verdictJson));
+  const verdictText = [
+    "[[revise]] 测试全绿，但归一化会把相反的事实合并",
+    "[[major]] src/extract/normalize.py:88 sign() 归一化丢了方向（「利润增长 5%」和「利润下降 5%」会被当成同一条事实合并）",
+    "[[note]] 已确认修复：测试 107 个全绿",
+  ].join("\n");
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 3 }, branch: "orc/task-3" }), parsed("verdict", verdictText));
   check("first failure without history reworks", d.patch.stageIdx === idx("impl") && !d.brief, d.patch);
   // new problems appear each round → arbitrate instead of another blind round
-  const sameBar = (issues: any[]) => parsed("verdict", JSON.stringify({ verdict: "revise", summary: "又有新问题", issues }));
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), bar: "探索性分析，只拦会让结论错的问题" }), sameBar([{ severity: "major", file: "a.py", desc: "问题甲" }]), { prev: parseRoleOutput("verdict", JSON.stringify({ verdict: "revise", issues: [{ severity: "major", file: "b.py", desc: "问题乙" }] })) as any });
+  const sameBar = (issues: any[]) => parsed("verdict", issuesText("又有新问题", issues));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), bar: "探索性分析，只拦会让结论错的问题" }), sameBar([{ severity: "major", file: "a.py", desc: "问题甲" }]), { prev: parseRoleOutput("verdict", issuesText("上一轮", [{ severity: "major", file: "b.py", desc: "问题乙" }])) as any });
   check("new problems each round → arbitrate (not another round)", d.brief?.mode === "arbitrate" && d.notifies.length === 0, d.brief);
   // same set (nothing new) → keep reworking
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), sameBar([{ severity: "major", file: "a.py", desc: "问题甲" }]), { prev: parseRoleOutput("verdict", JSON.stringify({ verdict: "revise", issues: [{ severity: "major", file: "a.py", line: 9, desc: "问题甲" }] })) as any });
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), sameBar([{ severity: "major", file: "a.py", desc: "问题甲" }]), { prev: parseRoleOutput("verdict", issuesText("上一轮", [{ severity: "major", file: "a.py", line: 9, desc: "问题甲" }])) as any });
   check("same problems, only moved → keep reworking", d.patch.stageIdx === idx("impl") && !d.brief && /问题从 1 条到 1 条/.test(d.patch.progress!), d.patch);
   // only advisory left → the task's own bar makes it a pass
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", '{"verdict":"revise","summary":"只剩建议","issues":[{"severity":"minor","desc":"命名"}]}'));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", "[[revise]] 只剩建议\n[[minor]] 命名"));
   check("only minor left → carry on, no block", d.patch.stageIdx === idx("test") && d.notifies[0].kind === "info" && /按口径继续/.test(d.notifies[0].text) && /建议/.test(d.patch.feedback!), d);
 
   const brief = parseRoleOutput("brief", JSON.stringify({
@@ -162,7 +173,7 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
     auto: "none", known_issues: [],
   })) as any;
   const briefText = renderBrief(mkTask({ id: 3, title: "分布预测可行性", branch: "orc/task-3" }), brief, "评审");
-  check("brief: header names the task and the stage", briefText.startsWith("**#3 分布预测可行性：评审反复没过，需要你定一件事**"), briefText);
+  check("brief: header names the task and the stage", briefText.startsWith("**分布预测可行性：评审反复没过，需要你定一件事**"), briefText);
   check("brief: situation + what is done / not done", briefText.includes("在做分布预测") && /已经做到：\n- 107 个测试全绿/.test(briefText) && briefText.includes("还没做到："));
   check("brief: blocker with why and evidence", /1\. 归一化丢方向\n   原因：当前特征设计/.test(briefText) && briefText.includes("依据：src/extract/normalize.py:88"));
   check("brief: real options with cost/risk/undo", /1\. \*\*补 baseline\*\*（建议）：/.test(briefText) && briefText.includes("代价：约 2 天") && briefText.includes("风险：结论可能整个回到不可行") && briefText.includes("补救：能补救"));
@@ -229,23 +240,23 @@ class FakeExec implements Executor {
         writeFileSync(join(req.cwd, "pkg", "__pycache__", "m.cpython-312.pyc"), "bin");
         const f = join(req.cwd, `feature-${taskId}.txt`);
         writeFileSync(f, (existsSync(f) ? readFileSync(f, "utf8") : "") + "x\n");
-        return this.ok('{"status":"done","summary":"wrote feature"}', `sess-impl-${taskId}`);
+        return this.ok("[[done]] wrote feature", `sess-impl-${taskId}`);
       }
       if (role === "critic") {
         const n = (this.criticCalls.get(taskId) ?? 0) + 1;
         this.criticCalls.set(taskId, n);
         if (this.alwaysRevise.has(taskId)) {
-          return this.ok('{"verdict":"revise","issues":[{"severity":"major","file":"feature.txt","desc":"still wrong","impact":"结果会算错"}],"summary":"还不行"}');
+          return this.ok('[[revise]] 还不行\n[[major]] feature.txt:1 still wrong（结果会算错）');
         }
         if (n === 1) {
           writeFileSync(join(req.cwd, "critic-was-here.txt"), "oops");
-          return this.ok('{"verdict":"revise","issues":[{"severity":"major","file":"feature.txt","desc":"needs two lines"}],"summary":"too short"}');
+          return this.ok('[[revise]] too short\n[[major]] feature.txt:1 needs two lines');
         }
-        return this.ok('{"verdict":"approve","issues":[],"summary":"lgtm"}');
+        return this.ok('[[approve]] lgtm');
       }
       if (role === "tester") {
         writeFileSync(join(req.cwd, `test-${taskId}.txt`), "case");
-        return this.ok('{"pass":true,"cases":[{"name":"exists","cmd":"cat","result":"pass"}],"summary":"all good"}');
+        return this.ok('[[pass]] all good');
       }
       return this.ok('{"summary":"report"}');
     } finally {
@@ -342,9 +353,9 @@ async function e2e() {
     for (let i = 0; i < 60; i++) { await tick(); await sleep(5); }
     const decisions = notes.filter((n) => n.kind === "decision");
     check("F one decision message, for the stuck child only", decisions.length === 1 && decisions[0].taskId === 2, notes.map((n) => `${n.taskId}:${n.kind}`));
-    check("F decision says what is held up", /这是 #1「big」的子任务；#3 part B 要等它定下来才会开始/.test(decisions[0]?.text ?? ""), decisions[0]?.text);
+    check("F decision says what is held up", /这是「big」的子任务；part B 要等它定下来才会开始/.test(decisions[0]?.text ?? ""), decisions[0]?.text);
     check("F dependent keeps waiting (not blocked / dropped)", store.getTask(3)!.status === "queued" && !store.listAttempts(3).length, store.getTask(3));
-    check("F parent keeps waiting", store.getTask(t.id)!.status === "waiting_children" && /等你决定 #2/.test(store.getTask(t.id)!.progress), store.getTask(t.id));
+    check("F parent keeps waiting", store.getTask(t.id)!.status === "waiting_children" && /等你决定 part A/.test(store.getTask(t.id)!.progress), store.getTask(t.id));
     exec.alwaysRevise.delete(2);
     check("F accept", orc.accept(2, "先这样"));
     await orc.runUntilIdle(5);
@@ -364,7 +375,7 @@ async function e2e() {
     for (let i = 0; i < 3000 && store.getTask(2)?.status !== "blocked"; i++) { await tick(); await sleep(5); }
     orc.stop(2);
     await orc.runUntilIdle(5);
-    check("G dependent skipped", store.getTask(3)!.status === "dropped" && /跳过：前置任务 #2 已终止/.test(store.getTask(3)!.progress), store.getTask(3));
+    check("G dependent skipped", store.getTask(3)!.status === "dropped" && /跳过：前置任务 part A 已终止/.test(store.getTask(3)!.progress), store.getTask(3));
     const parentNotes = notes.filter((n) => n.taskId === t.id && n.kind !== "info" || (n.taskId === t.id && /没有全部完成/.test(n.text)));
     check("G parent failed with one info summary", store.getTask(t.id)!.status === "failed" && parentNotes.length === 1 && parentNotes[0].kind === "info", parentNotes);
     check("G no extra decision messages", notes.filter((n) => n.kind === "decision").length === 1);

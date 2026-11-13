@@ -30,7 +30,7 @@ export interface BriefValue {
 export function renderBrief(task: Task, p: ParsedOutput, stageName: string): string {
   const v = (p.value ?? {}) as BriefValue;
   const out: string[] = [];
-  const head = `**#${task.id} ${task.title}：${stageName}反复没过，需要你定一件事**`;
+  const head = `**${task.title}：${stageName}反复没过，需要你定一件事**`;
   out.push(head);
   if (v.situation) out.push("", cut(v.situation, 400));
 
@@ -73,7 +73,7 @@ export function renderBrief(task: Task, p: ParsedOutput, stageName: string): str
 export function renderAutoNote(task: Task, p: ParsedOutput, kept: string[]): string {
   const v = (p.value ?? {}) as BriefValue;
   return [
-    `**#${task.id} ${task.title}：我先带着已知问题往下走了一步**`,
+    `**${task.title}：我先带着已知问题往下走了一步**`,
     v.situation ? `\n${cut(s(v.situation), 300)}` : "",
     kept.length ? "\n**暂不解决的（记为已知问题）**：\n" + kept.slice(0, 8).map((x) => `- ${cut(x, 220)}`).join("\n") : "",
     v.recommendation ? `\n**为什么这样处理**：${cut(s(v.recommendation), 300)}` : "",

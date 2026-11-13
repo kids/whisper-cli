@@ -168,17 +168,18 @@ export class LoopEngine {
   /** Answer the open question (option id and/or free text) */
   answer(taskId: number, option?: string, text?: string, raw?: string): string {
     const task = this.store.getTask(taskId);
-    if (!task || task.kind !== "loop") return `#${taskId} 不是监督循环任务`;
+    const name = task?.title ?? "这个任务";
+    if (!task || task.kind !== "loop") return `「${name}」不是监督循环任务`;
     const l = this.ledger(taskId)!;
     const ask = l.pendingAsk;
-    if (task.status !== "blocked" || !ask) return `#${taskId} 现在没有待回答的问题`;
+    if (task.status !== "blocked" || !ask) return `「${name}」现在没有待回答的问题`;
     if (option && !ask.options.some((o) => o.id === option)) return `没有选项「${option}」，可选：${ask.options.map((o) => `${o.id}) ${o.label}`).join("；")}`;
     if (!option && !text && !raw) return "请给出选项或你的想法";
     if (raw || text) L.noteHuman(l, (raw || text)!);
     const r = this.resolveAsk(task, l, option, text ? withRaw(text, raw) : raw, "human");
     this.commit(task, l, { status: r.status, progress: r.progress, notifies: r.notifies, next: r.status === "running" ? [{ reason: "human" }] : [] });
     const opt = ask.options.find((o) => o.id === option);
-    return r.status === "running" ? `✅ #${taskId} 收到${opt ? `「${opt.label}」` : "你的回复"}，继续推进` : `🛑 #${taskId} 已按你的选择停下`;
+    return r.status === "running" ? `✅ 「${name}」收到${opt ? `「${opt.label}」` : "你的回复"}，继续推进` : `🛑 「${name}」已按你的选择停下`;
   }
 
   /** Human retry of a blocked / failed / dropped loop task */
@@ -207,13 +208,13 @@ export class LoopEngine {
   /** Switch a running task's roles (CLI / model); the worker starts a fresh session next instruct */
   setRoles(taskId: number, edits: Record<string, { cli?: CliName; model?: string | null } | null>, available?: string[]): string {
     const task = this.store.getTask(taskId);
-    if (!task || task.kind !== "loop" || FINAL.includes(task.status)) throw new Error(`#${taskId} 不是进行中的监督循环任务`);
+    if (!task || task.kind !== "loop" || FINAL.includes(task.status)) throw new Error(`「${task?.title ?? "这个任务"}」不是进行中的监督循环任务`);
     const preset = structuredClone(task.preset);
     const lines: string[] = [];
     let workerChanged = false;
     for (const [name, e] of Object.entries(edits)) {
       const role = preset.roles[name];
-      if (!role || !e) throw new Error(`任务 #${taskId} 没有角色 "${name}"（有：${Object.keys(preset.roles).join(", ")}）`);
+      if (!role || !e) throw new Error(`「${task.title}」没有角色 "${name}"（有：${Object.keys(preset.roles).join(", ")}）`);
       const before = `${role.cli}${role.model ? ":" + role.model : ""}`;
       if (e.cli) {
         if (available && !available.includes(e.cli)) throw new Error(`cli "${e.cli}" 没有配置`);
@@ -423,16 +424,15 @@ export class LoopEngine {
         const p = parseRoleOutput("impl", res.text);
         const ok = !("error" in p);
         const summary = ok ? p.summary : clip(res.text.trim().slice(-1500), 1500) || "(无输出)";
-        const job = ok && p.value?.job && typeof p.value.job === "object" ? JSON.stringify(p.value.job) : "";
-        const status = ok ? String(p.value.status) : "未按约定输出 JSON";
+        const status = ok ? (p.pass ? "done" : "blocked") : "未按约定给结论";
         const head = res.interrupted ? "worker 被人打断（到目前为止的改动已提交）" : res.timedOut ? `worker 超时（${r.worker.hardTimeoutMin} 分钟内没完成；已提交部分改动）` : res.error ? `worker 运行出错：${clip(res.error, 300)}` : `worker 回报（${status}）`;
         const notes = ok && p.notes.length ? `\n笔记：${p.notes.map((x) => "- " + x).join("\n")}` : "";
         return {
           progress: `第 ${n} 轮 · worker：${clip(summary.replace(/\n+/g, " "), 80)}`,
-          obs: `指令：${clip(a.text, 400)}\n${head}：${summary}\n改动：${stat || "无"}${job ? `\n后台作业：${job}` : ""}${notes}`,
+          obs: `指令：${clip(a.text, 400)}\n${head}：${summary}\n改动：${stat || "无"}${notes}`,
           notifies: [],
           next: [{ reason: "next" }],
-          turn: `主 → 子：${clip(a.text, l.verbosity === "verbose" ? 2000 : 300)}\n子 → 主：${res.interrupted ? "（被打断）" : ""}${clip(summary, l.verbosity === "verbose" ? 2000 : 400)}${stat ? `\n改动：${stat}` : ""}${job ? `\n后台作业：\`${clip(job, 200)}\`` : ""}`,
+          turn: `主 → 子：${clip(a.text, l.verbosity === "verbose" ? 2000 : 300)}\n子 → 主：${res.interrupted ? "（被打断）" : ""}${clip(summary, l.verbosity === "verbose" ? 2000 : 400)}${stat ? `\n改动：${stat}` : ""}`,
         };
       }
       case "verify": {
@@ -486,12 +486,12 @@ export class LoopEngine {
         if (wt.isDirty(wtp)) violation = wt.resetHard(wtp);
         const p = parseRoleOutput("verdict", res.text);
         const ok = !("error" in p);
-        const issues = ok ? (p.value.issues as any[]).slice(0, 12).map((it) => typeof it === "string" ? `- ${it}` : `- [${it.severity ?? "issue"}] ${it.file ? it.file + (it.line ? ":" + it.line : "") + " " : ""}${it.desc ?? it.description ?? JSON.stringify(it)}`).join("\n") : "";
+        const issues = ok ? (p.issues ?? []).slice(0, 12).map((it) => `- [${it.severity}] ${it.file ? it.file + (it.line ? ":" + it.line : "") + " " : ""}${it.desc}`).join("\n") : "";
         const summary = ok ? p.summary : `审查没有按约定输出：${clip(res.error || res.text.slice(-500), 500)}`;
-        const ev = L.addEvidence(l, { kind: "review", label: `review ${roleName(rv)}：${ok ? p.value.verdict : "无结论"}`, pass: ok && p.pass, detail: `${summary}\n${issues}`, sha: l.lastChangeSha, step: n });
+        const ev = L.addEvidence(l, { kind: "review", label: `review ${roleName(rv)}：${ok ? (p.pass ? "approve" : "revise") : "无结论"}`, pass: ok && p.pass, detail: `${summary}\n${issues}`, sha: l.lastChangeSha, step: n });
         return {
-          progress: `第 ${n} 轮 · 审查：${ok ? p.value.verdict : "无结论"}`,
-          obs: `审查 ${ev.id}（${roleName(rv)}）${ok ? p.value.verdict : "无结论"}：${summary}${issues ? "\n" + issues : ""}${violation ? `\n（审查者改了文件，已回滚）` : ""}`,
+          progress: `第 ${n} 轮 · 审查：${ok ? (p.pass ? "approve" : "revise") : "无结论"}`,
+          obs: `审查 ${ev.id}（${roleName(rv)}）${ok ? (p.pass ? "approve" : "revise") : "无结论"}：${summary}${issues ? "\n" + issues : ""}${violation ? `\n（审查者改了文件，已回滚）` : ""}`,
           notifies: [], next: [{ reason: "next" }],
           turn: `${ev.id} ${ev.pass ? "✓ approve" : "✗ " + (ok ? "revise" : "无结论")}（${roleName(rv)}）：${clip(summary, 300)}`,
         };
@@ -547,7 +547,7 @@ export class LoopEngine {
           `**卡在**\n${a.blockers.map((x) => "- " + x).join("\n")}`,
           a.unmet.length ? `**没达成的验收标准**\n${a.unmet.map((u) => `- ${u} ${l.criteria.find((c) => c.id === u)?.text ?? ""}`).join("\n")}` : "",
           a.resume_hint ? `**以后怎么接着做**：${a.resume_hint}` : "",
-          `分支 \`${task.branch}\` 保留；说“重试 #${id} …”可以带着新思路继续。`,
+          `分支 \`${task.branch}\` 保留；说“再试一次 …”可以带着新思路继续。`,
         ].filter(Boolean).join("\n\n");
         return { status: "failed", progress: `放弃：${clip(a.reason, 80)}`, obs: `放弃：${a.reason}`, notifies: [{ taskId: id, kind: "failed", text }], turn: "" };
       }
@@ -564,7 +564,7 @@ export class LoopEngine {
     if (ask.code) {
       if (opt?.id === "stop") {
         const why = via === "timeout" ? "问题超时没人回答，按默认停下" : "按人的选择停下";
-        return { status: "dropped", progress: why, notifies: [{ taskId: task.id, kind: "info", text: `${why}。分支 \`${task.branch}\` 和进展都保留，说“重试 #${task.id}”可以继续。` }] };
+        return { status: "dropped", progress: why, notifies: [{ taskId: task.id, kind: "info", text: `${why}。分支 \`${task.branch}\` 和进展都保留，说“再试一次”可以继续。` }] };
       }
       if (ask.code === "budget") L.extendBudget(l);
       L.resetGuards(l);
@@ -690,7 +690,7 @@ export class LoopEngine {
     l.guard.infraErrors++;
     L.observe(l, l.step + 1, "system", `本轮基础设施出错：${clip(msg, 500)}`);
     if (l.guard.infraErrors >= 3) {
-      this.commit(task, l, { status: "blocked", progress: `连续出错：${clip(msg, 80)}`, notifies: [{ taskId, kind: "decision", text: `连续 ${l.guard.infraErrors} 轮出错：${clip(msg, 500)}\n\n修好环境后说“重试 #${taskId}”继续。` }] });
+      this.commit(task, l, { status: "blocked", progress: `连续出错：${clip(msg, 80)}`, notifies: [{ taskId, kind: "decision", text: `连续 ${l.guard.infraErrors} 轮出错：${clip(msg, 500)}\n\n修好环境后说“再试一次”继续。` }] });
     } else {
       this.commit(task, l, { next: [{ reason: "retry", delayMs: 10_000 * 2 ** (l.guard.infraErrors - 1) }] });
     }
