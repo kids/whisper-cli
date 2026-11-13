@@ -59,7 +59,7 @@ check("rework: 第 2 次 + 针对上次评审的 3 条意见", rcard.includes("�
 const pass = att({ id: 4, stageId: "critique", role: "critic", model: "gpt-6.1-sol", status: "done", endedAt: T0, parsed: verdict(true, [], "可以了") });
 check("critic pass", AC.renderAttemptCard(pass, AC.attemptCtx(task, [...all, pass], pass, "/root/.orc")).includes("评审第 2 次 · ✓ 通过"));
 const bad = att({ id: 5, status: "done", endedAt: T0, parsed: null, output: "随便写了点东西".repeat(3) });
-check("unparseable: shows tail", AC.renderAttemptCard(bad, AC.attemptCtx(task, [bad], bad, "/root/.orc")).includes("没按约定输出"));
+check("no conclusion: shows tail", AC.renderAttemptCard(bad, AC.attemptCtx(task, [bad], bad, "/root/.orc")).includes("没收尾，接着跑"));
 const err = att({ id: 6, status: "failed", endedAt: T0, error: "timeout after 60m" });
 check("failed: error shown", AC.renderAttemptCard(err, AC.attemptCtx(task, [err], err, "/root/.orc")).includes("❌ 出错") );
 const test = att({ id: 8, stageId: "test", role: "tester", status: "done", endedAt: T0, parsed: { kind: "test", pass: false, summary: "2 个失败", notes: [], value: { pass: false, cases: [{ name: "a", result: "pass" }, { name: "b", result: "fail", detail: "期望 1 实际 2。其余略" }] } } });

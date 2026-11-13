@@ -87,7 +87,7 @@ export function buildStagePrompt(c: PromptContext): string {
 
   out.push(`## 角色说明\n${role.prompt}`);
   out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
-  out.push(`## 输出约定（必须遵守）\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}`);
+  out.push(`## 输出约定（必须遵守）\n这一轮回复结束就等于交付：后台作业要等它跑完、结果落盘再收尾，不要以「继续」「等它跑完」结束。\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}`);
   return out.join("\n\n");
 }
 

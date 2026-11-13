@@ -86,7 +86,7 @@ function stateOf(a: Attempt): string {
   if (a.status === "interrupted") return "⏸ 被打断（服务重启）";
   if (a.status === "failed") return "❌ 出错";
   const p = a.parsed;
-  if (!p) return "⚠️ 没按约定输出";
+  if (!p) return "↻ 没收尾，接着跑";
   if (p.kind === "verdict") {
     if (p.pass) return "✓ 通过";
     const n = (p.issues ?? []).filter((it: any) => it.severity === "major").length;

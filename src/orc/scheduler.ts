@@ -315,7 +315,9 @@ export class Orchestrator {
     const prior = this.store.listAttempts(task.id);
     const n = prior.filter((a) => a.stageId === stage.id).length + 1;
     const sessionKey = role.resume ? `orc:${task.id}#${role.name}` : `orc:${task.id}#${role.name}:${stage.id}:${n}`;
-    const resumeSessionId = role.resume ? this.store.lastSessionId(sessionKey) : undefined;
+    const resumeSessionId = role.resume
+      ? this.store.lastSessionId(sessionKey)
+      : launch.resume ? [...prior].reverse().find((a) => a.stageId === stage.id && a.sessionId)?.sessionId ?? undefined : undefined;
 
     // Latest passing attempt of each earlier stage → history
     const history: Attempt[] = [];
@@ -413,7 +415,7 @@ export class Orchestrator {
         // stopped while running — nothing more to schedule
       } else {
         const prevParsed = [...prior].reverse().find((a) => a.stageId === stage.id && a.parsed && a.id !== attempt.id)?.parsed ?? undefined;
-        const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed });
+        const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed, progressed: !!sha });
         if (violation) d.notifies.push({ taskId: task.id, kind: "info", text: `${role.name} 是只读角色却修改了文件，已回滚：\n${violation.slice(0, 500)}` });
         this.applyDecision(fresh, d);
         brief = d.brief;

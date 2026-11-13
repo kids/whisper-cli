@@ -113,11 +113,17 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   d = decideAfterAttempt(mkTask({ stageIdx: idx("test") }), parsed("test", "[[pass]] 全绿"));
   check("last stage pass → ready", d.patch.status === "ready" && d.notifies[0].kind === "ready");
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), { kind: "unparseable", error: "no json" });
-  check("unparseable → one retry with note", d.launches.length === 1 && /补交/.test(d.launches[0].note!));
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl"), loops: { "parse:impl": 1 } }), { kind: "unparseable", error: "no json" });
-  check("unparseable twice → blocked", d.patch.status === "blocked");
+  check("no conclusion → continue same session, no human", d.launches.length === 1 && d.launches[0].resume === true && /接着做/.test(d.launches[0].note!) && !d.notifies.length && d.patch.loops!["stall:impl"] === 1);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl"), loops: { "stall:impl": 2 } }), { kind: "unparseable", error: "no json" }, { progressed: true });
+  check("stopped but committed something → keeps going, stall reset", d.launches.length === 1 && d.patch.loops!["stall:impl"] === 0 && !d.patch.status);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl"), loops: { "stall:impl": 2 } }), { kind: "unparseable", error: "no json" });
+  check("3 stops in a row with nothing new → failed as a fault, not a decision", d.patch.status === "failed" && d.notifies[0].kind === "failed" && /故障/.test(d.notifies[0].text) && !d.launches.length);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl"), loops: { "cont:impl": 19 } }), { kind: "unparseable", error: "no json" }, { progressed: true });
+  check("committing forever without a conclusion still hits the runaway cap", d.patch.status === "failed" && /续跑 20 次/.test(d.notifies[0].text));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), { kind: "run_error", error: "x", timedOut: true });
-  check("timeout → retry with split hint", /拆小步骤/.test(d.launches[0]?.note ?? ""));
+  check("timeout → continue with resume", d.launches[0]?.resume === true && /时长上限/.test(d.launches[0]?.note ?? ""));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { "stall:review": 1 } }), parsed("verdict", "[[approve]] 可以"));
+  check("conclusion clears the stall count", !("stall:review" in d.patch.loops!));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), parsed("impl", "[[blocked]] need creds"));
   check("impl blocked → decision", d.patch.status === "blocked" && /need creds/.test(d.notifies[0].text));
   d = decideAfterAttempt(mkTask(), parsed("plan", '{"spec":"S","subtasks":[{"title":"a"},{"title":"b","deps":[0]}]}'));
@@ -223,6 +229,7 @@ class FakeExec implements Executor {
   implDelay = 20;
   hang = false;
   alwaysRevise = new Set<number>();
+  testerStops = 0;
   available() { return ["codebuddy", "codex", "claude"] as any; }
   stop(key: string) { this.stopped.add(key); return true; }
   async run(req: RunRequest): Promise<RunResult> {
@@ -256,6 +263,7 @@ class FakeExec implements Executor {
       }
       if (role === "tester") {
         writeFileSync(join(req.cwd, `test-${taskId}.txt`), "case");
+        if (this.testerStops > 0) { this.testerStops--; return this.ok("还在跑，等它跑完", `sess-test-${taskId}`); }
         return this.ok('[[pass]] all good');
       }
       return this.ok('{"summary":"report"}');
@@ -286,6 +294,18 @@ function setup() {
 }
 
 async function e2e() {
+  // S: a role that stops before concluding is continued in its own session — no human involved
+  {
+    const { dir, repo, store, exec, notes, orc } = setup();
+    exec.testerStops = 2;
+    const t = orc.submit({ goal: "add feature", repo, preset: devPreset });
+    await orc.runUntilIdle(10);
+    const tests = exec.calls.filter((c) => c.role === "tester");
+    check("S unfinished tester continued, then ready", store.getTask(t.id)!.status === "ready" && tests.length === 3, store.getTask(t.id));
+    check("S continuation resumes the same session", tests[1].resumeSessionId === `sess-test-${t.id}` && /接着做完/.test(tests[1].prompt), tests.map((c) => c.resumeSessionId));
+    check("S nobody was asked to decide", !notes.some((n) => n.kind === "decision" || n.kind === "failed"), notes.map((n) => n.kind));
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
   // A: full dev pipeline with one rework loop
   {
     const { dir, repo, store, exec, notes, orc } = setup();

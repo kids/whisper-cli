@@ -317,8 +317,9 @@ export function runCodex(opts: RunCodexOptions): Promise<AiResult> {
       };
     }
 
+    const timedOut = /\[(STALE|HARD) TIMEOUT\]/.test(stderr || "");
     return {
-      text: resultText,
+      text: timedOut ? `⏱️ Codex timed out.\n\n---\n\n${resultText}` : resultText,
       usage,
       sessionId: outThreadId,
     };

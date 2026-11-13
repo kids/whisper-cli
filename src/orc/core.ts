@@ -58,8 +58,14 @@ export interface Decision {
   children: PlanSubtask[];
 }
 
-/** One automatic retry for crashes/timeouts and for missing structured output */
-export const AUTO_RETRY = 1;
+/**
+ * A role that stops without a conclusion (crash, timeout, turn ended mid-work) has simply not
+ * finished: it is continued, never handed to a human. Only this many stops in a row with nothing
+ * new committed mean the model or whisper itself is broken.
+ */
+export const STALL_LIMIT = 3;
+/** Runaway guard: continuations of one stage in total, even when each one commits something */
+export const CONTINUE_CAP = 20;
 
 const empty = (): Decision => ({ patch: {}, launches: [], notifies: [], children: [] });
 
@@ -68,6 +74,8 @@ export interface DecideCtx {
   prev?: ParsedOutput;
   /** safety cap on rework rounds regardless of progress (a runaway guard, not the normal exit) */
   cap?: number;
+  /** this attempt committed something new to the worktree */
+  progressed?: boolean;
 }
 
 export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx = {}): Decision {
@@ -90,39 +98,41 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     return d;
   }
 
-  if (outcome.kind === "run_error") {
-    const k = `err:${stage.id}`;
-    if ((loops[k] ?? 0) < AUTO_RETRY) {
-      bump(k);
-      d.patch = { loops, progress: `${stage.id} 运行异常，自动重试一次` };
-      d.launches.push({
+  if (outcome.kind === "run_error" || outcome.kind === "unparseable") {
+    const k = `stall:${stage.id}`;
+    loops[k] = ctx.progressed ? 0 : (loops[k] ?? 0) + 1;
+    const total = bump(`cont:${stage.id}`);
+    const name = stageName(stage.id);
+    if (loops[k] >= STALL_LIMIT || total >= CONTINUE_CAP) {
+      const what = loops[k] >= STALL_LIMIT
+        ? `连续 ${loops[k]} 次${outcome.kind === "run_error" ? `运行失败（${outcome.error.slice(0, 200)}）` : "停下时没给结论"}，期间没有任何新改动`
+        : `已续跑 ${total} 次仍没收尾`;
+      d.patch = { status: "failed", loops, progress: `${name}${what}` };
+      d.notifies.push({
         taskId: task.id,
-        stageIdx: task.stageIdx,
-        note: outcome.timedOut
-          ? "上一次运行超时被终止。请拆小步骤，优先把已完成的部分落盘，再继续。"
-          : `上一次运行异常退出：${outcome.error.slice(0, 300)}。请先检查工作区当前状态再继续。`,
+        kind: "failed",
+        text: `${name}${what}。这不是任务本身的问题，是上游模型或 whisper 出了故障，已停下。修好后说「重试」会从这里接着跑。`,
       });
       return d;
     }
-    return block(`${stage.id} 连续运行失败：${outcome.error.slice(0, 300)}`);
+    const kind = task.preset.roles[stage.role]?.output;
+    const why = outcome.kind === "unparseable"
+      ? "上一轮你停下时还没写结论行。"
+      : outcome.timedOut
+        ? "上一轮运行到了时长上限被终止。耗时长的步骤放后台跑、结果落盘。"
+        : `上一轮运行异常退出：${outcome.error.slice(0, 300)}。`;
+    d.patch = { loops, progress: `${name}还没收尾，接着跑` };
+    d.launches.push({
+      taskId: task.id,
+      stageIdx: task.stageIdx,
+      resume: true,
+      note: `${why}先看工作区和后台作业的现状，已完成的不要重做；做完了就直接给结论，没做完就接着做完再给：${kind ? conclusionHint(kind) : "按约定给结论"}。`,
+    });
+    return d;
   }
 
-  if (outcome.kind === "unparseable") {
-    const k = `parse:${stage.id}`;
-    if ((loops[k] ?? 0) < AUTO_RETRY) {
-      bump(k);
-      const kind = task.preset.roles[stage.role]?.output;
-      d.patch = { loops, progress: `${stage.id} 输出格式不符，要求补交结论` };
-      d.launches.push({
-        taskId: task.id,
-        stageIdx: task.stageIdx,
-        note: `你上一次的回复不符合输出约定（${outcome.error}）。不要重做工作，直接补交最终结论：${kind ? conclusionHint(kind) : "按约定给结论"}。`,
-      });
-      return d;
-    }
-    return block(`${stage.id} 两次都没有按约定输出结论：${outcome.error}`);
-  }
-
+  delete loops[`stall:${stage.id}`];
+  delete loops[`cont:${stage.id}`];
   const p = outcome.parsed;
 
   if (p.kind === "plan") {

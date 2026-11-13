@@ -532,7 +532,8 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     const usedMultiTurn = fullTurnsText.length > resultText.length + 20 && assistantTurnTexts.length > 1;
     const finalText = usedMultiTurn ? fullTurnsText : resultText;
     if (finalText) {
-      return { text: finalText, model, usage, sessionId };
+      // killed by a timeout is still a timeout, however much it wrote before
+      return { text: timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n${finalText}` : finalText, model, usage, sessionId };
     }
 
     // Fallback 1: last assistant event in the parsed stream

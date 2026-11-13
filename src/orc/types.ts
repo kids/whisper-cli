@@ -200,6 +200,8 @@ export interface LaunchPayload {
   recover?: boolean;
   /** Extra one-shot note for this launch (e.g. "last run timed out") */
   note?: string;
+  /** Continue the stage's previous session (the role stopped without finishing) */
+  resume?: boolean;
 }
 
 /** ready/decision/failed/info: pipeline + loop finals; turn/report/ask/constraints: loop rounds (002 IM visibility) */
