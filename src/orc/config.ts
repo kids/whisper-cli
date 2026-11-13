@@ -19,7 +19,7 @@ const CLIS: CliName[] = ["codebuddy", "codex", "claude", "gemini", "cursor", "pi
 const OUTPUTS: OutputKind[] = ["plan", "impl", "verdict", "test", "report", "action", "brief"];
 const ISOLATIONS: Isolation[] = ["worktree", "readonly", "fresh"];
 export const MAX_ROLE_COUNT = 8;
-export const MAX_LOOPS_CAP = 10;
+export const MAX_LOOPS_CAP = 500;
 
 export function parseRoleMarkdown(name: string, src: string): RoleDef {
   const m = src.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
@@ -213,8 +213,9 @@ export function resolvePreset(
       const j = ids.indexOf(s.onFail);
       if (j < 0) errs.push(`stage "${s.id}": on_fail "${s.onFail}" is not an active stage`);
       else if (j > i) errs.push(`stage "${s.id}": on_fail must point backwards`);
-      if (!(Number.isInteger(s.maxLoops) && s.maxLoops! >= 1 && s.maxLoops! <= MAX_LOOPS_CAP)) {
-        errs.push(`stage "${s.id}": on_fail requires max_loops 1..${MAX_LOOPS_CAP} (no unbounded loops)`);
+      // max_loops is optional: absent means the engine default (500)
+      if (s.maxLoops != null && !(Number.isInteger(s.maxLoops) && s.maxLoops >= 1 && s.maxLoops <= MAX_LOOPS_CAP)) {
+        errs.push(`stage "${s.id}": max_loops must be 1..${MAX_LOOPS_CAP}`);
       }
     }
   });

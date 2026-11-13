@@ -58,34 +58,6 @@ export const TEAM_PATTERNS: [RegExp, string][] = [
 /** Switching the chat's mode in plain words */
 export const MODE_PATTERN = /((切|换|改|调)(到|成|回)?|进入|回到|退出|打开|开启|关闭|关掉)[^。！？\n]{0,4}(单聊|单\s*agent|普通|编排|团队|orc|自动)模式|(编排|团队|orc)模式(关|退出|别用)/i;
 
-/**
- * Progress / status questions — only team-route when the message anchors a task
- * (#N, title hit, or 任务/执行者…). Bare「进展如何」「效果有进展吗」stay with the single agent
- * (experiment Q&A), matching Thread-subscription fast path: ownership first, not keywords alone.
- */
-export const PROGRESS_PATTERN = new RegExp([
-  "进展", "进度", "到哪(了|一步)", "怎么样了", "(做|跑|弄)完了(吗|没)", "完成了(吗|没)", "结果(呢|如何|怎么样)",
-].join("|"));
-
-/** Steering / controlling work already in progress (stop, retry, verbosity, …) */
-export const CONTROL_PATTERN = new RegExp([
-  "先别", "停(下|掉|一下)", "别(做|跑|弄)了", "放弃", "不要了", "继续", "再试", "重试", "再跑", "再来一次",
-  "接受", "就用(这|现在|当前)(一)?版", "不用(再)?改了",
-  "换成", "改用", "换(个|一个)?模型", "刷屏", "安静(点|些)?", "少发", "详细(点|些)", "多汇报",
-  "推(吧|送)", "可以推", "发布", "补充(一下|一点|一条)?",
-].join("|"));
-
-/** Union — used when a loop task is waiting for a human answer */
-export const STEER_PATTERN = new RegExp(`(?:${PROGRESS_PATTERN.source})|(?:${CONTROL_PATTERN.source})`);
-const STEER_LEAD = /^(再试|重试|继续|放弃|停|先别|算了|不用了|别做了|接受|就用)/;
-
-/** Bare yes / no to a pending proposal (words can be chained: 「好，就这么改」「算了，不改了」) */
-const YES_NO = "好|好的|好啊|可以|行|没问题|确认|同意|就这么(改|办|定)吧?|改吧|ok|okay|yes|嗯|算了|不用了?|取消|不要了?|放弃|别改了?|先不改?|不改了";
-export const CONFIRM_PATTERN = new RegExp(`^((${YES_NO})[\\s,，。.!！~～]*)+$`, "i");
-
-const WATCH_TALK = /监控|(别|不要|不用|继续|接着)(再)?盯/;
-const TASK_WORDS = /(这个|那个|刚才的?|上一个|之前的?)?(任务|团队|监督者|执行者|审查者|worker|supervisor|critic)/i;
-
 function mentionsTask(text: string, tasks: RouteTask[]): RouteTask | undefined {
   for (const m of text.matchAll(/#\s?(\d+)|任务\s?#?(\d+)|(?<![\d.\w])(\d{1,5})\s?(?=号|那个|这个)|^(\d{1,5})(?=[\s,，的])/g)) {
     const id = Number(m[1] ?? m[2] ?? m[3] ?? m[4]);
@@ -105,31 +77,26 @@ export function routeMessage(text: string, c: RouteCtx): Route {
   const s = (text || "").trim();
   if (c.mode === "orc") return { to: "lead", why: "编排模式" };
   if (c.inThread) return { to: "lead", why: "任务卡片回复串" };
+  // the lead cannot see images / files: those stay with the single agent
+  if (c.hasAttachments) return { to: "single", why: "带附件" };
+
   const now = Date.now();
   const live = c.tasks.filter((t) => OPEN.includes(t.status) || ((t.status === "failed" || t.status === "blocked") && now - t.updatedAt < RECENT_MS));
   const asking = live.filter((t) => t.asking);
   const ref = mentionsTask(s, live);
-  // things the human must answer reach the lead in every mode
-  if (asking.length && (s.length <= SHORT || STEER_PATTERN.test(s) || ref || TASK_WORDS.test(s))) {
-    return { to: "lead", why: `#${asking[0].id} 在等你回答` };
-  }
-  if (c.pendingProposal && CONFIRM_PATTERN.test(s)) return { to: "lead", why: "回应待确认的提议" };
+
+  // someone is waiting for a human: the reply is part of that conversation, however long or short
+  if (asking.length) return { to: "lead", why: `「${asking[0].title}」在等你回答` };
+  if (c.pendingProposal) return { to: "lead", why: "回应待确认的提议" };
   if (c.mode === "single") return { to: "single", why: "单 agent 模式" };
 
   if (MODE_PATTERN.test(s)) return { to: "lead", why: "切换模式" };
-  if (c.hasAttachments) return { to: "single", why: "带附件" };
   for (const [re, why] of TEAM_PATTERNS) if (re.test(s)) return { to: "lead", why };
-  // long-job monitors belong to the single agent (it registered them and has [[unwatch]])
-  if (WATCH_TALK.test(s) && !ref && !TASK_WORDS.test(s)) return { to: "single", why: "说的是监控" };
+
   if (live.length) {
-    if (ref) return { to: "lead", why: `提到 #${ref.id}` };
-    // Control verbs can go to lead on a short line; progress questions need a task anchor.
-    if (STEER_LEAD.test(s) || (CONTROL_PATTERN.test(s) && (s.length <= SHORT || TASK_WORDS.test(s)))) {
-      return { to: "lead", why: "调整进行中的任务" };
-    }
-    if (PROGRESS_PATTERN.test(s) && TASK_WORDS.test(s)) {
-      return { to: "lead", why: "调整进行中的任务" };
-    }
+    if (ref) return { to: "lead", why: `提到「${ref.title}」` };
+    // short lines are how people steer / answer; let the lead read them, it can hand back
+    if (s.length <= SHORT) return { to: "lead", why: "进行中的任务可能相关" };
   }
   return { to: "single", why: "普通对话" };
 }

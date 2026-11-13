@@ -547,7 +547,7 @@ export class LoopEngine {
           `**卡在**\n${a.blockers.map((x) => "- " + x).join("\n")}`,
           a.unmet.length ? `**没达成的验收标准**\n${a.unmet.map((u) => `- ${u} ${l.criteria.find((c) => c.id === u)?.text ?? ""}`).join("\n")}` : "",
           a.resume_hint ? `**以后怎么接着做**：${a.resume_hint}` : "",
-          `分支 \`${task.branch}\` 保留；说“再试一次 …”可以带着新思路继续。`,
+          `分支 \`${task.branch}\` 和已提交的改动都保留着。`,
         ].filter(Boolean).join("\n\n");
         return { status: "failed", progress: `放弃：${clip(a.reason, 80)}`, obs: `放弃：${a.reason}`, notifies: [{ taskId: id, kind: "failed", text }], turn: "" };
       }
@@ -564,7 +564,7 @@ export class LoopEngine {
     if (ask.code) {
       if (opt?.id === "stop") {
         const why = via === "timeout" ? "问题超时没人回答，按默认停下" : "按人的选择停下";
-        return { status: "dropped", progress: why, notifies: [{ taskId: task.id, kind: "info", text: `${why}。分支 \`${task.branch}\` 和进展都保留，说“再试一次”可以继续。` }] };
+        return { status: "dropped", progress: why, notifies: [{ taskId: task.id, kind: "info", text: `${why}。分支 \`${task.branch}\` 和进展都保留。` }] };
       }
       if (ask.code === "budget") L.extendBudget(l);
       L.resetGuards(l);
@@ -690,7 +690,7 @@ export class LoopEngine {
     l.guard.infraErrors++;
     L.observe(l, l.step + 1, "system", `本轮基础设施出错：${clip(msg, 500)}`);
     if (l.guard.infraErrors >= 3) {
-      this.commit(task, l, { status: "blocked", progress: `连续出错：${clip(msg, 80)}`, notifies: [{ taskId, kind: "decision", text: `连续 ${l.guard.infraErrors} 轮出错：${clip(msg, 500)}\n\n修好环境后说“再试一次”继续。` }] });
+      this.commit(task, l, { status: "blocked", progress: `连续出错：${clip(msg, 80)}`, notifies: [{ taskId, kind: "decision", text: `连续 ${l.guard.infraErrors} 轮出错：${clip(msg, 500)}` }] });
     } else {
       this.commit(task, l, { next: [{ reason: "retry", delayMs: 10_000 * 2 ** (l.guard.infraErrors - 1) }] });
     }

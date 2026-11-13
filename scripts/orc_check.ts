@@ -106,7 +106,7 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   // round count alone no longer stops it; the cap is a runaway guard
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 5 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"));
   check("still reworks below the cap when nothing new appears", d.patch.stageIdx === idx("impl") && !d.brief, d);
-  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"), { cap: 6 });
   check("cap reached → escalate", d.brief?.mode === "escalate" && d.brief.rounds === 7, d.brief);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), feedback: "【review 未通过】x" }), parsed("verdict", "[[approve]] 可以"));
   check("approve clears own feedback", d.patch.feedback === "" && d.patch.stageIdx === idx("test"));

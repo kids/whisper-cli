@@ -8,5 +8,5 @@ roles:
 stages:
   - { id: repro,  role: reproducer }
   - { id: fix,    role: implementer }
-  - { id: test,   role: tester, on_fail: fix, max_loops: 4 }
-  - { id: review, role: critic, on_fail: fix, max_loops: 3 }
+  - { id: test,   role: tester, on_fail: fix }
+  - { id: review, role: critic, on_fail: fix }

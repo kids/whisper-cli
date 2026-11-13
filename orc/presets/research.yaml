@@ -6,5 +6,5 @@ roles:
   synthesizer: { count: 1 }
 stages:
   - { id: research, role: researcher }
-  - { id: critique, role: critic, on_fail: research, max_loops: 6 }
+  - { id: critique, role: critic, on_fail: research }
   - { id: summary,  role: synthesizer }

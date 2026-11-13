@@ -474,7 +474,7 @@ export class Orchestrator {
       const why = last?.parsed?.summary || "评审连续没过";
       this.store.tx(() => this.applyDecision(this.store.getTask(taskId)!, {
         patch: { status: "blocked", progress: `决策说明没写成：${why.slice(0, 100)}` }, launches: [], children: [],
-        notifies: [{ taskId, kind: "decision", text: `**${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（决策说明没能生成：${res.error || "输出不合约定"}。可以直接说「再试一次」「接受这版」或「放弃」。）` }],
+        notifies: [{ taskId, kind: "decision", text: `**${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（决策说明没能生成：${res.error || "输出不合约定"}）` }],
       }));
       this.emitProgress(taskId);
       return;

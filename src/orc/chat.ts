@@ -312,8 +312,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       await refreshCard(t, true);
       await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
-      const tail = n.kind === "decision" && t.kind !== "loop" && !n.text.includes("你可以回复") ? `\n\n要重试就直接说「再试一次」，可以顺带补充要改的地方；不需要了就说「放弃」。` : "";
-      await f.sendMarkdown(t.chatId, `**${head} · ${t.title}**\n\n${n.text}${tail}`);
+      await f.sendMarkdown(t.chatId, `**${head} · ${t.title}**\n\n${n.text}`);
     },
     loop: {
       watchBot: (t) => {

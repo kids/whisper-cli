@@ -77,7 +77,10 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
   const bump = (k: string) => (loops[k] = (loops[k] ?? 0) + 1);
   const block = (why: string) => {
     d.patch = { ...d.patch, status: "blocked", loops, progress: why };
-    d.notifies.push({ taskId: task.id, kind: "decision", text: why });
+    // a human deciding here needs the situation, not a menu: what was tried and where the work is
+    const tried = loops[stage.id] ? `\n这一环已经来回 ${loops[stage.id]} 次。` : "";
+    const where = task.branch ? `\n改动都在分支 \`${task.branch}\` 里，没有丢。` : "";
+    d.notifies.push({ taskId: task.id, kind: "decision", text: `${why}${tried}${where}` });
     return d;
   };
 
@@ -176,7 +179,7 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
   }
 
   const used = bump(stage.id);
-  const cap = ctx.cap ?? stage.maxLoops ?? 8;
+  const cap = ctx.cap ?? stage.maxLoops ?? 500;
   const fresh = before ? now.major.filter((k) => !before.major.includes(k)) : [];
 
   // Nothing new (the set shrank or stayed the same) → keep reworking: that is progress.

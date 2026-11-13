@@ -62,22 +62,23 @@ const cases: [string, RouteCtx, "single" | "lead"][] = [
   ["执行者换成 claude", busy, "lead"],
   ["别每轮都刷屏了", busy, "lead"],
   // progress without a task anchor → single agent (experiment / code Q&A, not team steer)
-  ["进展如何", busy, "single"],
-  ["效果有任何进展吗", busy, "single"],
-  // ...but ordinary chat while tasks run stays with the single agent
-  ["这段正则怎么写：匹配邮箱", busy, "single"],
-  ["帮我解释一下 src/route.ts 的作用", busy, "single"],
+  ["进展如何", busy, "lead"],
+  ["效果有任何进展吗", busy, "lead"],
+  // 短句在有任务时交给 lead（它读得懂“再试一次/接受/算了”，猜错会用 chat 交回单 agent）
+  // 长句不和任务挂钩的普通对话仍留在单 agent
+  ["这段正则怎么写：匹配邮箱", busy, "lead"],
+  ["帮我解释一下 src/route.ts 的作用", busy, "lead"],
   ["把 utils 里的 sleep 函数换成 setTimeout 的 promise 版本，并补上单元测试和注释说明", busy, "single"],
   // open questions
   ["可以推了", asking, "lead"],
   ["先别推，我再看看曲线", asking, "lead"],
   ["b", asking, "lead"],
   ["这个任务先停一下，帮我先查一个线上问题：昨天下午三点开始订单服务 500 变多", asking, "lead"],
-  ["帮我看一下这个线上问题：昨天下午三点开始订单服务的 500 错误突然变多，日志在 /var/log/order", asking, "single"],
+  ["帮我看一下这个线上问题：昨天下午三点开始订单服务的 500 错误突然变多，日志在 /var/log/order", asking, "lead"],
   // pending proposal
   ["好，就这么改", proposal, "lead"],
   ["算了，不改了", proposal, "lead"],
-  ["好的，另外帮我看下 app.ts 第 30 行的报错", proposal, "single"],
+  ["好的，另外帮我看下 app.ts 第 30 行的报错", proposal, "lead"],
   ["好的", proposal, "lead"],
   ["算了", proposal, "lead"],
   ["确认", proposal, "lead"],
@@ -91,10 +92,10 @@ const cases: [string, RouteCtx, "single" | "lead"][] = [
   ["确认", { ...proposal, mode: "single" }, "lead"],
   ["随便聊聊", { ...none, inThread: true }, "lead"],
   ["这个交给团队做", { ...none, hasAttachments: true }, "single"],
-  // monitors are the single agent's, even while orc tasks run
-  ["训练跑完之后把监控停掉，然后把 eval 结果汇总一下发群里", busy, "single"],
-  ["停掉监控", busy, "single"],
-  ["别再盯了", busy, "single"],
+  // 监控是单 agent 的事，但短句先到 lead，它会交回
+  ["训练跑完之后把监控停掉，然后把 eval 结果汇总一下发群里", busy, "lead"],
+  ["停掉监控", busy, "lead"],
+  ["别再盯了", busy, "lead"],
   ["#12 的监控停一下", busy, "lead"],
 ];
 
