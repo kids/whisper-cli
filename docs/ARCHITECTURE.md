@@ -318,6 +318,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | | `[[pass]]` `[[fail]]` | 测试角色 | `output.ts` | 同上 |
 | | `[[report]]` | 调研 / 汇报角色 | `output.ts` | 同上 |
 | | `[[instruct]]` `[[verify]]` `[[review]]` `[[wait]]` `[[ask]]` `[[finish]]` `[[abort]]` | 监督者 | `ledger.ts` | 这一轮执行什么 |
+| | `[[replan]]` | 监督者（人来改了口径 / 验收 / 目标时） | `ledger.ts:applyChange` | 增量替换验收与约束、作废指定证据、worker 开新会话 |
 | | `[[continue_with_known_issues]]` | 决策说明 | `brief.ts` | 允许带着遗留问题继续 |
 | **L3 记账 / 展示** | `[[major]]` `[[minor]]` | 评审 | `output.ts` | 问题分级，不影响流程 |
 | | `[[note]]` | worker、单 agent | `output.ts`、卡片 | 团队笔记 |

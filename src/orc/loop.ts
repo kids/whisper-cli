@@ -452,6 +452,17 @@ export class LoopEngine {
           turn: `主 → 子：${clip(a.text, l.verbosity === "verbose" ? 2000 : 300)}\n子 → 主：${res.interrupted ? "（被打断）" : ""}${clip(summary, l.verbosity === "verbose" ? 2000 : 400)}${stat ? `\n改动：${stat}` : ""}`,
         };
       }
+      case "replan": {
+        if (l.waitWatch) { cancelWatch(l.waitWatch); l.waitWatch = undefined; l.heartbeatS = undefined; }
+        const lines = L.applyChange(l, a.change, n);
+        const text = `**「${task.title}」按新的安排继续**\n${a.change.reason || "(没写原因)"}${lines.length ? "\n\n" + lines.map((x) => `- ${x}`).join("\n") : ""}\n\n有不同意见直接说。`;
+        return {
+          status: "running", progress: `第 ${n} 轮 · 重新安排：${clip(a.change.reason, 60)}`,
+          obs: `重新安排：${a.change.reason}${lines.length ? "\n" + lines.join("；") : ""}`,
+          notifies: [{ taskId: id, kind: "info", text }],
+          next: [{ reason: "next" }], turn: "",
+        };
+      }
       case "verify": {
         const lines: string[] = [];
         const turn: string[] = [];
@@ -735,7 +746,7 @@ function union<T extends { at: number }>(a: T[] = [], b: T[] = [], key: (x: T) =
 function stripSignals(text: string): string {
   return (text || "")
     .split(/\r?\n/)
-    .filter((line) => !/^\s*\[\[\s*(instruct|verify|review|wait|ask|finish|abort)\s*\]\]/i.test(line))
+    .filter((line) => !/^\s*\[\[\s*(instruct|replan|verify|review|wait|ask|finish|abort)\s*\]\]/i.test(line))
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

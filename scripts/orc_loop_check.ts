@@ -44,6 +44,9 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
   check("wait keep", (p("[[wait]]\nkeep=1\nreason=loss 在降") as any)?.keep === true);
   const a: any = p("[[ask]]\nwhy=irreversible\n要推 main 吗？");
   check("ask why + question", a?.action === "ask" && a.why === "irreversible" && a.question === "要推 main 吗？", a);
+  const r: any = p("人要求改成内部参考。\n[[replan]]\nreason: 对外发布改成内部参考\ncriteria:\n- 报告内部可读，数字可复算\n- 不引用未验证数字\nconstraints:\n- 只做离线分析\ninvalidate: E1,E3\nreset_worker: no");
+  check("replan: reason / criteria / constraints / invalidate", r?.action === "replan" && r.change.reason === "对外发布改成内部参考" && r.change.criteria.length === 2 && r.change.constraints[0] === "只做离线分析" && r.change.invalidate.join() === "E1,E3" && r.change.resetWorker === false, r);
+  check("replan without fields is still a change", (() => { const x: any = p("[[replan]]\n以后先看日志"); return x?.action === "replan" && x.change.reason === "以后先看日志" && !x.change.criteria && x.change.resetWorker === true; })());
   check("no marker → undefined (继续，不是错误)", p("我觉得应该先看日志，然后再决定。") === undefined);
   check("empty marker body → undefined", p("[[instruct]]\n") === undefined);
   check("unknown marker ignored", p("[[dance]]\n跳个舞") === undefined);
@@ -78,6 +81,15 @@ const S = (o: any): string => {
       if (o.heartbeat) kv.push(`heartbeat=${o.heartbeat}`);
       if (o.keep) kv.push("keep=1");
       return `挂起等作业。\n\n${body(kv.join("\n"))}`;
+    }
+    case "replan": {
+      const c = o.change ?? {};
+      const kv = [`reason: ${c.reason ?? ""}`];
+      if (c.criteria?.length) kv.push("criteria:", ...c.criteria.map((x: string) => `- ${x}`));
+      if (c.constraints?.length) kv.push("constraints:", ...c.constraints.map((x: string) => `- ${x}`));
+      if (c.invalidate?.length) kv.push(`invalidate: ${c.invalidate.join(",")}`);
+      if (c.resetWorker === false) kv.push("reset_worker: no");
+      return `人改了口径，我重新安排。\n\n${body(kv.join("\n"))}`;
     }
     case "ask": return body([o.why ? `why=${o.why}` : "", o.question].filter(Boolean).join("\n"));
     case "finish": return `收尾。\n\n${body(o.summary)}`;
@@ -323,6 +335,30 @@ async function e2e() {
     exec.sup.set(t.id, [(req) => { check("G recover note in prompt", /进程重启/.test(req.prompt)); return S({ action: "abort", reason: "测试" }); }]);
     await drive(() => store.getTask(t.id)!.status === "failed");
     check("G settled", store.getTask(t.id)!.status === "failed");
+    done();
+  }
+
+  // I: 人中途改口径 → 监督者 [[replan]]：验收整体替换、证据作废、worker 换会话
+  {
+    const { repo, store, exec, notes, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "写一份可行性报告", repo, preset: loopPreset, criteria: ["给出结论"], sourceText: "对外发布用的" });
+    const id = t.id;
+    exec.worker.set(id, () => "[[done]] 报告写好了");
+    exec.sup.set(id, [
+      S({ action: "instruct", text: "先写一版报告" }),
+      () => { orc.attach(id, "改成内部参考，不用对外发布，数字必须可复算", false, "改成内部参考吧，数字必须可复算"); return S({ action: "verify", checks: [{ cmd: "echo check" }] }); },
+      S({ action: "replan", change: { reason: "对外发布改成内部参考", criteria: ["数字可复算", "结论只内部使用"], constraints: ["不引用未验证数字"], invalidate: ["E1"] } } as any),
+      S({ action: "instruct", text: "按新口径重写结论部分" }),
+      S({ action: "finish", summary: "内部版完成" }),
+    ]);
+    const ok = await drive(() => store.getTask(id)!.status === "ready");
+    const l = orc.loop.ledger(id)!;
+    check("I replan replaced criteria", ok && l.criteria.map((c) => c.text).join("|") === "数字可复算|结论只内部使用", l.criteria);
+    check("I replan bumped the version", l.constraintsVersion >= 2, l.constraintsVersion);
+    check("I named evidence invalidated", l.evidence.some((e) => e.invalidated), l.evidence.map((e) => [e.id, e.invalidated]));
+    check("I worker restarted on a fresh session", exec.of(id, "worker").length === 2 && !exec.of(id, "worker")[1].req.resumeSessionId, exec.of(id, "worker").map((c) => c.req.resumeSessionId));
+    check("I the group is told what changed", notes.some((n) => n.kind === "info" && /按新的安排继续/.test(n.text) && /验收标准改为 2 条/.test(n.text)), notes.filter((n) => n.kind === "info").map((n) => n.text));
+    check("I nobody was asked to decide", asks(notes).length === 0, notes.map((n) => n.kind));
     done();
   }
 

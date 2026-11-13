@@ -21,10 +21,12 @@ export interface Evidence {
   label: string;
   pass: boolean;
   detail: string;
-  /** HEAD when collected — finish only accepts evidence at the current HEAD */
+  /** HEAD when collected */
   sha: string;
   at: number;
   step: number;
+  /** 重新规划时作废：结论基于旧口径，不再算数 */
+  invalidated?: boolean;
 }
 export interface PendingAsk {
   step: number;
@@ -190,6 +192,7 @@ export interface VerifyCheck { cmd: string; expect?: string; label?: string; tim
 
 export type LoopAction =
   | { action: "instruct"; text: string }
+  | { action: "replan"; change: ChangeSet }
   | { action: "verify"; checks: VerifyCheck[] }
   | { action: "review"; focus?: string }
   | { action: "wait"; watch?: Record<string, unknown>; keep?: boolean; heartbeat?: string; reason?: string }
@@ -198,10 +201,55 @@ export type LoopAction =
   | { action: "abort"; reason: string };
 
 export const ACTION_LABEL: Record<LoopAction["action"], string> = {
-  instruct: "下指令", verify: "验证", review: "审查", wait: "等待", ask: "问人", finish: "完成", abort: "放弃",
+  instruct: "下指令", replan: "重新安排", verify: "验证", review: "审查", wait: "等待", ask: "问人", finish: "完成", abort: "放弃",
 };
 
-const SIGNAL_RE = /^[ \t]*\[\[\s*(instruct|verify|review|wait|ask|finish|abort)\s*\]\][ \t]*(.*)$/i;
+/** 人改了目标 / 验收 / 口径时，监督者给的增量安排；只认认得的字段，其余当说明 */
+export interface ChangeSet {
+  reason: string;
+  /** 整体替换；不给就不动 */
+  criteria?: string[];
+  constraints?: string[];
+  /** 要作废的证据编号（E3 / E3,E5） */
+  invalidate?: string[];
+  /** 默认 true：重新安排后 worker 开新会话，避免接着旧计划干 */
+  resetWorker?: boolean;
+  /** 原文，写进账本给人看 */
+  text: string;
+}
+
+const CHANGE_KEY = /^([a-z_]+)\s*[:：]\s*(.*)$/i;
+
+/** [[replan]] 块：自由文本 + 几个可选字段；认不出的内容原样留在 text 里 */
+export function parseChange(body: string): ChangeSet {
+  const out: ChangeSet = { reason: "", resetWorker: true, text: body.trim() };
+  const lists: Record<string, string[]> = {};
+  let key = "";
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const kv = CHANGE_KEY.exec(line);
+    if (kv) {
+      key = kv[1].toLowerCase();
+      const val = kv[2].trim();
+      if (key === "reason") out.reason = val;
+      else if (key === "invalidate") out.invalidate = val.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+      else if (key === "reset_worker") out.resetWorker = !/^(0|false|no|不|否)$/i.test(val);
+      else if (key === "criteria" || key === "constraints") { lists[key] = val ? [val] : []; if (key === "criteria") out.criteria = lists[key]; else out.constraints = lists[key]; }
+      continue;
+    }
+    if (/^[-*·]\s+/.test(line) && (key === "criteria" || key === "constraints")) {
+      const item = line.replace(/^[-*·]\s+/, "").trim();
+      lists[key].push(item);
+      if (key === "criteria") out.criteria = lists[key]; else out.constraints = lists[key];
+      continue;
+    }
+    if (!out.reason) out.reason = line;
+  }
+  return out;
+}
+
+const SIGNAL_RE = /^[ \t]*\[\[\s*(instruct|replan|verify|review|wait|ask|finish|abort)\s*\]\][ \t]*(.*)$/i;
 const CLEAN = (t: string) => t.replace(/^[\s\-*>`]+/, "").replace(/`/g, "").trim();
 
 interface Block { name: string; body: string }
@@ -225,6 +273,7 @@ export function parseSignal(text: string): LoopAction | undefined {
   if (!b || !b.body) return undefined;
   switch (b.name) {
     case "instruct": return { action: "instruct", text: b.body };
+    case "replan": return { action: "replan", change: parseChange(b.body) };
     case "verify": {
       const checks = b.body.split(/\r?\n/).map(CLEAN).filter(Boolean).slice(0, 8).map((cmd) => ({ cmd }));
       return checks.length ? { action: "verify", checks } : undefined;
@@ -253,6 +302,28 @@ export function parseSignal(text: string): LoopAction | undefined {
     case "abort": return { action: "abort", reason: b.body };
   }
   return undefined;
+}
+
+/** 把监督者的增量安排落到账本上；返回给人看的变化行 */
+export function applyChange(l: Ledger, c: ChangeSet, step: number): string[] {
+  const lines: string[] = [];
+  const now = Date.now();
+  if (c.criteria?.length) {
+    const items = c.criteria.map((t) => t.trim()).filter(Boolean);
+    if (items.length) { l.criteria = items.map((t, i) => ({ id: `C${i + 1}`, text: t, by: "human", at: now })); l.seq.C = items.length; lines.push(`验收标准改为 ${items.length} 条`); }
+  }
+  if (c.constraints?.length) {
+    const items = c.constraints.map((t) => t.trim()).filter(Boolean);
+    if (items.length) { l.constraints = items.map((t, i) => ({ id: `K${i + 1}`, text: t, by: "human", at: now })); l.seq.K = items.length; lines.push(`约束改为 ${items.length} 条`); }
+  }
+  const ids = c.invalidate ?? [];
+  const hit = l.evidence.filter((e) => ids.includes(e.id) || ids.some((x) => x === "all"));
+  if (ids.length === 1 && ids[0] === "all") { for (const e of l.evidence) e.invalidated = true; lines.push(`作废全部 ${l.evidence.length} 条旧证据`); }
+  else if (hit.length) { for (const e of hit) e.invalidated = true; lines.push(`作废证据 ${hit.map((e) => e.id).join(",")}`); }
+  if (c.resetWorker !== false && l.worker.sessionId) { l.worker.sessionId = undefined; l.worker.turns = 0; l.worker.rotations++; lines.push("worker 开新会话（按新安排重来）"); }
+  l.constraintsVersion++;
+  observe(l, step, "replan", `按新的安排继续（v${l.constraintsVersion}）：${c.reason || c.text.slice(0, 300)}${lines.length ? "\n" + lines.join("；") : ""}`);
+  return lines;
 }
 
 // ---- 不可逆操作（唯一保留的"看内容"规则）-----------------------------------
@@ -295,7 +366,7 @@ function constraintsBlock(l: Ledger): string {
 }
 
 export function evidenceLine(e: Evidence, l: Ledger): string {
-  const at = e.sha === l.lastChangeSha ? "当前版本" : `旧版本 ${e.sha.slice(0, 7)}`;
+  const at = e.invalidated ? "已作废（重新安排前采的）" : e.sha === l.lastChangeSha ? "当前版本" : `旧版本 ${e.sha.slice(0, 7)}`;
   return `- ${e.id} ${e.pass ? "✓" : "✗"} ${e.kind} ${clip(e.label, 120)}（${at}，第 ${e.step} 轮）\n  ${clip(e.detail.replace(/\n+/g, " ⏎ "), 300)}`;
 }
 
@@ -316,6 +387,7 @@ export interface SupervisorCtx {
 
 const SIGNAL_HINT = `## 要做的事写成一行标记（不写 = 你还在想，下一轮接着问你）
 - \`[[instruct]]\` 给 worker 的具体指令，可以多行
+- \`[[replan]]\` 人改了目标 / 验收 / 口径时，先重新安排再继续：reason: 一句原因；criteria: / constraints: 后面每行 - 一条（整体替换）；invalidate: E3,E5 作废旧证据；reset_worker: no 可以保留 worker 会话
 - \`[[verify]]\` 你自己要跑的只读命令，一行一条
 - \`[[review]]\` 可选：换一个模型审当前改动，这一行后面写审查重点
 - \`[[wait]]\` 挂起等长作业，后面写 key=value：pid=123 / log=out/train.log / done=训练完成 / stale=30m / every=5m / timeout=2d；巡检正常写 \`[[wait]]\` 再一行 keep=1
@@ -335,7 +407,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
       c.waiting ? `正在等待：${c.waiting}` : "",
       `## 自上一轮以来\n${recent.length ? recent.map((o) => `- [第 ${o.step} 轮 · ${o.kind}] ${clip(o.text, 800)}`).join("\n") : "（没有新情况）"}`,
       l.pendingAsk ? `待人回答：${l.pendingAsk.question}` : "",
-      `## 现在\n按你的判断继续：给 worker 写 \`[[instruct]]\`、自己跑 \`[[verify]]\`、\`[[review]]\`、\`[[wait]]\`、\`[[finish]]\`、\`[[abort]]\`；只有不可逆或高成本才 \`[[ask]]\`。`,
+      `## 现在\n按你的判断继续：给 worker 写 \`[[instruct]]\`、自己跑 \`[[verify]]\`、\`[[review]]\`、\`[[wait]]\`、\`[[finish]]\`、\`[[abort]]\`；只有不可逆或高成本才 \`[[ask]]\`。人这句话如果改了目标 / 验收 / 口径，先写 \`[[replan]]\` 再继续。`,
       `预算：${b.line}`,
     ].filter(Boolean).join("\n\n");
   }
