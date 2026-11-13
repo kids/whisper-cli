@@ -178,6 +178,8 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+      effort: e.CODEBUDDY_EFFORT || undefined,
+      autocompact: e.CODEBUDDY_AUTOCOMPACT || undefined,
     };
   }
   if (aiCli === "cursor") {

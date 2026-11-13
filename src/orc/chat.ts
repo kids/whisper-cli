@@ -3,7 +3,7 @@
 // process, progress cards, notifications, lead-agent action parsing (002 §2–§3)
 // =============================================================================
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { larkOf } from "../platform/feishu";
 import type { ImClient } from "../platform/types";
 import type { AgentConfig } from "../types";
@@ -368,12 +368,60 @@ export async function submitFromChat(
   return { task, receiptInThread };
 }
 
-/** One-line-per-task summary of this chat's active orc tasks (for single-mode prompts) */
+const STATUS_WORD: Record<string, string> = {
+  queued: "排队", running: "进行中", waiting: "等外部作业", waiting_children: "子任务在跑",
+  ready: "已完成待验收", blocked: "等人决定", failed: "失败", dropped: "已终止", done: "已完成",
+};
+
+/** Read-only snapshot of every orc task; agents can read it for details we don't inline. */
+export const TASK_SNAPSHOT_PATH = resolve(import.meta.dirname, "../../state/orc-tasks.json");
+
+function writeTaskSnapshot(tasks: Task[]): void {
+  try {
+    mkdirSync(dirname(TASK_SNAPSHOT_PATH), { recursive: true });
+    const body = JSON.stringify({
+      savedAt: new Date().toISOString(),
+      note: "read-only snapshot; the orchestration DB is the source of truth — do not edit",
+      tasks: tasks.map((t) => ({
+        id: t.id, title: t.title, kind: t.kind, status: t.status, chatId: t.chatId, parentId: t.parentId,
+        progress: t.progress, updatedAt: new Date(t.updatedAt).toISOString(),
+      })),
+    }, null, 2);
+    const tmp = `${TASK_SNAPSHOT_PATH}.tmp`;
+    writeFileSync(tmp, body);
+    renameSync(tmp, TASK_SNAPSHOT_PATH);
+  } catch { /* a failed snapshot must not break the turn */ }
+}
+
+const ago = (ms: number): string => {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  return m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;
+};
+
+/**
+ * This chat's tasks for the single agent's context: open ones plus anything that
+ * finished in the last 24h (so "那个任务怎样了" is answerable without the lead),
+ * one line each, plus where to read the full list.
+ */
 export function activeTaskSummary(chatId: string): string | undefined {
   if (!orc) return undefined;
-  const ts = orc.store.listTasks({ chatId, status: ["queued", "running", "waiting", "waiting_children", "blocked"], limit: 5 });
-  if (!ts.length) return undefined;
-  return "【本群后台 orc 任务】\n" + ts.map((t) => `- ${t.title} [${t.status}]：${t.progress}`).join("\n") + "\n（跟用户提这些任务时用标题，不要写编号）";
+  const all = orc.store.listTasks({ limit: 300 });
+  writeTaskSnapshot(all);
+  const now = Date.now();
+  const mine = all
+    .filter((t) => !t.parentId && t.chatId === chatId)
+    // blocked never ages out: someone still has to decide on it
+    .filter((t) => t.status === "blocked" || !TERMINAL.includes(t.status) || now - t.updatedAt < 24 * 3600_000)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 8);
+  if (!mine.length) return undefined;
+  const lines = mine.map((t) =>
+    `- #${t.id} ${t.title}｜${STATUS_WORD[t.status] ?? t.status}｜${clip(t.progress || "无进展记录", 60)}｜${ago(now - t.updatedAt)}更新`);
+  return [
+    "【本群团队任务】",
+    ...lines,
+    `说明：状态以上面为准；用户要细节时读 ${TASK_SNAPSHOT_PATH}（只读，不要改）。用户没问就别报编号。`,
+  ].join("\n");
 }
 
 /** What the router needs about this chat: recent tasks (+ open questions) and a pending proposal */
@@ -422,7 +470,7 @@ function leadTaskLine(t: Task, store?: OrcStore): string {
   if (!l) return head;
   const roles = `  角色：${Object.values(t.preset.roles).map((r) => `${r.name}=${r.cli}${r.model ? ":" + r.model : ""}`).join("，")}；播报：${l.verbosity}`;
   const ask = l.pendingAsk
-    ? `\n  ⚠️ 正在等人回答：${l.pendingAsk.question}\n  选项：${l.pendingAsk.options.map((o) => `${o.id}) ${o.label}`).join("；")}（没人答就一直等）`
+    ? `\n  ⚠️ 正在等人回答：${l.pendingAsk.question}（没人答就一直等；人随口说一句就行）`
     : "";
   return `${head}\n${roles}${ask}`;
 }

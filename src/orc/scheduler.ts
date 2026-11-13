@@ -155,6 +155,9 @@ export class Orchestrator {
   start(): void {
     const rec = this.store.recover();
     if (rec.attempts || rec.effects) console.log(`[orc] recovered: ${rec.attempts} interrupted attempts, ${rec.effects} effects re-queued`);
+    // 旧版会把"监督者没给出动作"变成等人回答的问题：升级后自动放行，不让人为格式问题做决定
+    const legacy = this.loop.clearLegacyFormatAsks();
+    if (legacy) console.log(`[orc] released ${legacy} task(s) blocked on a formatting question`);
     this.timer = setInterval(() => void this.tick(), this.opts.tickMs ?? 1000);
   }
 

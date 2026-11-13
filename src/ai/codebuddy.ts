@@ -267,6 +267,16 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
   const staleMs = opts.staleTimeoutMs ?? STALE_TIMEOUT_MS;
   const timeoutNotice = (stderr: string) => timeoutNoticeFor(stderr, hardMs, staleMs);
 
+  // Reasoning effort / auto-compact window, passed straight to the CLI.
+  // Per-agent config wins; the plain env vars cover every codebuddy agent at once.
+  const EFFORT_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+  const effortRaw = (config.effort || process.env.CODEBUDDY_EFFORT || "").trim().toLowerCase();
+  const effort = EFFORT_LEVELS.has(effortRaw) ? effortRaw : undefined;
+  if (effortRaw && !effort) console.warn(`[codebuddy] ignoring invalid effort "${effortRaw}"`);
+  const compactRaw = (config.autocompact || process.env.CODEBUDDY_AUTOCOMPACT || "").trim().toLowerCase();
+  const autocompact = compactRaw === "auto" || /^\d+[km]?$/.test(compactRaw) ? compactRaw : undefined;
+  if (compactRaw && !autocompact) console.warn(`[codebuddy] ignoring invalid autocompact "${compactRaw}"`);
+
   async function attempt(resume: boolean): Promise<AiResult | null> {
     const sid = resume && opts.resumeSession !== false ? sessions.get(chatId) : undefined;
     const args = [
@@ -276,10 +286,12 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     ];
     if (sid) args.push("-r", sid);
     if (opts.model) args.push("--model", opts.model);
+    if (effort) args.push("--effort", effort);
+    if (autocompact) args.push("--autocompact", autocompact);
     if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
     if (opts.disallowedTools?.length) args.push("--disallowedTools", opts.disallowedTools.join(","));
 
-    console.log(`[codebuddy] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"} model=${opts.model || "default"}`);
+    console.log(`[codebuddy] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"} model=${opts.model || "default"}${effort ? ` effort=${effort}` : ""}${autocompact ? ` autocompact=${autocompact}` : ""}`);
 
     const { stdout, stderr, wasCancelled, streamedText } = await new Promise<{
       stdout: string; stderr: string; wasCancelled: boolean; streamedText: string;
@@ -518,7 +530,14 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
 
     // Explicit error reported by the result event
     if (resultItem?.is_error) {
-      return { text: `⚠️ ${String(resultItem.result ?? "").slice(0, 4000)}`, model, usage };
+      // 收尾那一次调用报错，但模型这轮其实写了内容（常见于长任务最后一步失败）：内容比错误码有用
+      const said = assistantTurnTexts.join("\n\n---\n\n").trim();
+      if (said) {
+        console.warn(`[codebuddy] result is_error but ${said.length} chars of assistant text: ${String(resultItem.result ?? "").slice(0, 200)}`);
+        return { text: said, model, usage, sessionId };
+      }
+      const why = String(resultItem.result ?? "").trim();
+      return { text: `⚠️ CodeBuddy 这轮失败：${why.slice(0, 4000) || "CLI 报了错但没给原因"}`, model, usage };
     }
 
     // Preferred: the final `result` event's text — UNLESS the run spanned

@@ -50,24 +50,23 @@ const cases: [string, RouteCtx, "single" | "lead"][] = [
   ["切到编排模式", none, "lead"],
   ["回到单聊模式吧", none, "lead"],
   ["退出团队模式", none, "lead"],
-  // steering tasks in progress → lead
+  // steering a live task → lead, but only on explicit signals: `#id` or a bare imperative
   ["#12 到哪了", busy, "lead"],
-  ["12 号那个怎么样了", busy, "lead"],
-  ["限流那个改用 redis 令牌桶", busy, "lead"],
-  ["登录接口限流先别做了", busy, "lead"],
-  ["这个任务进展如何", busy, "lead"],
-  ["正在训练的任务有什么进展", busy, "lead"],
-  ["再试一次，评审意见里的编码问题用 utf-8-sig 解决", busy, "lead"],
   ["放弃吧", busy, "lead"],
-  ["执行者换成 claude", busy, "lead"],
-  ["别每轮都刷屏了", busy, "lead"],
-  // progress without a task anchor → single agent (experiment / code Q&A, not team steer)
-  ["进展如何", busy, "lead"],
-  ["效果有任何进展吗", busy, "lead"],
-  // 短句在有任务时交给 lead（它读得懂“再试一次/接受/算了”，猜错会用 chat 交回单 agent）
-  // 长句不和任务挂钩的普通对话仍留在单 agent
-  ["这段正则怎么写：匹配邮箱", busy, "lead"],
-  ["帮我解释一下 src/route.ts 的作用", busy, "lead"],
+  ["再试一次", busy, "lead"],
+  // no id / not a bare imperative → single agent, which has the task snapshot and can answer
+  ["12 号那个怎么样了", busy, "single"],
+  ["限流那个改用 redis 令牌桶", busy, "single"],
+  ["登录接口限流先别做了", busy, "single"],
+  ["这个任务进展如何", busy, "single"],
+  ["正在训练的任务有什么进展", busy, "single"],
+  ["再试一次，评审意见里的编码问题用 utf-8-sig 解决", busy, "single"],
+  ["执行者换成 claude", busy, "single"],
+  ["别每轮都刷屏了", busy, "single"],
+  ["进展如何", busy, "single"],
+  ["效果有任何进展吗", busy, "single"],
+  ["这段正则怎么写：匹配邮箱", busy, "single"],
+  ["帮我解释一下 src/route.ts 的作用", busy, "single"],
   ["把 utils 里的 sleep 函数换成 setTimeout 的 promise 版本，并补上单元测试和注释说明", busy, "single"],
   // open questions
   ["可以推了", asking, "lead"],
@@ -92,10 +91,10 @@ const cases: [string, RouteCtx, "single" | "lead"][] = [
   ["确认", { ...proposal, mode: "single" }, "lead"],
   ["随便聊聊", { ...none, inThread: true }, "lead"],
   ["这个交给团队做", { ...none, hasAttachments: true }, "single"],
-  // 监控是单 agent 的事，但短句先到 lead，它会交回
-  ["训练跑完之后把监控停掉，然后把 eval 结果汇总一下发群里", busy, "lead"],
-  ["停掉监控", busy, "lead"],
-  ["别再盯了", busy, "lead"],
+  // 监控/挂起是单 agent 的事（它有 [[watch]]），不再按“短句”甩给 lead
+  ["训练跑完之后把监控停掉，然后把 eval 结果汇总一下发群里", busy, "single"],
+  ["停掉监控", busy, "single"],
+  ["别再盯了", busy, "single"],
   ["#12 的监控停一下", busy, "lead"],
 ];
 

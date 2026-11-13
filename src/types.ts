@@ -99,6 +99,10 @@ export interface CodeBuddyConfig {
    * claude-opus-5 never show up even though they run fine.
    */
   models?: string[];
+  /** Reasoning effort passed as `--effort` (minimal|low|medium|high|xhigh|max) */
+  effort?: string;
+  /** Auto-compact window passed as `--autocompact` ("auto" or a token count, clamped 100k–1M) */
+  autocompact?: string;
 }
 
 export interface CursorConfig {

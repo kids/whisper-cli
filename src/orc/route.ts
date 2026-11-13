@@ -1,11 +1,13 @@
 // =============================================================================
 // Message routing — single agent or the orc lead agent? (auto mode)
 // =============================================================================
-// Cheap, code-only first pass on every chat message (no LLM call, no latency):
-//   - clear team signals / mode switches / talking about an existing task → lead
-//   - everything else → the chat's single agent
-// Both sides can hand over when the guess was wrong, so the rules only need to
-// be right in the common case:
+// Cheap, code-only first pass on every chat message (no LLM call, no latency).
+// Only *explicit* signals go to the lead — asking for a team, switching mode, an
+// open question, a pending proposal, `#id`, or a steering verb on a live task.
+// Everything else stays with the chat's single agent, which now gets the task
+// snapshot (activeTaskSummary) and can answer / hand over itself. Do not guess
+// from message length or title fragments: that misrouted ordinary questions.
+// Both sides can still hand over when a rule was wrong:
 //   - lead → single: the `chat` action (plain Q&A, one-shot work)
 //   - single → team: a `[[task]] {...}` line in its reply (formatTaskHint)
 // Modes: auto (default, rules below) · single (only card threads and pending
@@ -40,7 +42,13 @@ export interface Route { to: "single" | "lead"; why: string }
 
 const OPEN: TaskStatus[] = ["queued", "running", "waiting", "waiting_children", "blocked"];
 const RECENT_MS = 24 * 3600_000;
-const SHORT = 40;
+
+/**
+ * A bare imperative aimed at the running task ("放弃吧", "再试一次", "停掉它").
+ * Anchored on purpose: "训练跑完之后把监控停掉…" is a normal request for the single
+ * agent, not a command for the lead. Guessing from message length misrouted real questions.
+ */
+const STEER_PATTERN = /^(再试一次|再试|重试|重跑|重来|放弃|停掉|停止|停下|暂停|终止|取消|接受|验收|继续)(一下|吧|了|它|这个|任务)?[。！!]?$/;
 
 /** New work that should go to a team rather than one agent turn */
 export const TEAM_PATTERNS: [RegExp, string][] = [
@@ -58,19 +66,14 @@ export const TEAM_PATTERNS: [RegExp, string][] = [
 /** Switching the chat's mode in plain words */
 export const MODE_PATTERN = /((切|换|改|调)(到|成|回)?|进入|回到|退出|打开|开启|关闭|关掉)[^。！？\n]{0,4}(单聊|单\s*agent|普通|编排|团队|orc|自动)模式|(编排|团队|orc)模式(关|退出|别用)/i;
 
+/** Only explicit references count: `#12` or `任务 12`. Title matching guessed too often. */
 function mentionsTask(text: string, tasks: RouteTask[]): RouteTask | undefined {
-  for (const m of text.matchAll(/#\s?(\d+)|任务\s?#?(\d+)|(?<![\d.\w])(\d{1,5})\s?(?=号|那个|这个)|^(\d{1,5})(?=[\s,，的])/g)) {
-    const id = Number(m[1] ?? m[2] ?? m[3] ?? m[4]);
+  for (const m of text.matchAll(/#\s?(\d+)|任务\s?#?(\d+)/g)) {
+    const id = Number(m[1] ?? m[2]);
     const t = tasks.find((x) => x.id === id);
     if (t) return t;
   }
-  // a 4+ char run of a task's title (e.g. 「调优训练超参」→「训练超参」)
-  const t = text.replace(/\s+/g, "");
-  return tasks.find((x) => {
-    const title = x.title.replace(/\s+/g, "");
-    for (let i = 0; i + 4 <= title.length; i++) if (t.includes(title.slice(i, i + 4))) return true;
-    return false;
-  });
+  return undefined;
 }
 
 export function routeMessage(text: string, c: RouteCtx): Route {
@@ -95,8 +98,7 @@ export function routeMessage(text: string, c: RouteCtx): Route {
 
   if (live.length) {
     if (ref) return { to: "lead", why: `提到「${ref.title}」` };
-    // short lines are how people steer / answer; let the lead read them, it can hand back
-    if (s.length <= SHORT) return { to: "lead", why: "进行中的任务可能相关" };
+    if (STEER_PATTERN.test(s)) return { to: "lead", why: "指挥进行中的任务" };
   }
   return { to: "single", why: "普通对话" };
 }

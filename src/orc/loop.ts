@@ -55,7 +55,6 @@ export interface LoopRunEvent {
 
 const FINAL: TaskStatus[] = ["ready", "failed", "dropped"];
 const DONE_KINDS = ["done", "metrics", "file", "cmd"];
-const IDLE_ACTIONS: L.ActionName[] = ["instruct", "verify", "review", "report", "update_constraints"];
 const clip = L.clip;
 const shortStat = (stat: string) => stat.trim().split("\n").pop()?.trim() ?? "";
 const fmtWhen = (t: number) => new Date(t).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -164,7 +163,7 @@ export class LoopEngine {
     return true;
   }
 
-  /** Answer the open question (option id and/or free text) */
+  /** 回答监督者的问题：人直接说，不用选项（只有预算确认还认「继续/停」） */
   answer(taskId: number, option?: string, text?: string, raw?: string): string {
     const task = this.store.getTask(taskId);
     const name = task?.title ?? "这个任务";
@@ -172,13 +171,23 @@ export class LoopEngine {
     const l = this.ledger(taskId)!;
     const ask = l.pendingAsk;
     if (task.status !== "blocked" || !ask) return `「${name}」现在没有待回答的问题`;
-    if (option && !ask.options.some((o) => o.id === option)) return `没有选项「${option}」，可选：${ask.options.map((o) => `${o.id}) ${o.label}`).join("；")}`;
-    if (!option && !text && !raw) return "请给出选项或你的想法";
-    if (raw || text) L.noteHuman(l, (raw || text)!);
-    const r = this.resolveAsk(task, l, option, text ? withRaw(text, raw) : raw);
+    const said = (raw || text || "").trim();
+    if (ask.code === "budget") {
+      const stop = option === "stop" || /^(停|停吧|停了|不继续|算了|stop)$/i.test(said);
+      if (stop) {
+        const r = this.resolveAsk(task, l, said || "停", "stop");
+        this.commit(task, l, { status: r.status, progress: r.progress, notifies: r.notifies, next: [] });
+        return `🛑 「${name}」已停下，分支和进展都保留`;
+      }
+      const r = this.resolveAsk(task, l, said || "继续", "more");
+      this.commit(task, l, { status: r.status, progress: r.progress, notifies: r.notifies, next: [{ reason: "human" }] });
+      return `✅ 「${name}」预算已追加，继续推进`;
+    }
+    if (!said) return "直接说你的想法就行（不用选项）";
+    L.noteHuman(l, said);
+    const r = this.resolveAsk(task, l, said);
     this.commit(task, l, { status: r.status, progress: r.progress, notifies: r.notifies, next: r.status === "running" ? [{ reason: "human" }] : [] });
-    const opt = ask.options.find((o) => o.id === option);
-    return r.status === "running" ? `✅ 「${name}」收到${opt ? `「${opt.label}」` : "你的回复"}，继续推进` : `🛑 「${name}」已按你的选择停下`;
+    return `✅ 「${name}」收到你的回复，继续推进`;
   }
 
   /** Human retry of a blocked / failed / dropped loop task */
@@ -186,7 +195,7 @@ export class LoopEngine {
     const task = this.store.getTask(taskId);
     if (!task || task.kind !== "loop" || !["blocked", "failed", "dropped"].includes(task.status)) return false;
     const l = this.ledger(taskId)!;
-    if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, l.pendingAsk.code ? l.pendingAsk.options[0].id : undefined, note || "继续"); return true; }
+    if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, l.pendingAsk.code === "budget" ? "more" : undefined, note || "继续"); return true; }
     L.resetGuards(l);
     if (L.budgetState(l).exhausted) L.extendBudget(l);
     l.pendingAsk = undefined;
@@ -194,6 +203,26 @@ export class LoopEngine {
     L.observe(l, l.step + 1, "human", `人工重试${note ? "：" + note : ""}`);
     this.commit(task, l, { status: "running", progress: "人工重试", next: [{ reason: "resume" }] });
     return true;
+  }
+
+  /**
+   * 老版本把"监督者没给出动作"挂成要人回答的问题（`pendingAsk.code = "invalid"`）。
+   * 这种问题不该问人：启动时清掉、重置守卫、接着跑。
+   */
+  clearLegacyFormatAsks(): number {
+    let n = 0;
+    for (const t of this.store.listTasks({ status: ["blocked"], limit: 500 })) {
+      if (t.kind !== "loop") continue;
+      const l = this.ledger(t.id);
+      if (!l?.pendingAsk) continue;
+      if ((l.pendingAsk as { code?: string }).code !== "invalid") continue;
+      L.resetGuards(l);
+      l.pendingAsk = undefined;
+      L.observe(l, l.step + 1, "system", "「监督者没给出动作」这类问题不再问人，直接接着跑。");
+      this.commit(t, l, { status: "running", progress: "旧版遗留的格式问题已自动放行，接着跑", next: [{ reason: "retry" }] });
+      n++;
+    }
+    return n;
   }
 
   /** Kill whatever runs for the task and cancel its watch (status is set by the caller) */
@@ -283,7 +312,7 @@ export class LoopEngine {
 
     const b = L.budgetState(l);
     if (b.exhausted) {
-      l.pendingAsk = L.guardAsk(l, "budget", b.exhausted);
+      l.pendingAsk = L.budgetAsk(l, b.exhausted);
       this.commit(task, l, { status: "blocked", progress: `预算用完：${b.exhausted}`, notifies: [...notifies, this.askNotify(task, l.pendingAsk)] });
       return;
     }
@@ -296,7 +325,7 @@ export class LoopEngine {
     // still parked on a watch? (it may have fired just now — then it's already in the observations)
     const wasWaiting = !!l.waitWatch;
 
-    // ---- Supervisor proposes ----
+    // ---- 监督者：一个长会话，接着上一轮想 ----
     const sup = task.preset.roles[loop.supervisor];
     const worker = task.preset.roles[loop.worker];
     const reviewer = loop.reviewer ? task.preset.roles[loop.reviewer] : undefined;
@@ -309,49 +338,48 @@ export class LoopEngine {
       : undefined;
     const reasonText = ({
       start: "任务刚开始", next: "上一个动作已完成", human: "人发来了消息", watch: "等待的监控触发了",
-      heartbeat: `定时巡检（作业还在跑）。${PATROL}正常就 {"action":"wait","keep":true}，reason 写一句判断依据。`,
+      heartbeat: `定时巡检（作业还在跑）。${PATROL}正常就写 [[wait]] 再一行 keep=1，并写一句判断依据。`,
       resume: "人要求继续 / 重试", retry: "上一轮出错后重试",
     } as Record<string, string>)[p.reason] ?? p.reason;
+    // 首轮或会话用满就重建上下文；其余轮次续接同一个监督者会话（它有前几轮的记忆）。
+    // 上限跟任务预算同一个寿命（默认 maxSteps=60 轮）：预算用完本来就要停下来问人，
+    // 所以在预算之内不再另设一个轮数；ORC_LOOP_SUP_TURNS 可以单独收紧（0 = 不限）。
+    const supTurns = Number(process.env.ORC_LOOP_SUP_TURNS || 0) || l.limits.maxSteps;
+    const fresh = !l.sup.sessionId || l.sup.turns >= supTurns;
     const prompt = L.buildSupervisorPrompt(l, {
       taskId: task.id, title: task.title, worktree: wtp, branch: task.branch ?? "", diffStat: wt.diffSince(wtp, task.baseRef, 0).stat,
-      worker: roleName(worker), reviewer: reviewer ? roleName(reviewer) : undefined, reason: reasonText, waiting, canWait,
+      worker: roleName(worker), reviewer: reviewer ? roleName(reviewer) : undefined, reason: reasonText, waiting, canWait, fresh,
     });
-    const res = await this.run(task, sup, prompt, { key: `orc-loop:${task.id}#supervisor`, readOnly: true, n, label: "监督者" });
+    const res = await this.run(task, sup, prompt, {
+      key: `orc-loop:${task.id}#supervisor`, readOnly: true, n, label: "监督者",
+      resumeSessionId: fresh ? undefined : l.sup.sessionId,
+    });
     if (res.cancelled || this.dropped(task.id)) return;
     l.budget.steps++;
     l.budget.tokens += res.tokens;
     if (wt.isDirty(wtp)) { const files = wt.resetHard(wtp); L.observe(l, n, "system", `监督者是只读的，却改了文件，已回滚：${clip(files, 300)}`); }
 
-    const parsed = res.error && !res.text ? { error: `监督者运行失败：${res.error}` } : L.parseLoopAction(res.text);
-    const rejection = "error" in parsed ? parsed.error : L.validateAction(l, parsed, {
-      hasReviewer: !!reviewer, requireReview: loop.requireReview, canWait,
-      checkWatch: (raw) => parseWatchSpec(raw, wtp),
-    });
-    if (rejection) {
-      l.guard.invalidStreak++;
-      l.rejection = rejection;
+    // 这一轮根本没跑成（CLI 报错 / 超时 / 空回复）：算运行故障重试，不找人
+    if (res.error || res.timedOut) { this.roundFailed(task, l, n, p.reason, res, t0); return; }
+
+    l.sup = { sessionId: res.sessionId ?? (fresh ? undefined : l.sup.sessionId), turns: fresh ? 1 : l.sup.turns + 1 };
+    l.guard.infraErrors = 0;
+    l.budget.activeMs += Date.now() - t0;
+    const a = L.parseSignal(res.text);
+
+    // 没写动作标记 = 它还在想：不报错、不计数、不问人，下一轮接着来（预算兜底）
+    if (!a) {
+      L.observe(l, n, "thought", clip(stripSignals(res.text), 1500) || "（这一轮没有输出）");
       l.step = n;
-      L.observe(l, n, "rejected", `动作被驳回：${rejection}`);
-      l.budget.activeMs += Date.now() - t0;
-      this.store.addStep({ taskId: task.id, n, reason: p.reason, action: "error" in parsed ? null : parsed, accepted: false, verdict: rejection, observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
-      if (l.guard.invalidStreak >= L.INVALID_LIMIT) {
-        l.pendingAsk = L.guardAsk(l, "invalid", rejection);
-        this.commit(task, l, { status: "blocked", progress: "监督者连续给出无效动作", notifies: [...notifies, this.askNotify(task, l.pendingAsk)] });
-      } else {
-        this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮动作被驳回，重新决策`, notifies, next: [{ reason: "retry" }] });
-      }
+      this.store.addStep({ taskId: task.id, n, reason: p.reason, action: null, accepted: true, verdict: "没有动作，继续", observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
+      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 监督者在看现场`, notifies, next: [{ reason: "next" }] });
       return;
     }
-    const a = parsed as L.LoopAction;
-    // a patrol that finds the job healthy is not a step toward the goal: it does not use up the round budget
-    if (a.action === "wait" && a.keep) l.budget.steps--;
-    l.rejection = undefined;
-    l.guard.invalidStreak = 0;
-    l.guard.infraErrors = 0;
-    if (a.plan) l.plan = a.plan;
-    if (a.decision) { l.decisions.push({ step: n, at: Date.now(), text: a.decision }); if (l.decisions.length > 30) l.decisions.shift(); }
 
-    // anything but "keep waiting" during a wait = stop waiting for that job
+    // 巡检正常（keep）不消耗这一轮
+    if (a.action === "wait" && a.keep) l.budget.steps--;
+
+    // 除了"继续等"以外，任何动作都结束这次等待
     if (wasWaiting && l.waitWatch && !(a.action === "wait" && a.keep)) {
       cancelWatch(l.waitWatch);
       L.observe(l, n, "system", `不再等待监控 #${l.waitWatch}。`);
@@ -368,37 +396,17 @@ export class LoopEngine {
       out = { progress: `第 ${n} 轮执行出错`, obs: `执行 ${a.action} 出错：${msg}`, notifies: [], next: [{ reason: "next" }], turn: `执行出错：${clip(msg, 300)}` };
     }
     if (out.stopped || this.dropped(task.id)) return;
-    l.guard.lastAction = a.action;
     if (out.obs) L.observe(l, n, a.action, out.obs);
 
-    // ---- guards after the action ----
-    let status = out.status ?? "running";
-    let next = out.next ?? [];
-    const extra: NotifyPayload[] = [];
-    if (IDLE_ACTIONS.includes(a.action)) {
-      const sig = L.progressSig(l);
-      l.guard.idleStreak = sig === l.guard.lastSig ? l.guard.idleStreak + 1 : 0;
-      l.guard.lastSig = sig;
-    }
-    const worst = Object.entries(l.guard.errorCounts).sort((x, y) => y[1] - x[1])[0];
-    const guard = status === "running"
-      ? (worst && worst[1] >= L.ERROR_ASK_AT ? ["errors", worst[0]] as const
-        : l.guard.idleStreak >= L.IDLE_LIMIT ? ["idle", "看起来在原地打转。"] as const : undefined)
-      : undefined;
-    if (guard) {
-      l.pendingAsk = L.guardAsk(l, guard[0], clip(guard[1], 200));
-      status = "blocked";
-      extra.push(this.askNotify(task, l.pendingAsk));
-    }
-
-    l.budget.activeMs += Date.now() - t0;
+    const status = out.status ?? "running";
+    const next = out.next ?? [];
     this.store.addStep({ taskId: task.id, n, reason: p.reason, action: a, accepted: true, verdict: "", observation: out.obs, raw: res.text, tokens: res.tokens, startedAt: t0 });
     const turn: NotifyPayload[] = [];
     if (l.verbosity !== "quiet" && out.turn) {
-      const think = l.verbosity === "verbose" ? thinking(res.text) : "";
-      turn.push({ taskId: task.id, kind: "turn", round: n, text: `**第 ${n} 轮 · ${L.ACTION_LABEL[a.action]}**\n${out.turn}${think ? `\n\n> 监督者的分析：${clip(think, 1200).replace(/\n/g, "\n> ")}` : ""}` });
+      const think = l.verbosity === "verbose" ? stripSignals(res.text) : "";
+      turn.push({ taskId: task.id, kind: "turn", round: n, text: `**第 ${n} 轮 · ${L.ACTION_LABEL[a.action]}**\n${out.turn}${think ? `\n\n> 监督者的判断：${clip(think, 1200).replace(/\n/g, "\n> ")}` : ""}` });
     }
-    this.commit(task, l, { status, progress: out.progress, notifies: [...notifies, ...turn, ...out.notifies, ...extra], next, wakeIfInbox: status !== "blocked" });
+    this.commit(task, l, { status, progress: out.progress, notifies: [...notifies, ...turn, ...out.notifies], next, wakeIfInbox: status !== "blocked" });
   }
 
   // ---- actions ------------------------------------------------------------
@@ -408,8 +416,17 @@ export class LoopEngine {
     const id = task.id;
     switch (a.action) {
       case "instruct": {
-        if (L.irreversibleHit(a.text)) { const ap = l.approvals.find((x) => !x.used); if (ap) ap.used = true; }
-        const fresh = a.fresh || !l.worker.sessionId || l.worker.turns >= L.MAX_WORKER_TURNS || l.worker.epoch !== l.workerEpoch;
+        const hit = L.irreversibleHit(a.text);
+        const approval = l.approvals.find((x) => !x.used);
+        if (hit && !approval) {
+          l.pendingAsk = { step: n, question: `这条指令涉及${hit}，要做吗？\n（${clip(a.text, 300)}）`, why: "irreversible", askedAt: Date.now() };
+          return {
+            status: "blocked", progress: `等你确认：${hit}`, obs: `这条指令涉及不可逆操作（${hit}），先停下等确认；确认后下一轮放行一次`,
+            notifies: [this.askNotify(task, l.pendingAsk)], next: [], turn: "",
+          };
+        }
+        if (approval) approval.used = true;
+        const fresh = !l.worker.sessionId || l.worker.turns >= L.MAX_WORKER_TURNS || l.worker.epoch !== l.workerEpoch;
         if (fresh && l.worker.sessionId) l.worker.rotations++;
         const prompt = L.buildWorkerPrompt(l, a.text, { taskId: id, fresh, rolePrompt: r.worker.prompt, branch: task.branch ?? "" });
         const prev = l.head;
@@ -450,30 +467,10 @@ export class LoopEngine {
             kind: "verify", label, pass,
             detail: `${r0.timedOut ? "超时；" : ""}exit ${r0.code}${c.expect ? `；expect /${c.expect}/ ${pass ? "命中" : "未命中"}` : ""}\n${tail}`, sha: l.lastChangeSha, step: n,
           });
-          if (!pass) {
-            const last = (r0.out.split("\n").filter((x) => x.trim()).pop() ?? "").replace(/\d+(\.\d+)?/g, "#").slice(0, 120);
-            const sig = `${c.cmd} → exit ${r0.code}：${last}`;
-            l.guard.errorCounts[sig] = (l.guard.errorCounts[sig] ?? 0) + 1;
-            if (l.guard.errorCounts[sig] === L.ERROR_HINT_AT) lines.push(`⚠️ 同一个失败已经出现 ${L.ERROR_HINT_AT} 次，考虑换个策略`);
-          }
           lines.push(`${ev.id} ${pass ? "✓" : "✗"} \`${c.cmd}\` exit ${r0.code}${r0.timedOut ? "（超时）" : ""}\n${clip(tail, 1500)}${violation ? `\n（检查命令改了文件，已回滚：${clip(violation, 200)}）` : ""}`);
           turn.push(`${ev.id} ${pass ? "✓" : "✗"} \`${clip(c.cmd, 80)}\`${pass ? "" : `：${clip(tail.split("\n").filter(Boolean).pop() ?? "", 120)}`}`);
         }
         return { progress: `第 ${n} 轮 · 验证：${turn.map((t) => t.split(" ")[1]).join("")}`, obs: lines.join("\n\n"), notifies: [], next: [{ reason: "next" }], turn: turn.join("\n") };
-      }
-      case "report": {
-        const md = [a.progress, a.findings?.length ? `**发现**\n${a.findings.map((f) => "- " + f).join("\n")}` : "", a.suggestion ? `**建议**：${a.suggestion}` : ""].filter(Boolean).join("\n\n");
-        return { progress: `第 ${n} 轮 · 已汇报`, obs: `已向群里汇报：${clip(a.progress, 300)}`, notifies: [{ taskId: id, kind: "report", text: md }], next: [{ reason: "next" }], turn: "" };
-      }
-      case "update_constraints": {
-        const lines = L.applyChanges(l, a, n);
-        const src = a.source === "human" ? `（依据人的话：“${clip(a.quote ?? "", 120)}”）` : "";
-        return {
-          progress: `第 ${n} 轮 · 约束更新到 v${l.constraintsVersion}`,
-          obs: `约束 / 验收标准已更新到 v${l.constraintsVersion}：\n${lines.join("\n")}`,
-          notifies: [{ taskId: id, kind: "constraints", text: `**约束 v${l.constraintsVersion}**：${a.reason}${src}\n${lines.join("\n")}` }],
-          next: [{ reason: "next" }], turn: "",
-        };
       }
       case "review": {
         const rv = r.reviewer!;
@@ -517,36 +514,30 @@ export class LoopEngine {
         };
       }
       case "ask": {
-        l.pendingAsk = { step: n, question: a.question, why: a.why, options: a.options, askedAt: Date.now() };
+        l.pendingAsk = { step: n, question: a.question, why: a.why, askedAt: Date.now() };
         return {
           status: "blocked", progress: `等你决定：${clip(a.question, 80)}`, obs: `已向人提问：${a.question}`,
           notifies: [this.askNotify(task, l.pendingAsk)], next: [], turn: "",
         };
       }
       case "finish": {
-        const evs = new Map(l.evidence.map((e) => [e.id, e]));
-        const rows = l.criteria.map((c) => {
-          const ref = a.acceptance.find((x) => x.criterion === c.id && evs.get(x.evidence)?.pass) ?? a.acceptance.find((x) => x.criterion === c.id);
-          const e = ref ? evs.get(ref.evidence) : undefined;
-          return `- ${c.id} ${c.text} ← ${e ? `${e.id} ✓ ${clip(e.label, 80)}` : "?"}`;
-        });
         if (l.waitWatch) { cancelWatch(l.waitWatch); l.waitWatch = undefined; }
+        const ev = l.evidence.slice(-6);
+        const rows = l.criteria.map((c) => `- ${c.id} ${c.text}`).join("\n") || "（没有列验收标准）";
+        const evs = ev.length ? ev.map((e) => L.evidenceLine(e, l)).join("\n") : "（这一轮没有记录验证结果）";
+        const stale = l.evidence.length && l.lastChangeSha !== l.evidence[l.evidence.length - 1]?.sha;
         return {
           status: "ready", progress: "完成，等待验收", obs: `完成：${a.summary}`,
-          notifies: [{ taskId: id, kind: "ready", text: `${a.summary}\n\n**验收**\n${rows.join("\n")}\n\n分支 \`${task.branch}\`（${shortStat(wt.diffSince(wtp, task.baseRef, 0).stat) || "无改动"}）` }],
+          notifies: [{
+            taskId: id, kind: "ready",
+            text: `${a.summary}\n\n**验收标准**\n${rows}\n\n**最近的验证**\n${evs}${stale ? "\n\n（注意：最后一次改动之后没有再记录验证结果）" : ""}\n\n分支 \`${task.branch}\`（${shortStat(wt.diffSince(wtp, task.baseRef, 0).stat) || "无改动"}）`,
+          }],
           turn: "",
         };
       }
       case "abort": {
         if (l.waitWatch) { cancelWatch(l.waitWatch); l.waitWatch = undefined; }
-        const text = [
-          a.reason,
-          `**试过**\n${a.tried.map((x) => "- " + x).join("\n")}`,
-          `**卡在**\n${a.blockers.map((x) => "- " + x).join("\n")}`,
-          a.unmet.length ? `**没达成的验收标准**\n${a.unmet.map((u) => `- ${u} ${l.criteria.find((c) => c.id === u)?.text ?? ""}`).join("\n")}` : "",
-          a.resume_hint ? `**以后怎么接着做**：${a.resume_hint}` : "",
-          `分支 \`${task.branch}\` 和已提交的改动都保留着。`,
-        ].filter(Boolean).join("\n\n");
+        const text = `${a.reason}\n\n分支 \`${task.branch}\` 和已提交的改动都保留着。`;
         return { status: "failed", progress: `放弃：${clip(a.reason, 80)}`, obs: `放弃：${a.reason}`, notifies: [{ taskId: id, kind: "failed", text }], turn: "" };
       }
     }
@@ -554,32 +545,31 @@ export class LoopEngine {
 
   // ---- helpers ------------------------------------------------------------
 
-  private resolveAsk(task: Task, l: L.Ledger, option: string | undefined, text: string | undefined): { status: TaskStatus; progress: string; notifies: NotifyPayload[] } {
+  private resolveAsk(task: Task, l: L.Ledger, said: string, option?: string): { status: TaskStatus; progress: string; notifies: NotifyPayload[] } {
     const ask = l.pendingAsk!;
     l.pendingAsk = undefined;
     const n = l.step + 1;
-    const opt = ask.options.find((o) => o.id === option);
-    if (ask.code) {
-      if (opt?.id === "stop") {
+    if (ask.code === "budget") {
+      if (option === "stop") {
         const why = "按人的选择停下";
         return { status: "dropped", progress: why, notifies: [{ taskId: task.id, kind: "info", text: `${why}。分支 \`${task.branch}\` 和进展都保留。` }] };
       }
-      if (ask.code === "budget") L.extendBudget(l);
+      L.extendBudget(l);
       L.resetGuards(l);
-      L.observe(l, n, "human", `对「${ask.question}」人选择继续${text ? "：" + text : ""}`);
-      return { status: "running", progress: "人选择继续", notifies: [] };
+      L.observe(l, n, "human", `预算确认：继续${said && said !== "more" ? "；" + said : ""}`);
+      return { status: "running", progress: "预算已追加，继续", notifies: [] };
     }
-    const label = opt ? `「${opt.id}) ${opt.label}」` : "";
-    L.observe(l, n, "human", `人对「${ask.question}」的回答：${label}${text ? (label ? "；" : "") + text : ""}`);
-    if (ask.why === "irreversible" && opt?.go) {
-      l.approvals.push({ step: ask.step, question: ask.question, answer: `${opt.label}${text ? "；" + text : ""}`, at: Date.now() });
-    }
+    L.observe(l, n, "human", `人对「${ask.question}」的回答：${said}`);
+    // 不可逆的问题得到回答后记一次批准，监督者下次 instruct 里的不可逆操作放行一次
+    if (ask.why === "irreversible") l.approvals.push({ step: ask.step, question: ask.question, answer: said, at: Date.now() });
     return { status: "running", progress: "收到回答，继续", notifies: [] };
   }
 
   private askNotify(task: Task, a: L.PendingAsk): NotifyPayload {
-    const opts = a.options.map((o) => `**${o.id})** ${o.label}${o.consequence ? ` —— ${o.consequence}` : ""}`).join("\n");
-    return { taskId: task.id, kind: "ask", text: `${a.question}\n\n${opts}\n\n直接在群里回复选项或你的想法，不会自己往下走。` };
+    const tail = a.code === "budget"
+      ? "要接着花就回一句「继续」（追加 50% 预算），要停就回「停」。"
+      : "直接在群里说你的想法就行，在回答前不会往下走。";
+    return { taskId: task.id, kind: "ask", text: `${a.question}\n\n${tail}` };
   }
 
   private enqueue(taskId: number, reason: string, delayMs = 0, ref?: number): void {
@@ -633,13 +623,13 @@ export class LoopEngine {
     this.emit(task.id);
   }
 
-  private async run(task: Task, role: ResolvedRole, prompt: string, o: { key: string; readOnly: boolean; resumeSessionId?: string; n: number; label: string }): Promise<RunResult & { interrupted: boolean }> {
+  private async run(task: Task, role: ResolvedRole, prompt: string, o: { key: string; readOnly: boolean; resumeSessionId?: string; n: number; label: string; tag?: string }): Promise<RunResult & { interrupted: boolean }> {
     const instructions = await this.opts.instructionsFor?.(task);
     const h: Running = { key: o.key, cli: role.cli, interrupted: false, cancelled: false };
     this.running.set(task.id, h);
     const dir = resolve(this.opts.orcHome, "tasks", String(task.id));
     mkdirSync(dir, { recursive: true });
-    const base = `loop-${o.n}-${o.key.split("#")[1] ?? "run"}`;
+    const base = `loop-${o.n}-${o.key.split("#")[1] ?? "run"}${o.tag ? `-${o.tag}` : ""}`;
     writeFileSync(resolve(dir, `${base}.prompt.md`), prompt);
     const model = role.model || role.cli;
     const onRun = (ev: Omit<LoopRunEvent, "taskId" | "n" | "label" | "model">) => {
@@ -675,6 +665,28 @@ export class LoopEngine {
     return { ...res, cancelled, interrupted: h.interrupted };
   }
 
+  /** 监督者这一轮没跑成：退避重试，到上限判故障（failed），不把它变成要人回答的问题 */
+  private roundFailed(task: Task, l: L.Ledger, n: number, reason: string, res: RunResult, startedAt: number): void {
+    const why = res.error || (res.timedOut ? "超时" : "没有回复");
+    l.guard.infraErrors++;
+    l.step = n;
+    l.budget.activeMs += Date.now() - startedAt;
+    L.observe(l, n, "system", `监督者这一轮没跑成：${clip(why, 400)}`);
+    this.store.addStep({ taskId: task.id, n, reason, action: null, accepted: false, verdict: `运行失败：${clip(why, 200)}`, observation: "", raw: res.text || "", tokens: res.tokens, startedAt });
+    if (l.guard.infraErrors >= L.INFRA_LIMIT) {
+      this.commit(task, l, {
+        status: "failed", progress: `监督者连续 ${L.INFRA_LIMIT} 轮没跑成：${clip(why, 60)}`,
+        notifies: [{ taskId: task.id, kind: "failed", text: `**${task.title}：监督者连续 ${L.INFRA_LIMIT} 轮没跑成**\n${clip(why, 500)}\n\n这是运行故障，不是要你选；改动和分支都在，说「重试」就接着来。` }],
+      });
+    } else {
+      this.commit(task, l, {
+        status: task.status === "waiting" ? "waiting" : "running",
+        progress: `监督者这一轮没跑成（${clip(why, 60)}），重试`,
+        next: [{ reason: "retry", delayMs: L.RETRY_BASE_MS * 2 ** (l.guard.infraErrors - 1) }],
+      });
+    }
+  }
+
   private infraFail(taskId: number, err: unknown): void {
     const msg = (err as Error)?.message ?? String(err);
     console.error(`[orc loop] task #${taskId} round failed:`, msg);
@@ -683,10 +695,13 @@ export class LoopEngine {
     if (!task || !l || FINAL.includes(task.status)) return;
     l.guard.infraErrors++;
     L.observe(l, l.step + 1, "system", `本轮基础设施出错：${clip(msg, 500)}`);
-    if (l.guard.infraErrors >= 3) {
-      this.commit(task, l, { status: "blocked", progress: `连续出错：${clip(msg, 80)}`, notifies: [{ taskId, kind: "decision", text: `连续 ${l.guard.infraErrors} 轮出错：${clip(msg, 500)}` }] });
+    if (l.guard.infraErrors >= L.INFRA_LIMIT) {
+      this.commit(task, l, {
+        status: "failed", progress: `连续出错：${clip(msg, 80)}`,
+        notifies: [{ taskId, kind: "failed", text: `**${task.title}：连续 ${l.guard.infraErrors} 轮出错**\n${clip(msg, 500)}\n\n这是运行故障，不是要你选；说「重试」就接着来。` }],
+      });
     } else {
-      this.commit(task, l, { next: [{ reason: "retry", delayMs: 10_000 * 2 ** (l.guard.infraErrors - 1) }] });
+      this.commit(task, l, { next: [{ reason: "retry", delayMs: L.RETRY_BASE_MS * 2 ** (l.guard.infraErrors - 1) }] });
     }
   }
 
@@ -716,9 +731,12 @@ function union<T extends { at: number }>(a: T[] = [], b: T[] = [], key: (x: T) =
   return [...a, ...b.filter((x) => !seen.has(key(x)))].sort((x, y) => x.at - y.at);
 }
 
-/** The Supervisor's analysis = its reply minus the final JSON */
-function thinking(text: string): string {
-  const i = text.lastIndexOf('{"action"');
-  const j = i >= 0 ? i : text.lastIndexOf("```");
-  return (j > 0 ? text.slice(0, j) : "").replace(/```(json)?\s*$/i, "").trim();
+/** 监督者的正文：去掉 [[标记]] 块，只留它自己写的判断 */
+function stripSignals(text: string): string {
+  return (text || "")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\[\[\s*(instruct|verify|review|wait|ask|finish|abort)\s*\]\]/i.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
