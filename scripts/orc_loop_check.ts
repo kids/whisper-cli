@@ -359,26 +359,30 @@ async function e2e() {
     });
     exec.sup.set(id, [
       S({ action: "instruct", text: "后台启动训练，报告 pid 和日志" }),
-      S({ action: "wait", watch: { title: "训练", file: flag, every: "1m" }, heartbeat: "1m", reason: "等训练结束" }),
+      S({ action: "wait", watch: { title: "训练", file: flag, every: "1m" }, reason: "等训练结束" }),
     ]);
     await drive(() => store.getTask(id)!.status === "waiting");
     let l = orc.loop.ledger(id)!;
     const wid = l.waitWatch!;
     check("C parked on watch", store.getTask(id)!.status === "waiting" && !!wid && watches.includes(wid) && W.getWatch(wid)?.sessionKey === `orc-loop:${id}`);
     check("C worker reported job", l.observations.some((o) => /4242/.test(o.text)));
-    check("C heartbeat ≥ 10min", l.heartbeatS === 600 && store.pendingLoopEffects(id).some((e) => e.payload.reason === "heartbeat" && e.nextAt > Date.now() + 500_000));
+    check("C patrol heartbeat on by default (30m)", l.heartbeatS === 1800 && store.pendingLoopEffects(id).some((e) => e.payload.reason === "heartbeat" && e.nextAt > Date.now() + 1_700_000));
     const before = exec.of(id, "supervisor").length;
     for (let i = 0; i < 20; i++) { await orc.tick(); await sleep(10); }
     check("C no rounds while waiting", exec.of(id, "supervisor").length === before);
 
     exec.sup.get(id)!.push(
-      (req) => { check("C mid-wait round sees the wait + message", /看看显存/.test(req.prompt) && /监控 #\d+ 训练/.test(req.prompt)); return S({ action: "wait", keep: true }); },
+      (req) => { check("C mid-wait round sees the wait + message + a fresh probe", /看看显存/.test(req.prompt) && /监控 #\d+ 训练/.test(req.prompt) && /已运行 \d+ 分钟/.test(req.prompt)); return S({ action: "wait", keep: true, reason: "loss 在降" }); },
       (req) => { check("C watch round sees fired evidence", /监控 #\d+「训练」触发/.test(req.prompt)); return S({ action: "finish", summary: "训练跑完", acceptance: [{ criterion: "C1", evidence: "E1" }] }); },
     );
+    const stepsBefore = orc.loop.ledger(id)!.budget.steps;
+    const turnsBefore = notes.filter((n) => n.kind === "turn").length;
     orc.attach(id, "顺便看看显存");
     await drive(() => exec.of(id, "supervisor").length === before + 1 && store.getTask(id)!.status === "waiting");
     l = orc.loop.ledger(id)!;
     check("C keep waiting keeps the watch", l.waitWatch === wid && W.getWatch(wid)?.status === "active");
+    check("C healthy patrol uses no round budget", l.budget.steps === stepsBefore, { stepsBefore, now: l.budget.steps });
+    check("C healthy patrol posts nothing to the group", notes.filter((n) => n.kind === "turn").length === turnsBefore && /loss 在降/.test(store.getTask(id)!.progress));
 
     writeFileSync(flag, "ok");
     await W.tickWatches(Date.now() + 10 * 86_400_000, wid);

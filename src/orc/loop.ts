@@ -13,7 +13,10 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { addWatch, cancelWatch, describeSpec, getWatch, parseDuration, parseWatchSpec, type CheckResult, type Watch } from "../watch";
+import { addWatch, cancelWatch, checkWatch, describeSpec, getWatch, parseDuration, parseWatchSpec, PATROL, type CheckResult, type Watch } from "../watch";
+
+/** While parked on a watch the supervisor patrols this often by default (min 10m) */
+const DEFAULT_HEARTBEAT_S = 30 * 60;
 import * as L from "./ledger";
 import { parseRoleOutput } from "./output";
 import { CONTRACT } from "./prompts";
@@ -298,9 +301,15 @@ export class LoopEngine {
     const worker = task.preset.roles[loop.worker];
     const reviewer = loop.reviewer ? task.preset.roles[loop.reviewer] : undefined;
     const canWait = !!(task.chatId && this.opts.watchBot?.(task));
-    const waiting = wasWaiting && l.waitWatch ? (() => { const w = getWatch(l.waitWatch!); return w ? `监控 #${w.id} ${w.spec.title}（${describeSpec(w.spec)}）；最新：${w.summary}` : undefined; })() : undefined;
+    const waitW = wasWaiting && l.waitWatch ? getWatch(l.waitWatch) : undefined;
+    // a fresh look at the job (read-only probe), so a patrol round sees the log / metrics, not just "进程运行中"
+    const snap = waitW ? await checkWatch(waitW).catch(() => undefined) : undefined;
+    const waiting = waitW
+      ? `监控 #${waitW.id} ${waitW.spec.title}（${describeSpec(waitW.spec)}）；已运行 ${Math.round((Date.now() - waitW.createdAt) / 60_000)} 分钟；最新：${snap?.summary ?? waitW.summary}${snap?.evidence ? `\n${clip(snap.evidence, 2500)}` : ""}`
+      : undefined;
     const reasonText = ({
-      start: "任务刚开始", next: "上一个动作已完成", human: "人发来了消息", watch: "等待的监控触发了", heartbeat: "等待期间的定时心跳（看看趋势，需要继续等就 wait keep）",
+      start: "任务刚开始", next: "上一个动作已完成", human: "人发来了消息", watch: "等待的监控触发了",
+      heartbeat: `定时巡检（作业还在跑）。${PATROL}正常就 {"action":"wait","keep":true}，reason 写一句判断依据。`,
       resume: "人要求继续 / 重试", retry: "上一轮出错后重试",
     } as Record<string, string>)[p.reason] ?? p.reason;
     const prompt = L.buildSupervisorPrompt(l, {
@@ -334,6 +343,8 @@ export class LoopEngine {
       return;
     }
     const a = parsed as L.LoopAction;
+    // a patrol that finds the job healthy is not a step toward the goal: it does not use up the round budget
+    if (a.action === "wait" && a.keep) l.budget.steps--;
     l.rejection = undefined;
     l.guard.invalidStreak = 0;
     l.guard.infraErrors = 0;
@@ -488,13 +499,15 @@ export class LoopEngine {
       case "wait": {
         if (a.keep) {
           const hb = l.heartbeatS;
-          return { status: "waiting", progress: `第 ${n} 轮 · 继续等待监控 #${l.waitWatch}`, obs: `继续等待监控 #${l.waitWatch}。`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: l.waitWatch }] : [], turn: `继续等待监控 #${l.waitWatch}` };
+          const why = a.reason ? `：${clip(a.reason, 200)}` : "";
+          // healthy patrol: card progress only, no group message
+          return { status: "waiting", progress: `第 ${n} 轮 · 巡检正常，继续等待监控 #${l.waitWatch}${why}`, obs: `巡检后继续等待监控 #${l.waitWatch}${why}`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: l.waitWatch }] : [], turn: "" };
         }
         const spec = parseWatchSpec(a.watch, wtp);
         spec.onWake ||= a.reason || "叫醒监督者";
         const w = addWatch({ chatId: task.chatId!, bot: this.opts.watchBot!(task)!, sessionKey: `orc-loop:${id}`, cwd: wtp, spec });
         l.waitWatch = w.id;
-        l.heartbeatS = a.heartbeat ? Math.max(600, parseDuration(a.heartbeat)) : undefined;
+        l.heartbeatS = Math.max(600, a.heartbeat ? parseDuration(a.heartbeat) : DEFAULT_HEARTBEAT_S);
         try { this.opts.onWatchCreated?.(task, w); } catch { /* card is best-effort */ }
         return {
           status: "waiting", progress: `等待监控 #${w.id}：${spec.title}`,

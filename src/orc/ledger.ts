@@ -7,6 +7,7 @@
 // No I/O here — loop.ts executes; everything below is unit-testable.
 // =============================================================================
 import { findJsonObjects } from "./output";
+import { WAKE_ON_HINT } from "../watch";
 import type { LoopBudget, Verbosity } from "./types";
 
 export type Who = "human" | "lead" | "supervisor";
@@ -516,7 +517,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
     '- {"action":"report","progress":"给人看的进展","findings":["分析/发现"],"suggestion":"建议（可选）"}',
     '- {"action":"update_constraints","changes":[{"op":"add|modify|remove","target":"constraint|criterion","id":"modify/remove 时必填","text":"…"}],"reason":"为什么改","source":"human|evidence|supervisor","quote":"source=human 时原样引用人的话"}',
     c.reviewer ? '- {"action":"review","focus":"可选：审查重点"}  —— 换一个模型审当前改动，结论记为证据' : "",
-    c.canWait ? '- {"action":"wait","watch":{"title":"…","pid":123,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl","show":["step","loss"],"stop":"loss<0.2"},"every":"5m","timeout":"2d"},"heartbeat":"可选，如 2h：等待期间定时叫醒你看趋势","reason":"…"}  —— 挂起等外部作业；代码定时检查（不耗 token），结束/出错/卡住时叫醒你。心跳叫醒时如果要继续等，输出 {"action":"wait","keep":true}' : "",
+    c.canWait ? '- {"action":"wait","watch":{"title":"…","pid":123,"log":"out/train.log","done":"Training finished","wake_on":["Traceback"],"stale":"30m","metrics":{"path":"out/metrics.jsonl","show":["step","loss"],"stop":"loss<0.2"},"every":"5m","timeout":"2d"},"heartbeat":"巡检间隔，默认 30m","reason":"…"}  —— 挂起等外部作业；代码定时检查（不耗 token），结束/出错/卡住时叫醒你，另外每个 heartbeat 叫醒你巡检一次。巡检正常就 {"action":"wait","keep":true,"reason":"一句判断依据"}（不占轮数）；其他任何动作都会结束这次等待。' + WAKE_ON_HINT : "",
     '- {"action":"ask","question":"…","why":"irreversible|high_cost|goal_ambiguous","options":[{"id":"a","label":"…","consequence":"选它会怎样"},{"id":"b","label":"同意推送","go":true}]}  —— 问了就一直等你答，代码不会替你选；能自己定的就别问，在 report 里说明；irreversible 时把同意执行的选项标 "go":true',
     '- {"action":"finish","summary":"结论","acceptance":[{"criterion":"C1","evidence":"E3"}]}',
     '- {"action":"abort","reason":"…","tried":["试过什么"],"blockers":["卡在哪"],"unmet":["C2"],"resume_hint":"以后怎么接着做"}',
@@ -526,7 +527,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
     "## 规则（代码会强制检查）",
     "- 不信 worker 的自报：完成与否以 verify / review / 监控采集的证据为准。",
     "- finish 必须为每条验收标准列出证据编号，且证据必须是在**当前版本**上采集并通过的；代码改过就要重新验证。",
-    "- 长时间作业（训练、批处理）：让 worker 在后台启动并报告 pid 和日志，再用 wait 等待；不要让 worker 前台干等。",
+    "- 长时间作业（训练、批处理）：让 worker 在后台启动并报告 pid 和日志，再用 wait 等待；不要让 worker 前台干等。等待期间你在盯实验：跑偏了就 instruct worker 停掉、修正、重跑，不要等它跑完。",
     "- 只有不可逆（推送、部署、删除数据、对外发消息）、高成本（大额算力 / 时间）或目标本身有歧义的分叉才 ask，并给出选项、后果和默认；其他问题自己判断，在 report 里说明理由。",
     "- 新增约束或验收标准可以直接加；修改 / 删除（可能放宽要求）只能由人提出：source=human 并在 quote 里原样引用。",
     "- 有分析、发现或建议时用 report 告诉人；不要连续两轮 report。",

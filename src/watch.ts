@@ -60,8 +60,10 @@ export interface WatchSpec {
 
 /** Max length of the agent-authored card body */
 export const MAX_NOTE = 2000;
-/** Soft progress reports are opt-in and never more frequent than this */
+/** Patrol wakes (look at the job, intervene if it went wrong) are never more frequent than this */
 export const MIN_REPORT_S = 30 * 60;
+/** Default patrol interval; `"report":"off"` turns it off */
+export const DEFAULT_REPORT_S = 60 * 60;
 
 export type WatchStatus = "active" | "fired" | "expired" | "cancelled" | "error";
 
@@ -154,8 +156,8 @@ export function parseWatchSpec(raw: any, cwd: string): WatchSpec {
   const onWake = raw.on_wake ?? raw.onWake;
   if (onWake != null && String(onWake).trim()) spec.onWake = String(onWake).trim().slice(0, 1000);
   const report = raw.report ?? raw.report_every ?? raw.reportEvery;
-  if (report != null && String(report).trim() !== "") {
-    spec.reportEveryS = Math.max(MIN_REPORT_S, parseDuration(report));
+  if (!/^(off|false|0|no|none)$/i.test(String(report ?? "").trim())) {
+    spec.reportEveryS = Math.max(MIN_REPORT_S, parseDuration(report, DEFAULT_REPORT_S));
   }
   if ((spec.wakeOn || spec.done) && !spec.log) throw new Error("wake_on / done need a log path");
   if (spec.staleS && !spec.log && !spec.metrics) throw new Error("stale needs a log or metrics path");
@@ -511,8 +513,9 @@ export function formatWatchContext(chatId: string): string {
     "【长任务监控】你的每一轮最长几十分钟，不要在一轮里干等长作业。正确做法：",
     "1. 后台启动并落日志（`setsid nohup … & echo $!`），本轮结束后进程要还活着；",
     "2. 末尾行登记监控。代码只负责探测（零 token）；**群卡片 = 你写的 `note` 原文，代码不加任何壳**：",
-    '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl"},"every":"10m","timeout":"2d","report":"1h","note":"刚启动 Adam，目标 ≥100k step。","on_wake":"跑 eval 并汇报"}`',
-    "   至少 pid/log/metrics/file/cmd 之一；`note` 写给人看的关键进展（不要贴大表）；可选 `report`（≥30m）到点叫醒你改 note；无 on_wake 则只通知；",
+    '`[[watch]] {"title":"训练 a.yaml","pid":12345,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","CUDA out of memory"],"stale":"30m","metrics":{"path":"out/metrics.jsonl"},"every":"10m","timeout":"2d","report":"1h","note":"刚启动 Adam，目标 ≥100k step。","on_wake":"跑 eval 并汇报"}`',
+    "   至少 pid/log/metrics/file/cmd 之一；`note` 写给人看的关键进展（不要贴大表）；`report`（默认 1h，≥30m，`\"off\"` 关闭）到点叫醒你巡检：实验跑偏就直接干预；无 on_wake 则触发时只通知；",
+    `   ${WAKE_ON_HINT}`,
     "3. 更新进展：`[[watch]] {\"id\":编号,\"note\":\"…这段话会原样出现在监控卡片上\"}`（这一行不会出现在群聊正文里，只更新卡片）。取消：`[[unwatch]] 编号`。",
     active.length
       ? `本群进行中的监控：\n${active.map((w) => `- #${w.id} ${w.spec.title}${w.note ? "：" + w.note.replace(/\s+/g, " ").slice(0, 120) : "（还没写 note）"}`).join("\n")}`
@@ -555,16 +558,26 @@ export function buildWakePrompt(w: Watch, r: CheckResult): string {
   ].filter(Boolean).join("\n\n");
 }
 
-/** Soft wake: agent reports key progress into note (card shows that text only). */
+/** Patrol wake: the agent judges whether the job is still worth running, intervenes if not, then refreshes the note. */
 export function buildReportPrompt(w: Watch, r: CheckResult): string {
   return [
-    `【监控 #${w.id} 进展刷新】「${w.spec.title}」已运行 ${fmtAge((Date.now() - w.createdAt) / 1000)}。请只汇报关键进展，不要贴大表。`,
+    `【监控 #${w.id} 巡检】「${w.spec.title}」已运行 ${fmtAge((Date.now() - w.createdAt) / 1000)}。`,
     `探测（仅供你参考，不要原样贴进卡片）：${r.summary || w.summary}`,
     r.evidence ? `观测摘录：\n${r.evidence.slice(0, 1500)}` : "",
     w.note ? `你上次写的 note：\n${w.note}` : "还没有 note。",
-    `看完现状后，用一行 \`[[watch]] {"id":${w.id},"note":"…"}\` 写一小段关键进展（阶段/关键数字/是否正常/大概还要多久）。卡片只会显示这段原文。不要重跑作业；若已结束或出错，按 on_wake 处理。`,
+    PATROL,
+    `最后用一行 \`[[watch]] {"id":${w.id},"note":"…"}\` 更新卡片（阶段 / 关键数字 / 你的判断 / 大概还要多久，干预了就写干预了什么）。重启了作业就 \`[[unwatch]] ${w.id}\` 并给新作业登记监控。`,
   ].filter(Boolean).join("\n\n");
 }
+
+/** What belongs in wake_on: a hit ends the watch, so only errors after which the job cannot recover */
+export const WAKE_ON_HINT =
+  "`wake_on` 一命中就结束监控，只放作业因此停下的致命错误（如 Traceback、CUDA out of memory）；Error / retry / 失败 这类会自动重试的词别放，交给巡检看占比。指标里的 NaN/Inf 代码会自动检测，不用写。";
+
+/** How to look at a running job — shared by the chat agent's patrol and the orc supervisor's heartbeat */
+export const PATROL =
+  "你是在盯实验，不是看进度条。需要时自己读日志 / 指标文件看趋势，判断它是否还在有效推进目标：指标走向、产出质量（抽几条看）、报错 / 重试占比、速度和预计完成时间。" +
+  "明显跑偏（指标不动或变坏、产出不对、大量报错重试、慢到不划算）就立刻处理——停掉、修正、重跑，不要等它跑完再说；只有正常才继续等。";
 
 /** /watch | /watch stop <id…> | /watch check <id> — returns markdown or undefined */
 export function watchCommandKind(text: string): { kind: "list" | "stop" | "check" | "usage"; ids: number[] } | undefined {

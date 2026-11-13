@@ -167,7 +167,9 @@ check("report 1h kept", noted.spec.reportEveryS === 3600, noted.spec.reportEvery
 check("card is note verbatim, never probe summary", W.renderWatchCard({ ...noted, summary: "进程 999999 运行中" }) === "Adam 阶段 step 12k/100k，loss 下降中");
 check("note update", W.setWatchNote(noted.id, "已到 50k", "oc_note")?.note === "已到 50k" && W.isWatchNoteUpdate({ id: noted.id, note: "x" }) && !W.isWatchNoteUpdate({ title: "t", pid: 999999 }));
 const report = W.buildReportPrompt(noted, { summary: "step 50k", evidence: "metrics ok", logOffset: 0 });
-check("report prompt asks for note refresh", report.includes(`"id":${noted.id}`) && report.includes("note") && report.includes("step 50k") && report.includes("关键进展"));
+check("report prompt: patrol + intervene + note refresh", report.includes(`"id":${noted.id}`) && report.includes("step 50k") && /跑偏/.test(report) && /停掉、修正、重跑/.test(report) && !/不要重跑/.test(report), report);
+check("patrol on by default (1h)", W.parseWatchSpec({ title: "n", pid: 999999 }, dir).reportEveryS === W.DEFAULT_REPORT_S);
+check("patrol can be turned off", W.parseWatchSpec({ title: "n", pid: 999999, report: "off" }, dir).reportEveryS === undefined);
 
 // --- natural-language stop ---
 const intents: [string, { ids: number[]; all: boolean } | undefined][] = [
