@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyPatch, fallbackNote, loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
 import { acceptable, decideAccept, decideAfterAttempt, decideParent, depsGate } from "../src/orc/core";
-import { knownIssues, renderAutoNote, renderBrief } from "../src/orc/brief";
+import { parseBrief, renderAutoNote, renderBrief } from "../src/orc/brief";
 import { findJsonObjects, formatFeedback, parseRoleOutput } from "../src/orc/output";
 import type { Executor, RunRequest, RunResult } from "../src/orc/runner";
 import { classifyResult, eventToProgress } from "../src/orc/runner";
@@ -29,7 +29,7 @@ function throws(fn: () => unknown, re: RegExp): boolean {
 {
   const t = 'blah {"x":1} more\n```json\n{"verdict":"revise"}\n```\ntrailing';
   check("findJsonObjects string-aware", findJsonObjects(t).length === 2);
-  // judgment stages: one conclusion line + prose; only plan/brief/action still use JSON
+  // 判定阶段：结论行 + 正文；只有 plan（要建子任务）还是 JSON
   const v: any = parseRoleOutput("verdict", "看完了\n[[revise]] 归一化丢了方向\n[[major]] src/extract/normalize.py:88 sign() 归一化丢了方向\n[[minor]] 命名\n[[note]] 已确认修复：测试全绿");
   check("verdict: conclusion line + issue lines", v.pass === false && v.issues.length === 2 && v.issues[0].file === "src/extract/normalize.py" && v.issues[0].line === 88, v);
   check("verdict: notes + prose body", v.notes[0] === "已确认修复：测试全绿" && v.body === "看完了", v);
@@ -47,7 +47,8 @@ function throws(fn: () => unknown, re: RegExp): boolean {
   const plan: any = parseRoleOutput("plan", '{"spec":"S","subtasks":[{"title":"a","deps":[1]},{"title":"b","deps":[0,0,5]}]}');
   check("plan deps sanitized", JSON.stringify(plan.subtasks.map((s: any) => s.deps)) === "[[],[0]]", plan.subtasks);
   check("plan still needs JSON", "error" in parseRoleOutput("plan", "[[done]] 拆好了"));
-  check("brief still needs JSON", "error" in parseRoleOutput("brief", "[[done]] 写完了"));
+  const briefPlain = parseBrief("现在卡在归一化丢方向。\n\n可以补 baseline，约 2 天。\n\n**建议**：补 baseline。");
+  check("brief is plain text now", briefPlain.text.includes("归一化") && !briefPlain.auto && briefPlain.knownIssues.length === 0, briefPlain);
   check("classify timeout", classifyResult("⏱️ 任务超过 30 分钟").timedOut);
   check("classify cancel", classifyResult("🛑 任务已被用户终止。").cancelled);
   check("progress from cb tool_use", eventToProgress({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } }) === "Bash: npm test");
@@ -166,28 +167,30 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), parsed("verdict", "[[revise]] 只剩建议\n[[minor]] 命名"));
   check("only minor left → carry on, no block", d.patch.stageIdx === idx("test") && d.notifies[0].kind === "info" && /按口径继续/.test(d.notifies[0].text) && /建议/.test(d.patch.feedback!), d);
 
-  const brief = parseRoleOutput("brief", JSON.stringify({
-    situation: "在做分布预测的离线可行性检查，卡在归一化会把方向相反的数值当成同一件事。",
-    state: { done: ["107 个测试全绿", "增益 6.3% 已按新口径重算并写入报告"], not_done: ["独立 baseline 没补，无法判断这是模型本身还是预处理带来的"] },
-    blockers: [{ what: "归一化丢方向", why_stuck: "当前特征设计里没有保留正负号的位置，改要动抽取层的 schema", evidence: "src/extract/normalize.py:88" }],
-    options: [
-      { name: "补 baseline", what: "按论文口径重建独立 baseline，再对比", cost: "约 2 天", risk: "结论可能整个回到不可行", reversible: "能补救", recommended: true },
-      { name: "带已知问题先交付", what: "把这版当探索性结论，报告里写明归一化缺陷", cost: "半天", risk: "被引用后可能误导", reversible: "能补救" },
-    ],
-    recommendation: "补 baseline：这一步不做，后面所有增益数字都说不清来源。",
-    needs_from_human: "这个报告是内部参考还是要对外发布？对外就必须先补 baseline。",
-    auto: "none", known_issues: [],
-  })) as any;
+  const brief = parseBrief([
+    "在做分布预测的离线可行性检查，卡在归一化会把方向相反的数值当成同一件事。",
+    "",
+    "**已经做到**：107 个测试全绿；增益 6.3% 已按新口径重算并写入报告。",
+    "**还没做到**：独立 baseline 没补，无法判断这是模型本身还是预处理带来的。",
+    "",
+    "**卡在哪**：归一化丢方向——当前特征设计里没有保留正负号的位置，改要动抽取层 schema（src/extract/normalize.py:88）。",
+    "",
+    "**可以怎么走**",
+    "1. 补 baseline：按论文口径重建独立 baseline 再对比；代价约 2 天；风险是结论可能整个回到不可行；能补救。",
+    "2. 带已知问题先交付：把这版当探索性结论，报告里写明缺陷；代价半天；被引用后可能误导；能补救。",
+    "",
+    "**建议**：补 baseline——这一步不做，后面所有增益数字都说不清来源。",
+    "",
+    "**需要你给的**：这个报告是内部参考还是要对外发布？对外就必须先补 baseline。",
+  ].join("\n"));
   const briefText = renderBrief(mkTask({ id: 3, title: "分布预测可行性", branch: "orc/task-3" }), brief, "评审");
   check("brief: header names the task and the stage", briefText.startsWith("**分布预测可行性：评审反复没过，需要你定一件事**"), briefText);
-  check("brief: situation + what is done / not done", briefText.includes("在做分布预测") && /已经做到：\n- 107 个测试全绿/.test(briefText) && briefText.includes("还没做到："));
-  check("brief: blocker with why and evidence", /1\. 归一化丢方向\n   原因：当前特征设计/.test(briefText) && briefText.includes("依据：src/extract/normalize.py:88"));
-  check("brief: real options with cost/risk/undo", /1\. \*\*补 baseline\*\*（建议）：/.test(briefText) && briefText.includes("代价：约 2 天") && briefText.includes("风险：结论可能整个回到不可行") && briefText.includes("补救：能补救"));
-  check("brief: recommendation + what is needed from the human", briefText.includes("**建议**：补 baseline") && briefText.includes("**需要你给的**：这个报告是内部参考"));
+  check("brief: body is kept as written", briefText.includes("归一化会把方向相反的数值当成同一件事") && briefText.includes("src/extract/normalize.py:88") && briefText.includes("代价约 2 天"), briefText);
   check("brief: says how to answer", briefText.includes("直接说选哪个就行") && briefText.includes("orc/task-3"));
-  const auto = parseRoleOutput("brief", JSON.stringify({ situation: "x", auto: "continue_with_known_issues", known_issues: ["归一化丢方向，报告里已写明"], recommendation: "不影响主要结论" })) as any;
-  check("brief: auto only with known issues", knownIssues(auto).length === 1 && knownIssues(brief).length === 0);
-  check("brief: auto note lists what was deferred", renderAutoNote(mkTask({ id: 3, title: "t" }), auto, knownIssues(auto)).includes("归一化丢方向，报告里已写明"));
+  const auto = parseBrief("不影响主要结论。\n\n[[continue_with_known_issues]]\n- 归一化丢方向，报告里已写明\n- 独立 baseline 以后补");
+  check("brief: auto only when the marker is there", auto.auto && auto.knownIssues.length === 2 && !brief.auto, auto);
+  check("brief: marker line is not shown to the human", !renderBrief(mkTask({ id: 3, title: "t" }), auto, "评审").includes("continue_with_known_issues"));
+  check("brief: auto note lists what was deferred", renderAutoNote(mkTask({ id: 3, title: "t" }), auto, auto.knownIssues).includes("归一化丢方向，报告里已写明"));
 
   // 接受
   const blockedReview = mkTask({ stageIdx: idx("review"), status: "blocked", loops: { review: 3 }, feedback: "【review 未通过】x" });

@@ -11,7 +11,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
-import { knownIssues, renderAutoNote, renderBrief } from "./brief";
+import { parseBrief, renderAutoNote, renderBrief } from "./brief";
 import { stageName } from "./core";
 import { childStartStage, decideAccept, decideAfterAttempt, decideParent, depsGate, type Decision, type Outcome } from "./core";
 import { parseRoleOutput, lastProgressLine } from "./output";
@@ -470,22 +470,22 @@ export class Orchestrator {
       onProgress: (line) => { this.store.updateTask(taskId, { progress: `整理决策说明：${line}` }); this.emitProgress(taskId); },
     }).catch((err) => ({ text: "", tokens: 0, timedOut: false, cancelled: false, error: (err as Error).message }));
 
-    const parsed = res.error || res.timedOut ? undefined : parseRoleOutput("brief", res.text);
-    const bad = !parsed || "error" in parsed;
+    const brief = res.error || res.timedOut || !res.text.trim() ? undefined : parseBrief(res.text);
     this.store.tx(() => this.store.updateAttempt(attempt.id, {
-      status: bad ? "failed" : "done", output: res.text.slice(0, 200_000), parsed: bad ? null : parsed,
-      error: bad ? (res.error || (parsed as { error: string })?.error || "超时") : "", tokens: res.tokens, endedAt: Date.now(),
+      status: brief ? "done" : "failed", output: res.text.slice(0, 200_000), parsed: brief ? { kind: "brief", pass: true, summary: brief.text.slice(0, 200), notes: [], body: res.text } : null,
+      error: brief ? "" : (res.error || (res.timedOut ? "超时" : "没有输出")), tokens: res.tokens, endedAt: Date.now(),
     }));
-    if (bad) {
+    if (!brief) {
+      // 说明没写成也照样把现场交给人：拿最后一次的真实结论当内容，不编、不换成格式问题
       const why = last?.parsed?.summary || "评审连续没过";
       this.store.tx(() => this.applyDecision(this.store.getTask(taskId)!, {
-        patch: { status: "blocked", progress: `决策说明没写成：${why.slice(0, 100)}` }, launches: [], children: [],
-        notifies: [{ taskId, kind: "decision", text: `**${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（决策说明没能生成：${res.error || "输出不合约定"}）` }],
+        patch: { status: "blocked", progress: `决策说明没写成（${res.error || "没有输出"}）：${why.slice(0, 80)}` }, launches: [], children: [],
+        notifies: [{ taskId, kind: "decision", text: `**${task.title}：${stageName(stage.id)}反复没过，需要你定**\n\n${why}\n\n（负责写说明的 ${role.name} 这轮没跑成：${res.error || "没有输出"}；下面这些问题就是现场）` }],
       }));
       this.emitProgress(taskId);
       return;
     }
-    const kept = knownIssues(parsed);
+    const kept = brief.knownIssues;
     const fresh = this.store.getTask(taskId)!;
     if (kept.length && fresh.status !== "dropped") {
       // advisor judged the leftovers acceptable to defer → framework continues, and says so
@@ -496,12 +496,12 @@ export class Orchestrator {
           ? { stageIdx: stageIdx + 1, status: "running", feedback, progress: "按决策说明的建议继续（带已知问题）" }
           : { stageIdx: stageIdx + 1, status: "ready", feedback, progress: "完成（带已知问题）" });
         if (next) this.store.addEffect("launch", { taskId, stageIdx: stageIdx + 1 } satisfies LaunchPayload);
-        this.applyDecision(fresh, { patch: {}, launches: [], children: [], notifies: [{ taskId, kind: "info", text: renderAutoNote(task, parsed, kept) }] });
+        this.applyDecision(fresh, { patch: {}, launches: [], children: [], notifies: [{ taskId, kind: "info", text: renderAutoNote(task, brief, kept) }] });
       });
     } else {
       this.store.tx(() => this.applyDecision(fresh, {
         patch: { status: "blocked", progress: `${stageName(stage.id)}反复没过，等你决定（决策说明见回复）` },
-        launches: [], children: [], notifies: [{ taskId, kind: "decision", text: renderBrief(task, parsed, stageName(stage.id)) }],
+        launches: [], children: [], notifies: [{ taskId, kind: "decision", text: renderBrief(task, brief, stageName(stage.id)) }],
       }));
     }
     this.emitProgress(taskId);

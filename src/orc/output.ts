@@ -46,7 +46,6 @@ const CONCL: Partial<Record<OutputKind, Spec>> = {
 /** Stages that answer in JSON: the fields below are consumed by the engine */
 const JSON_KEY: Partial<Record<OutputKind, string>> = {
   plan: "spec",
-  brief: "situation",
   action: "action",
 };
 
@@ -151,10 +150,6 @@ function parseJsonReply(kind: OutputKind, text: string): ParsedOutput | { error:
     // deps are indices into subtasks; drop forward/self/out-of-range refs (keeps the DAG acyclic)
     subtasks.forEach((s, i) => { s.deps = [...new Set(s.deps.filter((d) => d >= 0 && d < i))]; });
     return { kind, pass: true, summary: summary || v.spec.slice(0, 200), notes, body, spec: v.spec.trim(), subtasks };
-  }
-  if (kind === "brief") {
-    if (typeof v.situation !== "string" || !v.situation.trim()) return { error: `"situation" 必须是非空字符串` };
-    return { kind, pass: true, summary: v.situation.trim(), notes, body, value: v };
   }
   // action: validated by the loop's own action parser (ledger.ts)
   return { kind, pass: true, summary: str(v.action), notes, body, value: v };

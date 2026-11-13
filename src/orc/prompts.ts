@@ -36,9 +36,15 @@ export const CONTRACT: Record<OutputKind, string> = {
 - 不要修改业务代码；发现缺陷就 [[fail]] 并写清复现方式。`,
   report: `最后**单独一行**写 [[report]] 一句话摘要，正文写完整结论（markdown）。`,
 
-  brief: `{"situation": "一两句话：现在在做什么、卡在哪", "state": {"done": ["已经做到并验证过的事（带证据：测试名/数字/提交号）"], "not_done": ["还没做到或没验证的，以及为什么重要"]}, "blockers": [{"what": "卡点", "why_stuck": "为什么改不动：技术约束 / 缺信息 / 评审口径不一致", "evidence": "文件:行号 或 命令输出"}], "options": [{"name": "简短名字", "what": "具体怎么做", "cost": "要花的时间/代价", "risk": "风险", "reversible": "能补救 / 不能补救", "recommended": true}], "recommendation": "建议哪条，为什么", "needs_from_human": "要他补的一句话、一个口径或一个选择", "auto": "none" | "continue_with_known_issues", "known_issues": ["auto=continue_with_known_issues 时逐条写清放弃/暂缓的是什么，用户会看到"]}
-- 2～4 个方案，必须是真有差别的路，不是同一个方向的微调。
-- 拿不准能不能带着问题继续时，auto 用 "none"。`.replace("$",""),
+  brief: `正文写清楚，人看完就能决定：
+- 现在到哪一步：已经做到并验证过的事（带测试名/数字/提交号），还没做到或没验证的
+- 卡在哪、为什么再试一轮也多半不动（技术约束 / 缺信息 / 评审口径不一致，带文件:行号或命令输出）
+- 可以怎么走：2～4 条真正不同的路，各自的代价、风险、能不能补救，标出你建议的那条和理由
+- 需要人给你什么：一句话、一个口径，还是一个选择
+
+如果按这份任务的评审口径，剩下的问题可以接受、可以带着往下走：正文照写，末尾单独一行写
+[[continue_with_known_issues]]
+后面逐条列出暂不解决的问题（人能看到）。`,
   action: `{"action": "…"}（监督者动作，格式见 loop 提示词）`,
 };
 
@@ -123,7 +129,7 @@ export function buildBriefPrompt(c: {
   if (c.diff) out.push(`## 现在相对基线的改动\n提交：\n\`\`\`\n${c.diff.log || "(无提交)"}\n\`\`\`\n统计：\n\`\`\`\n${c.diff.stat || "(无改动)"}\n\`\`\``);
   if (c.notesTail) out.push(`## 团队共享笔记（最近的）\n${c.notesTail}`);
   out.push(`## 角色说明\n${role.prompt}`);
-  out.push(`## 输出约定（必须遵守）\n你的**最后一条回复**必须以一个 JSON 对象结尾（可放在 \`\`\`json 代码块里），格式：\n${CONTRACT.brief}`);
+  out.push(`## 输出约定\n你的**最后一条回复**就是这份说明，用 markdown 写清楚：\n${CONTRACT.brief}`);
   return out.join("\n\n");
 }
 
