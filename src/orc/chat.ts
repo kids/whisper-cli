@@ -422,7 +422,7 @@ function leadTaskLine(t: Task, store?: OrcStore): string {
   if (!l) return head;
   const roles = `  角色：${Object.values(t.preset.roles).map((r) => `${r.name}=${r.cli}${r.model ? ":" + r.model : ""}`).join("，")}；播报：${l.verbosity}`;
   const ask = l.pendingAsk
-    ? `\n  ⚠️ 正在等人回答：${l.pendingAsk.question}\n  选项：${l.pendingAsk.options.map((o) => `${o.id}) ${o.label}`).join("；")}（默认 ${l.pendingAsk.default}）`
+    ? `\n  ⚠️ 正在等人回答：${l.pendingAsk.question}\n  选项：${l.pendingAsk.options.map((o) => `${o.id}) ${o.label}`).join("；")}（没人答就一直等）`
     : "";
   return `${head}\n${roles}${ask}`;
 }

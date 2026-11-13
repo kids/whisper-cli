@@ -35,8 +35,7 @@ export interface LoopOptions {
   onRun?: (task: Task, ev: LoopRunEvent) => void;
   /** max loop tasks running a round at the same time */
   concurrency?: number;
-  /** high-cost / ambiguous questions fall back to their default after this long */
-  askTimeoutMs?: number;
+  /** how long a verify command may run */
   verifyTimeoutMs?: number;
 }
 
@@ -90,12 +89,11 @@ export class LoopEngine {
   private busy = new Set<number>();
   private running = new Map<number, Running>();
   private readonly concurrency: number;
-  private readonly askTimeoutMs: number;
   private readonly verifyTimeoutMs: number;
 
   constructor(private store: OrcStore, private exec: Executor, private opts: LoopOptions) {
     this.concurrency = opts.concurrency ?? Number(process.env.ORC_LOOP_CONCURRENCY || 3);
-    this.askTimeoutMs = opts.askTimeoutMs ?? Number(process.env.ORC_LOOP_ASK_TIMEOUT_MS || 4 * 3_600_000);
+
     this.verifyTimeoutMs = opts.verifyTimeoutMs ?? 10 * 60_000;
   }
 
@@ -129,10 +127,8 @@ export class LoopEngine {
     if (FINAL.includes(task.status)) return skip(task.status);
     const l = this.ledger(task.id);
     if (!l) return skip("no ledger");
-    if (task.status === "blocked") {
-      const a = l.pendingAsk;
-      if (p.reason !== "ask_timeout" || !a || a.step !== p.ref || (a.timeoutAt ?? Infinity) > Date.now() + 1000) return skip("blocked");
-    } else if (p.reason === "ask_timeout") return skip("question already answered");
+    // a blocked task waits for a human: only their answer / retry wakes it, nothing times out
+    if (task.status === "blocked" && !["human", "resume", "retry"].includes(p.reason)) return skip("blocked");
     if (task.status === "waiting" && !["watch", "heartbeat", "human", "resume", "retry"].includes(p.reason)) return skip("waiting");
     if (p.reason === "heartbeat" && (task.status !== "waiting" || l.waitWatch !== p.ref)) return skip("stale heartbeat");
     if (this.busy.has(task.id)) { this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 2000 }); return undefined; }
@@ -176,7 +172,7 @@ export class LoopEngine {
     if (option && !ask.options.some((o) => o.id === option)) return `没有选项「${option}」，可选：${ask.options.map((o) => `${o.id}) ${o.label}`).join("；")}`;
     if (!option && !text && !raw) return "请给出选项或你的想法";
     if (raw || text) L.noteHuman(l, (raw || text)!);
-    const r = this.resolveAsk(task, l, option, text ? withRaw(text, raw) : raw, "human");
+    const r = this.resolveAsk(task, l, option, text ? withRaw(text, raw) : raw);
     this.commit(task, l, { status: r.status, progress: r.progress, notifies: r.notifies, next: r.status === "running" ? [{ reason: "human" }] : [] });
     const opt = ask.options.find((o) => o.id === option);
     return r.status === "running" ? `✅ 「${name}」收到${opt ? `「${opt.label}」` : "你的回复"}，继续推进` : `🛑 「${name}」已按你的选择停下`;
@@ -282,16 +278,10 @@ export class LoopEngine {
     if (head !== l.head) { L.codeChanged(l, head); L.observe(l, n, "system", `检测到工作区有新提交 ${head.slice(0, 7)}。`); }
     if (p.recover) L.observe(l, n, "system", "进程重启，上一轮被中断；在重复任何对外操作前先核实现状。");
 
-    if (p.reason === "ask_timeout" && l.pendingAsk) {
-      const r = this.resolveAsk(task, l, undefined, undefined, "timeout");
-      if (r.status !== "running") { this.commit(task, l, { status: r.status, progress: r.progress, notifies: r.notifies }); return; }
-      notifies.push(...r.notifies);
-    }
-
     const b = L.budgetState(l);
     if (b.exhausted) {
-      l.pendingAsk = L.guardAsk(l, "budget", b.exhausted, this.askTimeoutMs);
-      this.commit(task, l, { status: "blocked", progress: `预算用完：${b.exhausted}`, notifies: [...notifies, this.askNotify(task, l.pendingAsk)], next: [{ reason: "ask_timeout", delayMs: this.askTimeoutMs, ref: l.pendingAsk.step }] });
+      l.pendingAsk = L.guardAsk(l, "budget", b.exhausted);
+      this.commit(task, l, { status: "blocked", progress: `预算用完：${b.exhausted}`, notifies: [...notifies, this.askNotify(task, l.pendingAsk)] });
       return;
     }
     if (b.ratio >= 0.8 && !l.budget.warned) {
@@ -311,7 +301,7 @@ export class LoopEngine {
     const waiting = wasWaiting && l.waitWatch ? (() => { const w = getWatch(l.waitWatch!); return w ? `监控 #${w.id} ${w.spec.title}（${describeSpec(w.spec)}）；最新：${w.summary}` : undefined; })() : undefined;
     const reasonText = ({
       start: "任务刚开始", next: "上一个动作已完成", human: "人发来了消息", watch: "等待的监控触发了", heartbeat: "等待期间的定时心跳（看看趋势，需要继续等就 wait keep）",
-      ask_timeout: "问题超时未答，已按默认处理", resume: "人要求继续 / 重试", retry: "上一轮出错后重试",
+      resume: "人要求继续 / 重试", retry: "上一轮出错后重试",
     } as Record<string, string>)[p.reason] ?? p.reason;
     const prompt = L.buildSupervisorPrompt(l, {
       taskId: task.id, title: task.title, worktree: wtp, branch: task.branch ?? "", diffStat: wt.diffSince(wtp, task.baseRef, 0).stat,
@@ -336,8 +326,8 @@ export class LoopEngine {
       l.budget.activeMs += Date.now() - t0;
       this.store.addStep({ taskId: task.id, n, reason: p.reason, action: "error" in parsed ? null : parsed, accepted: false, verdict: rejection, observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
       if (l.guard.invalidStreak >= L.INVALID_LIMIT) {
-        l.pendingAsk = L.guardAsk(l, "invalid", rejection, this.askTimeoutMs);
-        this.commit(task, l, { status: "blocked", progress: "监督者连续给出无效动作", notifies: [...notifies, this.askNotify(task, l.pendingAsk)], next: [{ reason: "ask_timeout", delayMs: this.askTimeoutMs, ref: n }] });
+        l.pendingAsk = L.guardAsk(l, "invalid", rejection);
+        this.commit(task, l, { status: "blocked", progress: "监督者连续给出无效动作", notifies: [...notifies, this.askNotify(task, l.pendingAsk)] });
       } else {
         this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮动作被驳回，重新决策`, notifies, next: [{ reason: "retry" }] });
       }
@@ -385,9 +375,8 @@ export class LoopEngine {
         : l.guard.idleStreak >= L.IDLE_LIMIT ? ["idle", "看起来在原地打转。"] as const : undefined)
       : undefined;
     if (guard) {
-      l.pendingAsk = L.guardAsk(l, guard[0], clip(guard[1], 200), this.askTimeoutMs);
+      l.pendingAsk = L.guardAsk(l, guard[0], clip(guard[1], 200));
       status = "blocked";
-      next = [{ reason: "ask_timeout", delayMs: this.askTimeoutMs, ref: n }];
       extra.push(this.askNotify(task, l.pendingAsk));
     }
 
@@ -515,14 +504,10 @@ export class LoopEngine {
         };
       }
       case "ask": {
-        l.pendingAsk = {
-          step: n, question: a.question, why: a.why, options: a.options, default: a.default, askedAt: Date.now(),
-          timeoutAt: a.why === "irreversible" ? undefined : Date.now() + this.askTimeoutMs,
-        };
+        l.pendingAsk = { step: n, question: a.question, why: a.why, options: a.options, askedAt: Date.now() };
         return {
           status: "blocked", progress: `等你决定：${clip(a.question, 80)}`, obs: `已向人提问：${a.question}`,
-          notifies: [this.askNotify(task, l.pendingAsk)],
-          next: l.pendingAsk.timeoutAt ? [{ reason: "ask_timeout", delayMs: this.askTimeoutMs, ref: n }] : [], turn: "",
+          notifies: [this.askNotify(task, l.pendingAsk)], next: [], turn: "",
         };
       }
       case "finish": {
@@ -556,14 +541,14 @@ export class LoopEngine {
 
   // ---- helpers ------------------------------------------------------------
 
-  private resolveAsk(task: Task, l: L.Ledger, option: string | undefined, text: string | undefined, via: "human" | "timeout"): { status: TaskStatus; progress: string; notifies: NotifyPayload[] } {
+  private resolveAsk(task: Task, l: L.Ledger, option: string | undefined, text: string | undefined): { status: TaskStatus; progress: string; notifies: NotifyPayload[] } {
     const ask = l.pendingAsk!;
     l.pendingAsk = undefined;
     const n = l.step + 1;
-    const opt = ask.options.find((o) => o.id === (option ?? (via === "timeout" ? ask.default : undefined)));
+    const opt = ask.options.find((o) => o.id === option);
     if (ask.code) {
       if (opt?.id === "stop") {
-        const why = via === "timeout" ? "问题超时没人回答，按默认停下" : "按人的选择停下";
+        const why = "按人的选择停下";
         return { status: "dropped", progress: why, notifies: [{ taskId: task.id, kind: "info", text: `${why}。分支 \`${task.branch}\` 和进展都保留。` }] };
       }
       if (ask.code === "budget") L.extendBudget(l);
@@ -572,25 +557,21 @@ export class LoopEngine {
       return { status: "running", progress: "人选择继续", notifies: [] };
     }
     const label = opt ? `「${opt.id}) ${opt.label}」` : "";
-    if (via === "timeout") L.observe(l, n, "system", `问题「${ask.question}」超时没人回答，按默认选项${label}继续。`);
-    else L.observe(l, n, "human", `人对「${ask.question}」的回答：${label}${text ? (label ? "；" : "") + text : ""}`);
-    if (ask.why === "irreversible" && via === "human" && opt?.go) {
+    L.observe(l, n, "human", `人对「${ask.question}」的回答：${label}${text ? (label ? "；" : "") + text : ""}`);
+    if (ask.why === "irreversible" && opt?.go) {
       l.approvals.push({ step: ask.step, question: ask.question, answer: `${opt.label}${text ? "；" + text : ""}`, at: Date.now() });
     }
-    return { status: "running", progress: via === "timeout" ? "问题超时，按默认继续" : "收到回答，继续", notifies: [] };
+    return { status: "running", progress: "收到回答，继续", notifies: [] };
   }
 
   private askNotify(task: Task, a: L.PendingAsk): NotifyPayload {
-    const opts = a.options.map((o) => `**${o.id})** ${o.label}${o.consequence ? ` —— ${o.consequence}` : ""}${o.id === a.default ? "（默认）" : ""}`).join("\n");
-    const tail = a.timeoutAt
-      ? `${fmtWhen(a.timeoutAt)} 前没回复就按默认继续。`
-      : "这是不可逆操作，不会自动执行，等你明确回复。";
-    return { taskId: task.id, kind: "ask", text: `${a.question}\n\n${opts}\n\n直接在群里回复选项或你的想法。${tail}` };
+    const opts = a.options.map((o) => `**${o.id})** ${o.label}${o.consequence ? ` —— ${o.consequence}` : ""}`).join("\n");
+    return { taskId: task.id, kind: "ask", text: `${a.question}\n\n${opts}\n\n直接在群里回复选项或你的想法，不会自己往下走。` };
   }
 
   private enqueue(taskId: number, reason: string, delayMs = 0, ref?: number): void {
     const now = Date.now();
-    if (!delayMs && this.store.pendingLoopEffects(taskId).some((e) => e.nextAt <= now + 1000 && !["ask_timeout", "heartbeat"].includes(e.payload.reason))) return;
+    if (!delayMs && this.store.pendingLoopEffects(taskId).some((e) => e.nextAt <= now + 1000 && e.payload.reason !== "heartbeat")) return;
     this.store.addEffect("loop", { taskId, reason, ...(ref != null ? { ref } : {}) } satisfies LoopPayload, delayMs);
   }
 

@@ -37,7 +37,7 @@ export interface OrchestratorOptions {
   tickMs?: number;
   progressThrottleMs?: number;
   /** Supervisor-loop hooks (watch routing etc.) */
-  loop?: Pick<LoopOptions, "watchBot" | "onWatchCreated" | "onRun" | "concurrency" | "askTimeoutMs" | "verifyTimeoutMs">;
+  loop?: Pick<LoopOptions, "watchBot" | "onWatchCreated" | "onRun" | "concurrency" | "verifyTimeoutMs">;
 }
 
 const MAX_NOTIFY_TRIES = 5;

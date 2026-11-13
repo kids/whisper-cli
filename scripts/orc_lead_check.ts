@@ -18,7 +18,7 @@ const fakeTask = (id: number, title: string, status: Task["status"], progress: s
 const loopPreset = resolvePreset(loadPresets().get("loop")!, loadRoles());
 const ledger = createLedger({ goal: "调优训练超参", criteria: ["val loss < 0.3"], head: "x", limits: loopPreset.loop!.budget, verbosity: "normal" });
 ledger.pendingAsk = {
-  step: 6, question: "实验结论已验证，要把改动推送到远端 main 吗？", why: "irreversible", askedAt: 0, default: "a",
+  step: 6, question: "实验结论已验证，要把改动推送到远端 main 吗？", why: "irreversible", askedAt: 0,
   options: [{ id: "a", label: "先不推，等我看完" }, { id: "b", label: "推送到远端", go: true }],
 };
 const store = { getLedger: (id: number) => (id === 15 ? ledger : undefined) } as any;

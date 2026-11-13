@@ -32,10 +32,7 @@ export interface PendingAsk {
   question: string;
   why: AskWhy;
   options: AskOption[];
-  default: string;
   askedAt: number;
-  /** irreversible questions never time out */
-  timeoutAt?: number;
   /** raised by code (guards), not by the Supervisor */
   code?: "budget" | "idle" | "errors" | "invalid";
 }
@@ -200,7 +197,7 @@ export function resetGuards(l: Ledger): void {
 }
 
 /** Question raised by a guard (budget / idle / repeated error / invalid proposals) */
-export function guardAsk(l: Ledger, code: NonNullable<PendingAsk["code"]>, detail: string, timeoutMs: number): PendingAsk {
+export function guardAsk(l: Ledger, code: NonNullable<PendingAsk["code"]>, detail: string): PendingAsk {
   const q = {
     budget: `预算用完（${detail}）。要追加预算继续吗？`,
     idle: `连续 ${IDLE_LIMIT} 轮没有新进展（没有新改动、新证据或约束变化）。${detail}`,
@@ -209,8 +206,8 @@ export function guardAsk(l: Ledger, code: NonNullable<PendingAsk["code"]>, detai
   }[code];
   const go = code === "budget" ? { id: "more", label: "追加 50% 预算继续" } : { id: "continue", label: "继续，让监督者换个思路（可以顺便告诉它怎么做）" };
   return {
-    step: l.step, question: q, why: "high_cost", code, askedAt: Date.now(), timeoutAt: Date.now() + timeoutMs,
-    options: [go, { id: "stop", label: "停下（分支和进展保留，之后可以重试）" }], default: "stop",
+    step: l.step, question: q, why: "high_cost", code, askedAt: Date.now(),
+    options: [go, { id: "stop", label: "停下（分支和进展保留，之后可以重试）" }],
   };
 }
 
@@ -227,7 +224,7 @@ export type LoopAction = Common & (
   | { action: "update_constraints"; changes: Change[]; reason: string; source: "human" | "evidence" | "supervisor"; quote?: string }
   | { action: "review"; focus?: string }
   | { action: "wait"; watch?: any; keep?: boolean; heartbeat?: string; reason?: string }
-  | { action: "ask"; question: string; why: AskWhy; options: AskOption[]; default: string }
+  | { action: "ask"; question: string; why: AskWhy; options: AskOption[] }
   | { action: "finish"; summary: string; acceptance: { criterion: string; evidence: string }[] }
   | { action: "abort"; reason: string; tried: string[]; blockers: string[]; unmet: string[]; resume_hint?: string }
 );
@@ -279,7 +276,7 @@ export function parseLoopAction(text: string): LoopAction | { error: string } {
       const options: AskOption[] = (Array.isArray(v.options) ? v.options : []).map((o: any, i: number) => typeof o === "string"
         ? { id: String.fromCharCode(97 + i), label: o.trim() }
         : { id: s(o?.id) || String.fromCharCode(97 + i), label: s(o?.label ?? o?.text), consequence: s(o?.consequence) || undefined, go: o?.go === true || undefined });
-      return { ...common, action: name, question: s(v.question), why: s(v.why) as AskWhy, options, default: s(v.default) };
+      return { ...common, action: name, question: s(v.question), why: s(v.why) as AskWhy, options };
     }
     case "finish": {
       const acceptance = (Array.isArray(v.acceptance) ? v.acceptance : []).map((a: any) => ({ criterion: s(a?.criterion ?? a?.id), evidence: s(a?.evidence ?? a?.evidence_ref) }));
@@ -386,11 +383,7 @@ export function validateAction(l: Ledger, a: LoopAction, ctx: ValidateCtx): stri
       if (a.options.length < 2 || a.options.length > 6) return "ask 需要 2～6 个 options";
       if (a.options.some((o) => !o.label)) return "每个选项都要有 label";
       if (new Set(a.options.map((o) => o.id)).size !== a.options.length) return "选项 id 重复";
-      if (!a.options.some((o) => o.id === a.default)) return `default 必须是某个选项的 id（${a.options.map((o) => o.id).join(", ")}）`;
-      if (a.why === "irreversible") {
-        if (!a.options.some((o) => o.go)) return "irreversible 的问题要把「同意执行」的选项标上 \"go\":true";
-        if (a.options.find((o) => o.id === a.default)?.go) return "irreversible 的问题默认选项必须是安全的（不执行），不能是 go 选项";
-      }
+      if (a.why === "irreversible" && !a.options.some((o) => o.go)) return "irreversible 的问题要把「同意执行」的选项标上 \"go\":true";
       return undefined;
     }
     case "finish": {
@@ -524,7 +517,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
     '- {"action":"update_constraints","changes":[{"op":"add|modify|remove","target":"constraint|criterion","id":"modify/remove 时必填","text":"…"}],"reason":"为什么改","source":"human|evidence|supervisor","quote":"source=human 时原样引用人的话"}',
     c.reviewer ? '- {"action":"review","focus":"可选：审查重点"}  —— 换一个模型审当前改动，结论记为证据' : "",
     c.canWait ? '- {"action":"wait","watch":{"title":"…","pid":123,"log":"out/train.log","done":"Training finished","wake_on":["Traceback","nan"],"stale":"30m","metrics":{"path":"out/metrics.jsonl","show":["step","loss"],"stop":"loss<0.2"},"every":"5m","timeout":"2d"},"heartbeat":"可选，如 2h：等待期间定时叫醒你看趋势","reason":"…"}  —— 挂起等外部作业；代码定时检查（不耗 token），结束/出错/卡住时叫醒你。心跳叫醒时如果要继续等，输出 {"action":"wait","keep":true}' : "",
-    '- {"action":"ask","question":"…","why":"irreversible|high_cost|goal_ambiguous","options":[{"id":"a","label":"…","consequence":"选它会怎样"},{"id":"b","label":"同意推送","go":true}],"default":"a"}  —— irreversible 时把同意执行的选项标 "go":true，默认必须是不执行',
+    '- {"action":"ask","question":"…","why":"irreversible|high_cost|goal_ambiguous","options":[{"id":"a","label":"…","consequence":"选它会怎样"},{"id":"b","label":"同意推送","go":true}]}  —— 问了就一直等你答，代码不会替你选；能自己定的就别问，在 report 里说明；irreversible 时把同意执行的选项标 "go":true',
     '- {"action":"finish","summary":"结论","acceptance":[{"criterion":"C1","evidence":"E3"}]}',
     '- {"action":"abort","reason":"…","tried":["试过什么"],"blockers":["卡在哪"],"unmet":["C2"],"resume_hint":"以后怎么接着做"}',
   ].filter(Boolean);

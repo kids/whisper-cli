@@ -87,12 +87,11 @@ const v = (l: any, o: object, c: Partial<typeof ctx> = {}) => L.validateAction(l
   check("applyChanges add+remove+version", l.criteria.map((c) => c.id).join() === "C1,C2" && l.constraints.length === 0 && l.constraintsVersion === 2 && lines.length === 2, { lines, c: l.criteria });
 
   // ask
-  const irr = (opts: any[], d = "a") => v(l, { action: "ask", question: "推送吗", why: "irreversible", options: opts, default: d });
-  check("ask why must be in set", /why 必须/.test(v(l, { action: "ask", question: "q", why: "curious", options: ["a", "b"], default: "a" }) ?? ""));
+  const irr = (opts: any[]) => v(l, { action: "ask", question: "推送吗", why: "irreversible", options: opts });
+  check("ask why must be in set", /why 必须/.test(v(l, { action: "ask", question: "q", why: "curious", options: ["a", "b"] }) ?? ""));
   check("ask irreversible needs go option", /go/.test(irr([{ id: "a", label: "不推" }, { id: "b", label: "推" }]) ?? ""));
-  check("ask irreversible default not go", /默认/.test(irr([{ id: "a", label: "不推" }, { id: "b", label: "推", go: true }], "b") ?? ""));
   check("ask irreversible ok", irr([{ id: "a", label: "不推" }, { id: "b", label: "推", go: true }]) === undefined);
-  check("ask default must exist", /default/.test(v(l, { action: "ask", question: "q", why: "high_cost", options: ["x", "y"], default: "z" }) ?? ""));
+  check("ask needs no default (nobody decides for the human)", v(l, { action: "ask", question: "q", why: "high_cost", options: ["x", "y"] }) === undefined);
 
   // wait
   check("wait needs chat", /没有绑定群/.test(v(l, { action: "wait", watch: { pid: 9 } }, { canWait: false }) ?? ""));
@@ -129,8 +128,8 @@ const v = (l: any, o: object, c: Partial<typeof ctx> = {}) => L.validateAction(l
   check("budget exhausted", /worker/.test(L.budgetState(b).exhausted ?? ""));
   L.extendBudget(b);
   check("budget extended", !L.budgetState(b).exhausted && b.limits.maxWorkerRuns === 8 && b.limits.maxSteps === 15, b.limits);
-  const g = L.guardAsk(b, "idle", "x", 1000);
-  check("guard ask defaults to stop", g.code === "idle" && g.default === "stop" && g.options.some((o) => o.id === "continue") && !!g.timeoutAt);
+  const g = L.guardAsk(b, "idle", "x");
+  check("guard ask offers continue / stop, no auto-pick", g.code === "idle" && g.options.some((o) => o.id === "continue") && g.options.some((o) => o.id === "stop") && !("default" in g) && !("timeoutAt" in g));
 
   // events: a fired awaited watch becomes evidence + wakes the task
   const e = mk();
@@ -164,10 +163,10 @@ const v = (l: any, o: object, c: Partial<typeof ctx> = {}) => L.validateAction(l
   check("lead confirm / cancel", pa('{"action":"confirm"}').action === "confirm" && pa('{"action":"cancel"}').action === "cancel");
   check("lead submit with criteria", J(pa('{"action":"submit","goal":"g","preset":"loop","criteria":["测试通过"," "],"constraints":["不改接口"]}').criteria) === '["测试通过"]');
   const l = mk();
-  l.pendingAsk = { step: 2, question: "要推送到远端吗？", why: "irreversible", options: [{ id: "a", label: "先不推" }, { id: "b", label: "推送", go: true }], default: "a", askedAt: 0 };
+  l.pendingAsk = { step: 2, question: "要推送到远端吗？", why: "irreversible", options: [{ id: "a", label: "先不推" }, { id: "b", label: "推送", go: true }], askedAt: 0 };
   const t: any = { id: 5, title: "调参", status: "blocked", progress: "等你决定", kind: "loop", preset: loopPreset, createdAt: Date.now(), chatId: "c" };
   const prompt = buildLeadPrompt({ userText: "推吧", presetLine: "loop", tasks: [t], presets: ["loop"], roles: ["supervisor"], store: { getLedger: () => l } as any, pending: "调整编排 {}", threadTask: 5 });
-  check("lead prompt shows open question + options", prompt.includes("要推送到远端吗") && prompt.includes("b) 推送") && prompt.includes("默认 a"));
+  check("lead prompt shows open question + options", prompt.includes("要推送到远端吗") && prompt.includes("b) 推送") && prompt.includes("没人答就一直等"));
   check("lead prompt shows thread task + pending", prompt.includes("「调参」卡片的回复串") && prompt.includes("待用户确认的提议"));
   check("lead prompt shows roles", /implementer=\w+/.test(prompt));
   const card = renderCard(t, { getLedger: () => l } as any);
@@ -315,7 +314,7 @@ async function e2e() {
     check("B fabricated quote rejected", store.listSteps(id)[1]?.accepted === false && l.criteria[0].text === "测试通过");
     check("B first round saw the human message", /K1 不要了/.test(exec.of(id, "supervisor")[0].req.prompt));
     check("B irreversible ask blocks, no timeout", store.getTask(id)!.status === "blocked" && !l.pendingAsk?.timeoutAt && store.pendingLoopEffects(id).length === 0);
-    check("B ask posted with options", notes.some((n) => n.kind === "ask" && /b\)\*\* 推送/.test(n.text) && /不会自动执行/.test(n.text)), notes.filter((n) => n.kind === "ask"));
+    check("B ask posted with options", notes.some((n) => n.kind === "ask" && /b\)\*\* 推送/.test(n.text) && /不会自己往下走/.test(n.text)), notes.filter((n) => n.kind === "ask"));
     check("B wrong option refused", /没有选项/.test(orc.loop.answer(id, "z")));
 
     exec.sup.get(id)!.push(
@@ -400,10 +399,10 @@ async function e2e() {
     exec.sup.set(id, Array.from({ length: 5 }, () => S({ action: "verify", checks: [{ cmd: "echo 'boom at 12'; exit 3" }] })));
     await drive(() => store.getTask(id)!.status === "blocked");
     const l = orc.loop.ledger(id)!;
-    check("D repeated error → ask", l.pendingAsk?.code === "errors" && !!l.pendingAsk.timeoutAt, l.pendingAsk);
+    check("D repeated error → ask", l.pendingAsk?.code === "errors", l.pendingAsk);
     check("D hint at 3rd repeat", l.observations.some((o) => /同一个失败已经出现 3 次/.test(o.text)));
     check("D quiet: no turns, ask still posted", !notes.some((n) => n.kind === "turn") && notes.some((n) => n.kind === "ask"));
-    check("D ask_timeout scheduled", store.pendingLoopEffects(id).some((e) => e.payload.reason === "ask_timeout"));
+    check("D ask waits for a human (no timeout effect)", !store.pendingLoopEffects(id).some((e) => e.payload.reason === "ask_timeout") && !l.pendingAsk?.timeoutAt);
     check("D answer stop → dropped", /停下/.test(orc.loop.answer(id, "stop")) && store.getTask(id)!.status === "dropped");
     done();
   }
