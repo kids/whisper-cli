@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   loops TEXT NOT NULL DEFAULT '{}', deps TEXT NOT NULL DEFAULT '[]',
   feedback TEXT NOT NULL DEFAULT '', inbox TEXT NOT NULL DEFAULT '[]',
   chat_id TEXT, progress TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT 'human',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS attempts (
@@ -58,7 +59,8 @@ function rowToTask(r: any): Task {
     repo: r.repo, baseRef: r.base_ref, branch: r.branch ?? null, worktree: r.worktree ?? null,
     preset, stageIdx: r.stage_idx, status: r.status,
     loops: j(r.loops, {}), deps: j(r.deps, []), feedback: r.feedback, inbox: j(r.inbox, []),
-    chatId: r.chat_id ?? null, progress: r.progress, createdAt: r.created_at, updatedAt: r.updated_at,
+    chatId: r.chat_id ?? null, progress: r.progress, origin: r.origin === "agent" ? "agent" : "human",
+    createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
@@ -100,6 +102,8 @@ export class OrcStore {
     if (!cols.includes("kind")) this.db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'pipeline'");
     // 评审口径: how strictly this task should be reviewed (written by the lead per task nature)
     if (!cols.includes("bar")) this.db.exec("ALTER TABLE tasks ADD COLUMN bar TEXT NOT NULL DEFAULT ''");
+    // who started it: a human instruction, or an agent handing work over on its own
+    if (!cols.includes("origin")) this.db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human'");
   }
 
   /** Run fn in one transaction (nested calls join the outer one) */
@@ -125,15 +129,15 @@ export class OrcStore {
   createTask(t: {
     parentId?: number | null; title: string; goal: string; spec?: string; repo: string; baseRef: string;
     preset: ResolvedPreset; stageIdx?: number; deps?: number[]; chatId?: string | null; status?: Task["status"];
-    kind?: Task["kind"]; bar?: string;
+    kind?: Task["kind"]; bar?: string; origin?: "human" | "agent";
   }): Task {
     const now = Date.now();
     const r = this.db.prepare(
-      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,bar,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,bar,origin,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       t.parentId ?? null, t.title, t.goal, t.spec ?? "", t.repo, t.baseRef, JSON.stringify(t.preset),
-      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", t.bar ?? "", now, now,
+      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", t.bar ?? "", t.origin ?? "human", now, now,
     );
     return this.getTask(Number(r.lastInsertRowid))!;
   }

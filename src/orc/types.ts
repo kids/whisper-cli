@@ -126,6 +126,8 @@ export interface Task {
   spec: string;
   /** 评审口径: how strict review should be for this task, in the lead agent's words (empty → default) */
   bar?: string;
+  /** human = a person asked for it; agent = an agent handed the work over on its own */
+  origin?: "human" | "agent";
   repo: string;
   baseRef: string;
   branch: string | null;

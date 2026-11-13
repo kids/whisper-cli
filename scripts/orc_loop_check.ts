@@ -172,6 +172,8 @@ const v = (l: any, o: object, c: Partial<typeof ctx> = {}) => L.validateAction(l
   check("lead prompt shows roles", /implementer=\w+/.test(prompt));
   const card = renderCard(t, { getLedger: () => l } as any);
   check("loop card is identity + progress only", card === "调参\n等你决定" && !/预算|监督循环|验收标准/.test(card), card);
+  const agentCard = renderCard({ ...t, origin: "agent" } as any, { getLedger: () => l } as any);
+  check("agent-started task is tagged", agentCard.split("\n")[0] === "调参 · 🤖 agent 自己起的", agentCard);
 }
 
 // ---- engine end-to-end (scripted CLIs) -----------------------------------------

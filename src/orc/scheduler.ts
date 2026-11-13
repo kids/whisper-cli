@@ -71,6 +71,7 @@ export class Orchestrator {
     criteria?: string[]; constraints?: string[]; sourceText?: string;
     /** how strictly review should judge this task, in the lead's words (see orc/chat.ts lead prompt) */
     bar?: string;
+    origin?: "human" | "agent";
   }): Task {
     const root = wt.repoRoot(input.repo);
     if (!root) throw new Error(`${input.repo} is not inside a git repository (orc needs git worktrees)`);
@@ -79,7 +80,7 @@ export class Orchestrator {
     return this.store.tx(() => {
       const task = this.store.createTask({
         title: input.title || shortTitle(input.goal), goal: input.goal, repo: root, baseRef,
-        preset: input.preset, chatId: input.chatId ?? null, kind, bar: input.bar ?? "",
+        preset: input.preset, chatId: input.chatId ?? null, kind, bar: input.bar ?? "", origin: input.origin,
       });
       if (kind === "loop") this.loop.init(task, input);
       else this.store.addEffect("launch", { taskId: task.id, stageIdx: 0 } satisfies LaunchPayload);

@@ -23,7 +23,7 @@ import { fallbackNote, loadPresets, loadRoles, presetSummary } from "./config";
 import { acceptable, stageName } from "./core";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
-  renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, type ChatProfile, type LeadAction,
+  renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, taskLabel, type ChatProfile, type LeadAction,
 } from "./chat";
 import { MODE_LABEL, type ChatMode, type TaskOp } from "./route";
 import type { ExecutorBins } from "./runner";
@@ -81,7 +81,7 @@ function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMo
 export async function submitTaskOp(h: OrcChatHost, chatId: string, op: TaskOp, sourceText: string): Promise<string> {
   if (op.error || !op.goal) return `⚠️ 没有转交团队：${op.error ?? "缺少目标"}`;
   orcOf(h);
-  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar }, "caller");
+  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar, origin: "agent" }, "caller");
   return r.startsWith("❌") ? `⚠️ 没有转交团队：${r.replace(/^❌\s*/, "")}` : `🧭 ${r}`;
 }
 
@@ -90,7 +90,7 @@ export async function submitTaskOp(h: OrcChatHost, chatId: string, op: TaskOp, s
 // the text back to fold into its own reply (deliver="caller", e.g. the single agent's 🧭 line).
 async function submit(
   h: OrcChatHost, chatId: string, goal: string, presetName?: string,
-  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; title?: string } = {},
+  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; title?: string; origin?: "human" | "agent" } = {},
   deliver: "thread" | "caller" = "thread",
 ): Promise<string> {
   const o = orcOf(h);
@@ -105,7 +105,7 @@ async function submit(
   }
   const crit = preset.kind === "loop" && extra.criteria?.length ? `\n验收标准：${extra.criteria.map((c, i) => `C${i + 1} ${c}`).join("；")}` : "";
   const fb = fallbackNote(preset);
-  const receipt = (t: Task) => `已交给团队：**${t.title}** → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`，分支 \`${t.branch ?? "建好工作区后生成"}\`${crit}${fb ? `\nℹ️ ${fb}` : ""}`;
+  const receipt = (t: Task) => `已交给团队：**${taskLabel(t)}** → \`${presetSummary(preset)}\`\n仓库 \`${repo}\`，分支 \`${t.branch ?? "建好工作区后生成"}\`${crit}${fb ? `\nℹ️ ${fb}` : ""}`;
   const { task: t, receiptInThread } = await submitFromChat(
     o, h.im, chatId, goal, repo, preset, extra, deliver === "thread" ? { receipt } : {},
   );

@@ -149,8 +149,13 @@ export function hasOrcState(): boolean {
  * no status/stage/budget/plan shell — humans read what agents wrote into `progress`
  * (and `[[progress]]` / supervisor reports). The card is mainly a thread anchor.
  */
+/** Task identity as the group sees it: the title, plus who started it when an agent did */
+export function taskLabel(t: Task): string {
+  return `${t.title}${t.origin === "agent" ? " · 🤖 agent 自己起的" : ""}`;
+}
+
 export function renderCard(t: Task, _store?: OrcStore, _threaded = false): string {
-  const head = t.title;
+  const head = taskLabel(t);
   const body = (t.progress || "").trim();
   return body ? `${head}\n${clip(body, 500)}` : head;
 }
@@ -193,7 +198,7 @@ function renderCloseout(t: Task, store: OrcStore): string {
     : "❌ 任务结束 · 没能做完";
   const meta = [`共 ${rounds} ${t.kind === "loop" ? "轮" : "次运行"}`, tok ? `${fmtTok(tok)} tokens` : "", `历时 ${fmtMin(Date.now() - t.createdAt)}`, t.branch ? `分支 \`${t.branch}\`` : ""].filter(Boolean);
   return [
-    `**${head} · ${t.title}**`,
+    `**${head} · ${taskLabel(t)}**`,
     meta.join(" · "),
     "",
     t.status === "ready"
@@ -312,7 +317,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       await refreshCard(t, true);
       await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
       const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
-      await f.sendMarkdown(t.chatId, `**${head} · ${t.title}**\n\n${n.text}`);
+      await f.sendMarkdown(t.chatId, `**${head} · ${taskLabel(t)}**\n\n${n.text}`);
     },
     loop: {
       watchBot: (t) => {
@@ -339,7 +344,7 @@ export function availableClis(): string[] {
 /** Submit from chat: posts the progress card and binds it to the task */
 export async function submitFromChat(
   o: Orchestrator, im: ImClient, chatId: string, goal: string, repo: string, preset: ResolvedPreset,
-  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string } = {},
+  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; origin?: "human" | "agent" } = {},
   /** Receipt ("已交给团队…"): posted as the card's first thread reply so the chat reads submit → card → rounds */
   opts: { receipt?: (t: Task) => string } = {},
 ): Promise<{ task: Task; receiptInThread: boolean }> {
