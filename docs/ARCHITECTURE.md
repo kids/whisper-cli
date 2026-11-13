@@ -303,7 +303,34 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `~/.orc/` | orc 数据库（`tasks` 里的 `bar` 是这单的评审口径）、worktree、每轮产物、卡片映射（`cards.json`、`agent-cards.json`） |
 | `.tasks.json` | 管理群的工作组 ↔ 会话（沿用 feishu-cursor） |
 
-## 8. 主要环境变量
+## 8. 协议标记（`[[...]]`）
+
+模型回复里的 `[[...]]` 是"要做的事"，不是给人看的文字：代码认出就执行，认不出就原样留在正文里（**不报错、不找人**）。分三层，每层的产出方和消费方是固定的，解析器只认自己那一层：
+
+| 层 | 标记 | 谁产出 | 谁消费 | 干了什么 |
+|---|---|---|---|---|
+| **L1 交付 / 副作用** | `[[image]]` `[[file]]` | 单 agent、主 agent | `outgoing.ts` | 真的发附件（受目录与敏感文件限制） |
+| | `[[task]]` | 单 agent | `route.ts` → 建任务 | 转交团队 |
+| | `[[watch]]` `[[unwatch]]` | 单 agent、主 agent | `watch.ts` | 建 / 停监控 |
+| | `[[remember]]` `[[forget]]` | 单 agent、主 agent | `memory.ts` | 写 / 删群记忆 |
+| **L2 流程信号** | `[[done]]` `[[blocked]]` | 实现角色 | `output.ts` | 阶段结论，决定往下走还是退回 |
+| | `[[approve]]` `[[revise]]` | 评审角色 | `output.ts` | 同上 |
+| | `[[pass]]` `[[fail]]` | 测试角色 | `output.ts` | 同上 |
+| | `[[report]]` | 调研 / 汇报角色 | `output.ts` | 同上 |
+| | `[[instruct]]` `[[verify]]` `[[review]]` `[[wait]]` `[[ask]]` `[[finish]]` `[[abort]]` | 监督者 | `ledger.ts` | 这一轮执行什么 |
+| | `[[continue_with_known_issues]]` | 决策说明 | `brief.ts` | 允许带着遗留问题继续 |
+| **L3 记账 / 展示** | `[[major]]` `[[minor]]` | 评审 | `output.ts` | 问题分级，不影响流程 |
+| | `[[note]]` | worker、单 agent | `output.ts`、卡片 | 团队笔记 |
+| | `[[progress]]` | 任意 agent | `agent-runner.ts` | 刷卡片进度，不进群 |
+
+**规则**
+
+- 一个词只属于一层，不跨层复用（`[[review]]` 只指"叫审查"，流水线的 review 阶段是阶段名，不是标记）。
+- 越界不生效：监督者回复里写 `[[done]]` 不会当结论，worker 回复里写 `[[task]]` 不会建任务；解析器各自只扫自己的词表。
+- 新增标记必须同时更新本表和 `scripts/marker_check.ts`（它拿这份文档和源码比对，缺一边就报错）。
+- 标记行不进群、不进正文：代码取走；取不到可执行内容时，这一轮按"没有信号"处理。
+
+## 9. 主要环境变量
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
@@ -325,7 +352,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `WECOM_STREAM_MAX_MS` | 5 分钟 | 企微流式回复多久后主动收尾（结果改为另发） |
 | `WECOM_MD_MAX_BYTES` | 20000 | 企微单条 markdown 上限；发送失败自动按 4000 字节重发 |
 
-## 9. 验证脚本（`scripts/`）
+## 10. 验证脚本（`scripts/`）
 
 | 脚本 | 类型 | 内容 |
 |---|---|---|
@@ -333,6 +360,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `orc_loop_check.ts` | 离线 | 监督循环：标记解析、会话续接、不可逆批准、长作业等待、无动作继续、运行故障、崩溃恢复 |
 | `runner_wiring_check.ts` / `memory_check.ts` / `watch_check.ts` / `outgoing_check.ts` | 离线 | 路由接线、记忆、监控（含自然语言停监控）、附件 |
 | `route_check.ts` | 离线 | 消息分派规则（57 条）、`[[task]]` 解析 |
+| `marker_check.ts` | 离线 | 标记表与源码一致、一个标记只属于一层、越界标记不生效 |
 | `im_check.ts` | 离线 | 企微（假 SDK）/ Telegram（假 fetch）适配器、配置解析、分段工具 |
 | `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（22 条，含 auto 模式下交回单 agent、切换模式） |
 | `outgoing_agent_check.ts` | 真实模型 | agent 是否按 `[[image]]` / `[[file]]` 协议发图、发文件 |
@@ -340,7 +368,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 运行：`npx tsx scripts/<name>.ts`；类型检查：`npx tsc --noEmit`。
 
-## 10. 现状与后续
+## 11. 现状与后续
 
 已上线（`whisper-feishu.service`，systemd 托管，直接运行工作区代码）：单 agent、群公告、群记忆、监控、附件发送、orc 流水线、监督循环 M1。
 

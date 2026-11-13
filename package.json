@@ -8,6 +8,7 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
+    "check:markers": "tsx scripts/marker_check.ts",
     "capture-chat-id": "tsx scripts/capture-chat-id.ts",
     "orc": "tsx src/orc/cli.ts"
   },
