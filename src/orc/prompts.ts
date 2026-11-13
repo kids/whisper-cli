@@ -143,3 +143,26 @@ function briefAttemptLine(a: Attempt): string {
   }
   return lines.join("\n");
 }
+
+export interface ReplanCtx {
+  task: Task; role: ResolvedRole; text: string; stageId: string; stages: { id: string; name: string }[];
+}
+
+/** 人中途插话时先判断影响面：要重做就从某个阶段重跑，不要就当补充信息 */
+export function buildReplanPrompt(c: ReplanCtx): string {
+  return [
+    `# orc 任务 #${c.task.id} · 你的角色：${c.role.name} · 人在中途插话，先判断影响面`,
+    `## 目标\n${c.task.goal}`,
+    `## 规格\n${c.task.spec || "（没有单独写规格）"}`,
+    `## 阶段\n${c.stages.map((s, k) => `${k + 1}. ${s.name}（${s.id}）${s.id === c.stageId ? " ← 现在停在这里" : ""}`).join("\n")}`,
+    `## 人刚说\n${c.text}`,
+    [
+      `## 你要回答`,
+      `如果这句话改了目标 / 验收口径 / 范围，已经做完的部分需要重做：只输出一个标记块`,
+      "[[replan]]",
+      "reason: 一句为什么",
+      "restart_from: <上面某个阶段 id>",
+      `如果只是补充信息（不影响已完成的工作）：不要输出任何标记——这句话会照常交给下一步。`,
+    ].join("\n"),
+  ].join("\n\n");
+}

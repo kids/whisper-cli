@@ -214,6 +214,8 @@ export interface ChangeSet {
   invalidate?: string[];
   /** 默认 true：重新安排后 worker 开新会话，避免接着旧计划干 */
   resetWorker?: boolean;
+  /** 流水线：从哪个阶段重跑 */
+  restartFrom?: string;
   /** 原文，写进账本给人看 */
   text: string;
 }
@@ -235,6 +237,7 @@ export function parseChange(body: string): ChangeSet {
       if (key === "reason") out.reason = val;
       else if (key === "invalidate") out.invalidate = val.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
       else if (key === "reset_worker") out.resetWorker = !/^(0|false|no|不|否)$/i.test(val);
+      else if (key === "restart_from" || key === "from") out.restartFrom = val;
       else if (key === "criteria" || key === "constraints") { lists[key] = val ? [val] : []; if (key === "criteria") out.criteria = lists[key]; else out.constraints = lists[key]; }
       continue;
     }

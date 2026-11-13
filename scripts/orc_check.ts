@@ -233,6 +233,7 @@ class FakeExec implements Executor {
   hang = false;
   alwaysRevise = new Set<number>();
   testerStops = 0;
+  replanReply = "";
   available() { return ["codebuddy", "codex", "claude"] as any; }
   stop(key: string) { this.stopped.add(key); return true; }
   async run(req: RunRequest): Promise<RunResult> {
@@ -243,6 +244,7 @@ class FakeExec implements Executor {
     this.maxActive.set(role, Math.max(this.maxActive.get(role) ?? 0, this.active.get(role)!));
     try {
       if (role === "planner") return this.ok(this.plan);
+      if (role === "advisor") return this.ok(this.replanReply || "只是补充，不影响已完成的阶段。");
       if (role === "implementer") {
         if (this.hang) { while (!this.stopped.has(req.sessionKey)) await sleep(10); return { text: "🛑 任务已被用户终止。", tokens: 0, timedOut: false, cancelled: true }; }
         await sleep(this.implDelay);
@@ -292,6 +294,7 @@ function setup() {
   const notes: NotifyPayload[] = [];
   const orc = new Orchestrator(store, exec, {
     orcHome: join(dir, "home"), notify: async (_t, n) => { notes.push(n); }, progressThrottleMs: 0,
+    briefRole: () => ({ ...resolvePreset(presets.get("dev")!, roles).roles.planner, name: "advisor" }),
   });
   return { dir, repo, store, exec, notes, orc };
 }
@@ -307,6 +310,26 @@ async function e2e() {
     check("S unfinished tester continued, then ready", store.getTask(t.id)!.status === "ready" && tests.length === 3, store.getTask(t.id));
     check("S continuation resumes the same session", tests[1].resumeSessionId === `sess-test-${t.id}` && /接着做完/.test(tests[1].prompt), tests.map((c) => c.resumeSessionId));
     check("S nobody was asked to decide", !notes.some((n) => n.kind === "decision" || n.kind === "failed"), notes.map((n) => n.kind));
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // R: 人中途改口径 → advisor 判断影响面，从实现阶段重跑，之前的阶段保留
+  {
+    const { dir, repo, store, exec, notes, orc } = setup();
+    exec.implDelay = 120;
+    exec.replanReply = "[[replan]]\nreason: 人要求改成只读副本\nrestart_from: impl";
+    const t = orc.submit({ goal: "add feature", repo, preset: devPreset });
+    const running = orc.runUntilIdle(5);
+    for (let i = 0; i < 200 && !exec.calls.some((c) => c.role === "implementer"); i++) await sleep(10);
+    orc.attach(t.id, "先做成只读副本，别写文件", false, "先做成只读副本，别写文件");
+    for (let i = 0; i < 200 && !exec.calls.some((c) => c.role === "advisor"); i++) await sleep(10);
+    await running;
+    const st = store.getTask(t.id)!;
+    const imps = exec.calls.filter((c) => c.role === "implementer");
+    check("R restarts from the stage the advisor named", imps.length >= 2 && !!st, { imps: imps.length, status: st.status });
+    check("R replan column cleared after applying", st.replan === "", st.replan);
+    check("R earlier stages are not rerun", exec.calls.filter((c) => c.role === "planner").length === 1);
+    check("R the group is told what changed", notes.some((n) => /按你说的重新安排/.test(n.text) && /从「实现」重跑/.test(n.text) && /之前的阶段结果都保留/.test(n.text)), notes.map((n) => n.text));
+    check("R the human words reach the rerun", imps.some((c) => /只读副本/.test(c.prompt)), imps.map((c) => c.prompt.includes("只读副本")));
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
   // A: full dev pipeline with one rework loop

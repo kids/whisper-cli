@@ -12,10 +12,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { parseBrief, renderAutoNote, renderBrief } from "./brief";
+import { parseChange } from "./ledger";
 import { stageName } from "./core";
 import { childStartStage, decideAccept, decideAfterAttempt, decideParent, depsGate, type Decision, type Outcome } from "./core";
 import { parseRoleOutput, lastProgressLine } from "./output";
-import { buildBriefPrompt, buildStagePrompt } from "./prompts";
+import { buildBriefPrompt, buildReplanPrompt, buildStagePrompt } from "./prompts";
 import { LoopEngine, type LoopOptions } from "./loop";
 import type { Executor } from "./runner";
 import type { OrcStore } from "./store";
@@ -144,6 +145,8 @@ export class Orchestrator {
     if (task?.kind === "loop") return this.loop.attach(taskId, text, urgent, raw);
     if (!task || TERMINAL.includes(task.status)) return false;
     this.store.updateTask(taskId, { inbox: [...task.inbox, text] });
+    // 人改了目标 / 口径时，先把影响面判断出来（等这一步跑完再生效）
+    if (process.env.ORC_REPLAN !== "0") void this.writeReplan(taskId, text);
     if (urgent) {
       for (const r of this.running.values()) {
         if (r.taskId === taskId) { (r as any).interrupt = true; this.exec.stop(r.sessionKey, r.cli); }
@@ -416,6 +419,8 @@ export class Orchestrator {
         this.store.addEffect("launch", { taskId: task.id, stageIdx: launch.stageIdx, note: "你被人中途打断，请先阅读「新增输入」再继续。" } satisfies LaunchPayload);
       } else if (fresh.status === "dropped") {
         // stopped while running — nothing more to schedule
+      } else if (this.applyReplan(fresh)) {
+        // 人中途改了口径：按新的安排从指定阶段重跑，不再按原来的流程推进
       } else {
         const prevParsed = [...prior].reverse().find((a) => a.stageId === stage.id && a.parsed && a.id !== attempt.id)?.parsed ?? undefined;
         const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed, progressed: !!sha });
@@ -430,6 +435,61 @@ export class Orchestrator {
     }
     this.emitProgress(task.id);
     if (brief) await this.writeBrief(task.id, brief);
+  }
+
+  private replanning = new Set<number>();
+
+  /** 人插话 → advisor 判断要不要从某个阶段重跑；只认 stage id，别的一律当补充信息 */
+  private async writeReplan(taskId: number, text: string): Promise<void> {
+    if (this.replanning.has(taskId)) return;
+    this.replanning.add(taskId);
+    try {
+      const task = this.store.getTask(taskId);
+      if (!task || task.kind === "loop" || TERMINAL.includes(task.status) || !task.worktree) return;
+      const role = await this.opts.briefRole?.(task);
+      if (!role) return;
+      const stages = task.preset.stages.map((s) => ({ id: s.id, name: stageName(s.id) }));
+      if (!stages.length) return;
+      const prompt = buildReplanPrompt({ task, role, text, stageId: task.preset.stages[task.stageIdx]?.id ?? "", stages });
+      const res = await this.exec.run({
+        cli: role.cli, model: role.model, prompt, sessionKey: `orc:${taskId}#replan:${Date.now()}`, cwd: task.worktree,
+        appendSystemPrompt: await this.opts.instructionsFor?.(task), readOnly: true,
+        hardTimeoutMs: role.hardTimeoutMin * 60_000, staleTimeoutMs: role.staleTimeoutMin * 60_000,
+      }).catch((err) => ({ text: "", tokens: 0, timedOut: false, cancelled: false, error: (err as Error).message }));
+      if (res.error || res.timedOut || !res.text.trim()) return; // 没判断出来就当补充信息，照原流程走
+      const change = parseChange(res.text);
+      const idx = change.restartFrom ? task.preset.stages.findIndex((s) => s.id === change.restartFrom) : -1;
+      if (idx < 0) return;
+      this.store.updateTask(taskId, {
+        replan: JSON.stringify({ stageId: change.restartFrom, feedback: text, reason: change.reason, at: Date.now() }),
+        progress: `人改了口径，等这一步结束后从「${stageName(change.restartFrom!)}」重跑`,
+      });
+      if (![...this.running.values()].some((r) => r.taskId === taskId)) {
+        this.store.tx(() => this.applyReplan(this.store.getTask(taskId)!));
+      }
+      this.emitProgress(taskId);
+    } finally {
+      this.replanning.delete(taskId);
+    }
+  }
+
+  /** 应用挂起的重新安排（幂等；没有就返回 false）。必须在 store.tx 里调用 */
+  private applyReplan(task: Task): boolean {
+    if (!task.replan) return false;
+    let r: { stageId?: string; feedback?: string; reason?: string } = {};
+    try { r = JSON.parse(task.replan); } catch { this.store.updateTask(task.id, { replan: "" }); return false; }
+    const idx = task.preset.stages.findIndex((s) => s.id === r.stageId);
+    if (idx < 0) { this.store.updateTask(task.id, { replan: "" }); return false; }
+    this.store.updateTask(task.id, {
+      replan: "", stageIdx: idx, status: "running", loops: {}, feedback: r.feedback ?? "",
+      progress: `按新的安排从「${stageName(r.stageId!)}」重跑`,
+    });
+    this.store.addEffect("launch", { taskId: task.id, stageIdx: idx } satisfies LaunchPayload);
+    this.store.addEffect("notify", {
+      taskId: task.id, kind: "info",
+      text: `**${task.title}：按你说的重新安排**\n${r.reason || r.feedback || ""}\n\n从「${stageName(r.stageId!)}」重跑；之前的阶段结果都保留。`,
+    } satisfies NotifyPayload);
+    return true;
   }
 
   /**

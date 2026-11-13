@@ -59,7 +59,7 @@ function rowToTask(r: any): Task {
     repo: r.repo, baseRef: r.base_ref, branch: r.branch ?? null, worktree: r.worktree ?? null,
     preset, stageIdx: r.stage_idx, status: r.status,
     loops: j(r.loops, {}), deps: j(r.deps, []), feedback: r.feedback, inbox: j(r.inbox, []),
-    chatId: r.chat_id ?? null, progress: r.progress, origin: r.origin === "agent" ? "agent" : "human",
+    chatId: r.chat_id ?? null, progress: r.progress, origin: r.origin === "agent" ? "agent" : "human", replan: r.replan ?? "",
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -83,7 +83,7 @@ function rowToEffect(r: any): Effect {
 const TASK_COLS: Record<string, string> = {
   title: "title", spec: "spec", branch: "branch", worktree: "worktree", stageIdx: "stage_idx",
   status: "status", loops: "loops", deps: "deps", feedback: "feedback", inbox: "inbox",
-  chatId: "chat_id", progress: "progress", baseRef: "base_ref", preset: "preset",
+  chatId: "chat_id", progress: "progress", baseRef: "base_ref", preset: "preset", replan: "replan",
 };
 const ATTEMPT_COLS: Record<string, string> = {
   sessionId: "session_id", status: "status", output: "output", parsed: "parsed", error: "error",
@@ -104,6 +104,8 @@ export class OrcStore {
     if (!cols.includes("bar")) this.db.exec("ALTER TABLE tasks ADD COLUMN bar TEXT NOT NULL DEFAULT ''");
     // who started it: a human instruction, or an agent handing work over on its own
     if (!cols.includes("origin")) this.db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human'");
+    // 人中途改口径时，advisor 给出的"从哪个阶段重跑"，等当前这一步跑完再生效
+    if (!cols.includes("replan")) this.db.exec("ALTER TABLE tasks ADD COLUMN replan TEXT NOT NULL DEFAULT ''");
   }
 
   /** Run fn in one transaction (nested calls join the outer one) */

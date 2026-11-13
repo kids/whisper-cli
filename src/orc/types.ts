@@ -136,6 +136,8 @@ export interface Task {
   stageIdx: number;
   status: TaskStatus;
   loops: Record<string, number>;
+  /** 挂起的重新安排（JSON：{stageId, feedback, reason}），当前这一步跑完后生效 */
+  replan: string;
   deps: number[];
   /** Latest failing verdict/test report fed back to the next attempt */
   feedback: string;
