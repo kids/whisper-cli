@@ -349,7 +349,7 @@ export function availableClis(): string[] {
 /** Submit from chat: posts the progress card and binds it to the task */
 export async function submitFromChat(
   o: Orchestrator, im: ImClient, chatId: string, goal: string, repo: string, preset: ResolvedPreset,
-  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; origin?: "human" | "agent" } = {},
+  extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; title?: string; origin?: "human" | "agent" } = {},
   /** Receipt ("已交给团队…"): posted as the card's first thread reply so the chat reads submit → card → rounds */
   opts: { receipt?: (t: Task) => string } = {},
 ): Promise<{ task: Task; receiptInThread: boolean }> {

@@ -81,7 +81,7 @@ function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMo
 export async function submitTaskOp(h: OrcChatHost, chatId: string, op: TaskOp, sourceText: string): Promise<string> {
   if (op.error || !op.goal) return `⚠️ 没有转交团队：${op.error ?? "缺少目标"}`;
   orcOf(h);
-  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar, origin: "agent" }, "caller");
+  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar, title: op.title, origin: "agent" }, "caller");
   return r.startsWith("❌") ? `⚠️ 没有转交团队：${r.replace(/^❌\s*/, "")}` : `🧭 ${r}`;
 }
 
