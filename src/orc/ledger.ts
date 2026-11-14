@@ -178,6 +178,18 @@ export function resetGuards(l: Ledger): void {
   l.guard.infraErrors = 0;
 }
 
+/**
+ * 升级后旧 ledger 可能缺字段（例如监督者长会话 `sup`）。
+ * 读出来就补齐，避免 `l.sup.sessionId` 这类空引用把整轮打崩。
+ */
+export function ensureLedgerShape(l: Ledger): Ledger {
+  if (!l.worker) l.worker = { turns: 0, rotations: 0, epoch: 0 };
+  if (!l.sup) l.sup = { turns: 0 };
+  if (!l.guard || typeof l.guard.infraErrors !== "number") l.guard = { infraErrors: 0 };
+  if (typeof l.workerEpoch !== "number") l.workerEpoch = 0;
+  return l;
+}
+
 /** 唯一的代码主动确认：预算用完要不要继续花钱 */
 export function budgetAsk(l: Ledger, detail: string): PendingAsk {
   return { step: l.step, question: `预算用完（${detail}）。要继续吗？继续就追加 50%，不说话就不推进。`, why: "high_cost", code: "budget", askedAt: Date.now() };

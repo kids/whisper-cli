@@ -4,6 +4,10 @@
 // Writers' changes are committed after every attempt, so read-only roles always
 // see a clean tree; any change a read-only role leaves behind is reset and
 // reported as a violation (tool-level denial is best-effort across CLIs).
+//
+// Critical: never resetHard over pre-existing WIP. Background jobs (training)
+// also mutate tracked artifacts under out/ — those must not count as violations,
+// or a readonly check will wipe worker edits mid-flight (task #2 abort).
 // =============================================================================
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
@@ -78,15 +82,22 @@ export function mergeBranches(wt: string, branches: string[]): string | undefine
   return undefined;
 }
 
-/** Uncommitted changes, ignoring generated artifacts (pytest/node caches are not violations) */
-export function isDirty(wt: string): boolean {
-  return git(wt, ["status", "--porcelain", "--", ".", ...ARTIFACT_EXCLUDES]).length > 0;
-}
-
-/** Generated artifacts never committed even if the repo forgot to .gitignore them */
+/** Generated artifacts never committed / never treated as readonly violations */
 export const ARTIFACT_EXCLUDES = [
   "__pycache__", "*.pyc", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".DS_Store", "*.egg-info",
+  // live training / eval mutates these; wiping them (or blaming the supervisor) breaks long jobs
+  "out", "*.log", "*.ckpt", "*.pt", "*.pth", "*.onnx", "wandb", ".cache", "mlruns",
 ].flatMap((p) => [`:(exclude,glob)**/${p}`, `:(exclude,glob)**/${p}/**`]);
+
+/** Porcelain status, ignoring generated artifacts */
+export function statusPorcelain(wt: string): string {
+  return git(wt, ["status", "--porcelain", "--", ".", ...ARTIFACT_EXCLUDES]);
+}
+
+/** Uncommitted changes, ignoring generated artifacts (pytest/node caches are not violations) */
+export function isDirty(wt: string): boolean {
+  return statusPorcelain(wt).length > 0;
+}
 
 /** Commit everything in the worktree; returns the new sha or undefined if nothing changed */
 export function commitAll(wt: string, message: string): string | undefined {
@@ -96,12 +107,36 @@ export function commitAll(wt: string, message: string): string | undefined {
   return headSha(wt);
 }
 
-/** Throw away uncommitted changes (read-only role violation) */
+/** Throw away uncommitted changes (read-only role violation) — only when the tree started clean */
 export function resetHard(wt: string): string {
-  const files = git(wt, ["status", "--porcelain", "--", ".", ...ARTIFACT_EXCLUDES]);
+  const files = statusPorcelain(wt);
   git(wt, ["reset", "--hard", "-q"]);
   git(wt, ["clean", "-fdq"]);
   return files;
+}
+
+/**
+ * After a readonly role/command.
+ *
+ * Never resetHard here. A prior bug wiped worker WIP (and live training outputs)
+ * whenever the tree looked dirty after the supervisor — including when dirt came
+ * from a concurrent writer or from leftover uncommitted worker edits. Tool denial
+ * (Write/Edit/Bash) is the real readonly fence; if anything still lands, commit it
+ * onto the task branch so it is recoverable, and report a soft violation.
+ *
+ * `beforePorcelain` is kept for call-site clarity / future delta logic.
+ * Returns a human-readable note, or "" if nothing changed.
+ */
+export function enforceReadonly(wt: string, _beforePorcelain: string, commitMsg: string): { note: string; preserved: boolean; wiped: boolean; sha?: string } {
+  const after = statusPorcelain(wt);
+  if (!after) return { note: "", preserved: false, wiped: false };
+  const sha = commitAll(wt, commitMsg);
+  return {
+    note: `只读角色/命令期间工作区有未提交改动，已提交保留（不回滚）：\n${after}`,
+    preserved: true,
+    wiped: false,
+    sha,
+  };
 }
 
 export function diffSince(wt: string, base: string, maxChars = 30_000): { stat: string; diff: string; truncated: boolean } {

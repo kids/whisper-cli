@@ -9,7 +9,7 @@ export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report" | "acti
 
 export type Isolation =
   | "worktree"  // writes in the task worktree; changes are committed after the attempt
-  | "readonly"  // must not modify the worktree (enforced: dirty tree is reset + flagged)
+  | "readonly"  // must not modify the worktree (tool denial; residual dirt is committed, never resetHard)
   | "fresh";    // like worktree, but never resumes a previous session
 
 export interface RoleDef {

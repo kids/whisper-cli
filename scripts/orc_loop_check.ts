@@ -2,7 +2,7 @@
 // 协议：监督者写正文 + 至多一行 [[标记]]；没有标记 = 继续，代码不校验、不驳回、不因此问人。
 //   npx tsx scripts/orc_loop_check.ts
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +14,7 @@ const L = await import("../src/orc/ledger");
 const { loadPresets, loadRoles, resolvePreset } = await import("../src/orc/config");
 const { Orchestrator } = await import("../src/orc/scheduler");
 const { OrcStore } = await import("../src/orc/store");
+const wt = await import("../src/orc/worktree");
 import { classifyResult, type Executor, type RunRequest, type RunResult } from "../src/orc/runner";
 import type { NotifyPayload } from "../src/orc/types";
 
@@ -273,6 +274,87 @@ async function e2e() {
     l = orc.loop.ledger(id)!;
     check("C fired watch → ready", store.getTask(id)!.status === "ready" && l.evidence.some((e) => e.kind === "watch" && e.pass), { st: store.getTask(id)!.status, ev: l.evidence });
     check("C watch closed", l.waitWatch === undefined && W.getWatch(wid)?.status !== "active");
+    done();
+  }
+
+  // C2: keep 时 waitWatch 已丢 / 监控已非 active → 不得卡在「监控 #undefined」
+  {
+    const { repo, store, exec, notes, orc, drive, done } = setup();
+    const flag = join(repo, "done.flag");
+    const t = orc.submit({ goal: "后台训练", repo, preset: loopPreset, criteria: ["exit 0"] });
+    const id = t.id;
+    orc.loop.setVerbosity(id, "quiet");
+    exec.worker.set(id, () => "[[done]] 已在后台启动，pid 4242，日志 out/train.log");
+    exec.sup.set(id, [
+      S({ action: "instruct", text: "后台跑训练，报 pid 和日志" }),
+      S({ action: "wait", watch: { title: "训练", file: flag, every: "1m" }, reason: "等训练" }),
+    ]);
+    await drive(() => store.getTask(id)!.status === "waiting");
+    let l = orc.loop.ledger(id)!;
+    const wid = l.waitWatch!;
+    W.cancelWatch(wid);
+    l.waitWatch = undefined;
+    l.heartbeatS = undefined;
+    store.saveLedger(id, l);
+    store.updateTask(id, { status: "waiting", progress: "第 0 轮 · 巡检正常，继续等待监控 #undefined" });
+    exec.sup.get(id)!.push(
+      () => S({ action: "wait", keep: true, reason: "假装还在等" }),
+      () => S({ action: "finish", summary: "自愈后收尾" }),
+    );
+    orc.attach(id, "醒一下");
+    await drive(() => store.getTask(id)!.status === "ready" || /#undefined/.test(store.getTask(id)!.progress));
+    const st = store.getTask(id)!;
+    l = orc.loop.ledger(id)!;
+    check("C2 orphan keep does not stay on #undefined", !/#undefined/.test(st.progress) && st.status !== "waiting", { st: st.status, progress: st.progress, waitWatch: l.waitWatch });
+    check("C2 recovers to finish", st.status === "ready", { st: st.status, progress: st.progress });
+    done();
+  }
+
+  // C3: 只读检查不得 resetHard 抹掉 worker/并发写入；out/ 不计入 dirty
+  {
+    const dir = mkdtempSync(join(root, "wt-"));
+    git(dir, "init", "-q", "-b", "main");
+    writeFileSync(join(dir, "a.py"), "v1\n");
+    mkdirSync(join(dir, "out"), { recursive: true });
+    writeFileSync(join(dir, "out", "eval_hist.json"), '{"n":0}\n');
+    git(dir, "add", "-A");
+    git(dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
+    writeFileSync(join(dir, "out", "eval_hist.json"), '{"n":1}\n');
+    check("C3 out/ mutation is not dirty", !wt.isDirty(dir), wt.statusPorcelain(dir));
+    writeFileSync(join(dir, "a.py"), "v2-wip\n");
+    const before = wt.statusPorcelain(dir);
+    check("C3 source WIP is dirty", before.includes("a.py"), before);
+    writeFileSync(join(dir, "out", "eval_hist.json"), '{"n":2}\n');
+    const en = wt.enforceReadonly(dir, before, "test preserve");
+    check("C3 enforceReadonly never wipes", !en.wiped && en.preserved && !!en.sha, en);
+    check("C3 source WIP survived", readFileSync(join(dir, "a.py"), "utf8") === "v2-wip\n");
+    check("C3 tree clean after preserve-commit", !wt.isDirty(dir));
+    rmSync(dir, { recursive: true, force: true });
+
+    const { repo, store, exec, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "保 WIP", repo, preset: loopPreset, criteria: ["ok"] });
+    const id = t.id;
+    orc.loop.setVerbosity(id, "quiet");
+    exec.worker.set(id, (req) => {
+      writeFileSync(join(req.cwd, "feat.py"), "base\n");
+      return "[[done]] wrote feat.py";
+    });
+    exec.sup.set(id, [
+      S({ action: "instruct", text: "写 feat.py" }),
+      (req) => {
+        // 模拟：监督者思考期间出现未提交源码改动 + 训练写 out/
+        writeFileSync(join(req.cwd, "feat.py"), "base\n# worker-wip\n");
+        mkdirSync(join(req.cwd, "out"), { recursive: true });
+        writeFileSync(join(req.cwd, "out", "eval_hist.json"), '{"ok":1}\n');
+        return S({ action: "finish", summary: "wip 应被保留" });
+      },
+    ]);
+    await drive(() => store.getTask(id)!.status === "ready");
+    const wtp = store.getTask(id)!.worktree!;
+    const body = readFileSync(join(wtp, "feat.py"), "utf8");
+    const l = orc.loop.ledger(id)!;
+    check("C3 e2e feat.py WIP kept", body.includes("worker-wip"), body);
+    check("C3 e2e no destructive rollback note", !l.observations.some((o) => /已回滚/.test(o.text)), l.observations.filter((o) => o.kind === "system").map((o) => o.text));
     done();
   }
 

@@ -12,6 +12,6 @@ loop:
   require_review: false
   verbosity: normal
   budget:
-    max_steps: 60
+    max_steps: 500
     max_worker_runs: 25
     max_active_hours: 8

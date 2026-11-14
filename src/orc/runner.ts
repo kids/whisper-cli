@@ -44,7 +44,10 @@ export interface Executor {
   stop(sessionKey: string, cli: CliName): boolean;
 }
 
-const WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
+// Align with agent-runner READ_ONLY_DENY: Shell/Bash must be blocked too —
+// otherwise a "readonly" supervisor can rewrite sources via bash and then the
+// post-round resetHard wipes whoever's WIP was mid-edit (see orc task #2).
+const WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Shell"];
 
 /** Map a raw stream event to a short progress line (tool calls / commands) */
 export function eventToProgress(ev: any): string | undefined {

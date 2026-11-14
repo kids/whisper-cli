@@ -113,7 +113,8 @@ export class LoopEngine {
   }
 
   ledger(taskId: number): L.Ledger | undefined {
-    return this.store.getLedger<L.Ledger>(taskId);
+    const l = this.store.getLedger<L.Ledger>(taskId);
+    return l ? L.ensureLedgerShape(l) : undefined;
   }
 
   isBusy(taskId: number): boolean {
@@ -131,7 +132,10 @@ export class LoopEngine {
     if (!l) return skip("no ledger");
     // a blocked task waits for a human: only their answer / retry wakes it, nothing times out
     if (task.status === "blocked" && !["human", "resume", "retry"].includes(p.reason)) return skip("blocked");
-    if (task.status === "waiting" && !["watch", "heartbeat", "human", "resume", "retry"].includes(p.reason)) return skip("waiting");
+    // waiting 但没有 waitWatch = 坏停车（例如 keep 写出 #undefined）；放行以便本轮自愈，不要永久 skip
+    if (task.status === "waiting" && l.waitWatch != null && !["watch", "heartbeat", "human", "resume", "retry"].includes(p.reason)) {
+      return skip("waiting");
+    }
     if (p.reason === "heartbeat" && (task.status !== "waiting" || l.waitWatch !== p.ref)) return skip("stale heartbeat");
     if (this.busy.has(task.id)) { this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 2000 }); return undefined; }
     if (this.busy.size >= this.concurrency) { this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 3000 }); return undefined; }
@@ -350,6 +354,9 @@ export class LoopEngine {
       taskId: task.id, title: task.title, worktree: wtp, branch: task.branch ?? "", diffStat: wt.diffSince(wtp, task.baseRef, 0).stat,
       worker: roleName(worker), reviewer: reviewer ? roleName(reviewer) : undefined, reason: reasonText, waiting, canWait, fresh,
     });
+    // Snapshot before supervisor: if WIP already exists (or appears from a concurrent
+    // writer), enforceReadonly will commit it — never resetHard over worker edits.
+    const beforeSup = wt.statusPorcelain(wtp);
     const res = await this.run(task, sup, prompt, {
       key: `orc-loop:${task.id}#supervisor`, readOnly: true, n, label: "监督者",
       resumeSessionId: fresh ? undefined : l.sup.sessionId,
@@ -357,7 +364,13 @@ export class LoopEngine {
     if (res.cancelled || this.dropped(task.id)) return;
     l.budget.steps++;
     l.budget.tokens += res.tokens;
-    if (wt.isDirty(wtp)) { const files = wt.resetHard(wtp); L.observe(l, n, "system", `监督者是只读的，却改了文件，已回滚：${clip(files, 300)}`); }
+    {
+      const r0 = wt.enforceReadonly(wtp, beforeSup, `orc(#${task.id}) loop ${n}: preserve WIP during supervisor`);
+      if (r0.note) {
+        if (r0.sha) L.codeChanged(l, r0.sha);
+        L.observe(l, n, "system", clip(r0.note, 500));
+      }
+    }
 
     // 这一轮根本没跑成（CLI 报错 / 超时 / 空回复）：算运行故障重试，不找人
     if (res.error || res.timedOut) { this.roundFailed(task, l, n, p.reason, res, t0); return; }
@@ -467,9 +480,10 @@ export class LoopEngine {
         const lines: string[] = [];
         const turn: string[] = [];
         for (const c of a.checks) {
+          const before = wt.statusPorcelain(wtp);
           const r0 = await sh(c.cmd, wtp, Math.min((c.timeoutS ?? this.verifyTimeoutMs / 1000) * 1000, 30 * 60_000));
-          let violation = "";
-          if (wt.isDirty(wtp)) violation = wt.resetHard(wtp);
+          const en = wt.enforceReadonly(wtp, before, `orc(#${id}) loop ${n}: preserve WIP during verify`);
+          if (en.sha) L.codeChanged(l, en.sha);
           let pass = r0.code === 0 && !r0.timedOut;
           if (pass && c.expect) pass = new RegExp(c.expect, "i").test(r0.out);
           const tail = r0.out.split("\n").slice(-25).join("\n");
@@ -478,7 +492,8 @@ export class LoopEngine {
             kind: "verify", label, pass,
             detail: `${r0.timedOut ? "超时；" : ""}exit ${r0.code}${c.expect ? `；expect /${c.expect}/ ${pass ? "命中" : "未命中"}` : ""}\n${tail}`, sha: l.lastChangeSha, step: n,
           });
-          lines.push(`${ev.id} ${pass ? "✓" : "✗"} \`${c.cmd}\` exit ${r0.code}${r0.timedOut ? "（超时）" : ""}\n${clip(tail, 1500)}${violation ? `\n（检查命令改了文件，已回滚：${clip(violation, 200)}）` : ""}`);
+          const side = en.note ? `\n（${clip(en.note, 200)}）` : "";
+          lines.push(`${ev.id} ${pass ? "✓" : "✗"} \`${c.cmd}\` exit ${r0.code}${r0.timedOut ? "（超时）" : ""}\n${clip(tail, 1500)}${side}`);
           turn.push(`${ev.id} ${pass ? "✓" : "✗"} \`${clip(c.cmd, 80)}\`${pass ? "" : `：${clip(tail.split("\n").filter(Boolean).pop() ?? "", 120)}`}`);
         }
         return { progress: `第 ${n} 轮 · 验证：${turn.map((t) => t.split(" ")[1]).join("")}`, obs: lines.join("\n\n"), notifies: [], next: [{ reason: "next" }], turn: turn.join("\n") };
@@ -487,29 +502,46 @@ export class LoopEngine {
         const rv = r.reviewer!;
         const diff = { ...wt.diffSince(wtp, task.baseRef), log: wt.logSince(wtp, task.baseRef) };
         const prompt = L.buildReviewPrompt(l, { taskId: id, rolePrompt: rv.prompt, contract: CONTRACT.verdict, diff, focus: a.focus });
+        const beforeRv = wt.statusPorcelain(wtp);
         const res = await this.run(task, rv, prompt, { key: `orc-loop:${id}#reviewer`, readOnly: true, n, label: "审查" });
         if (res.cancelled) return { progress: "", obs: "", notifies: [], turn: "", stopped: true };
         l.budget.tokens += res.tokens;
-        let violation = "";
-        if (wt.isDirty(wtp)) violation = wt.resetHard(wtp);
+        const en = wt.enforceReadonly(wtp, beforeRv, `orc(#${id}) loop ${n}: preserve WIP during review`);
+        if (en.sha) L.codeChanged(l, en.sha);
         const p = parseRoleOutput("verdict", res.text);
         const ok = !("error" in p);
         const issues = ok ? (p.issues ?? []).slice(0, 12).map((it) => `- [${it.severity}] ${it.file ? it.file + (it.line ? ":" + it.line : "") + " " : ""}${it.desc}`).join("\n") : "";
         const summary = ok ? p.summary : `审查没有按约定输出：${clip(res.error || res.text.slice(-500), 500)}`;
         const ev = L.addEvidence(l, { kind: "review", label: `review ${roleName(rv)}：${ok ? (p.pass ? "approve" : "revise") : "无结论"}`, pass: ok && p.pass, detail: `${summary}\n${issues}`, sha: l.lastChangeSha, step: n });
+        const side = en.note ? `\n（${clip(en.note, 200)}）` : "";
         return {
           progress: `第 ${n} 轮 · 审查：${ok ? (p.pass ? "approve" : "revise") : "无结论"}`,
-          obs: `审查 ${ev.id}（${roleName(rv)}）${ok ? (p.pass ? "approve" : "revise") : "无结论"}：${summary}${issues ? "\n" + issues : ""}${violation ? `\n（审查者改了文件，已回滚）` : ""}`,
+          obs: `审查 ${ev.id}（${roleName(rv)}）${ok ? (p.pass ? "approve" : "revise") : "无结论"}：${summary}${issues ? "\n" + issues : ""}${side}`,
           notifies: [], next: [{ reason: "next" }],
           turn: `${ev.id} ${ev.pass ? "✓ approve" : "✗ " + (ok ? "revise" : "无结论")}（${roleName(rv)}）：${clip(summary, 300)}`,
         };
       }
       case "wait": {
         if (a.keep) {
+          // keep 必须挂在仍有效的 waitWatch 上；否则会写出「监控 #undefined」并永远 waiting
+          const wid = l.waitWatch;
+          const live = wid != null ? getWatch(wid) : undefined;
+          if (wid == null || !live || live.status !== "active") {
+            l.waitWatch = undefined;
+            l.heartbeatS = undefined;
+            return {
+              status: "running",
+              progress: `第 ${n} 轮 · 等待的监控已失效，继续推进`,
+              obs: `巡检想 keep，但 waitWatch=${wid ?? "无"} 已不存在或非 active（可能已触发/取消）。改为继续下一轮，避免卡在「监控 #undefined」。`,
+              notifies: [],
+              next: [{ reason: "next" }],
+              turn: "等待监控已失效，不再 keep。",
+            };
+          }
           const hb = l.heartbeatS;
           const why = a.reason ? `：${clip(a.reason, 200)}` : "";
           // healthy patrol: card progress only, no group message
-          return { status: "waiting", progress: `第 ${n} 轮 · 巡检正常，继续等待监控 #${l.waitWatch}${why}`, obs: `巡检后继续等待监控 #${l.waitWatch}${why}`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: l.waitWatch }] : [], turn: "" };
+          return { status: "waiting", progress: `第 ${n} 轮 · 巡检正常，继续等待监控 #${wid}${why}`, obs: `巡检后继续等待监控 #${wid}${why}`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: wid }] : [], turn: "" };
         }
         const spec = parseWatchSpec(a.watch, wtp);
         spec.onWake ||= a.reason || "叫醒监督者";

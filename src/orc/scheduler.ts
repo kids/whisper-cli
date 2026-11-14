@@ -369,6 +369,7 @@ export class Orchestrator {
       this.emitProgress(task.id);
     };
 
+    const beforeReadonly = role.isolation === "readonly" ? wt.statusPorcelain(task.worktree!) : "";
     let result;
     try {
       result = await this.exec.run({
@@ -385,11 +386,14 @@ export class Orchestrator {
     }
     writeFileSync(resolve(artifactDir, `${attempt.id}-${stage.id}.output.md`), result.text || result.error || "");
 
-    // Enforce isolation on the worktree, then commit writers' work
+    // Enforce isolation on the worktree, then commit writers' work.
+    // Readonly: never resetHard (preserve WIP); soft-warn if the tree moved.
     let violation = "";
     let sha: string | undefined;
     if (role.isolation === "readonly") {
-      if (wt.isDirty(task.worktree!)) violation = wt.resetHard(task.worktree!);
+      const en = wt.enforceReadonly(task.worktree!, beforeReadonly, `orc(#${task.id}) ${stage.id}: preserve WIP during ${role.name}`);
+      if (en.note) violation = en.note; // informational — not a destructive rollback
+      if (en.sha) sha = en.sha;
     } else {
       sha = wt.commitAll(task.worktree!, `orc(#${task.id}) ${stage.id}: ${role.name} attempt ${n}`);
     }
@@ -424,7 +428,7 @@ export class Orchestrator {
       } else {
         const prevParsed = [...prior].reverse().find((a) => a.stageId === stage.id && a.parsed && a.id !== attempt.id)?.parsed ?? undefined;
         const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed, progressed: !!sha });
-        if (violation) d.notifies.push({ taskId: task.id, kind: "info", text: `${role.name} 是只读角色却修改了文件，已回滚：\n${violation.slice(0, 500)}` });
+        if (violation) d.notifies.push({ taskId: task.id, kind: "info", text: `${role.name} 是只读角色，但工作区有改动，已提交保留（不回滚）：\n${violation.slice(0, 500)}` });
         this.applyDecision(fresh, d);
         brief = d.brief;
       }
