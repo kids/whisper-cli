@@ -7,6 +7,11 @@
 import type { Issue } from "./output";
 import type { Attempt, LaunchPayload, OutputKind, ResolvedRole, StageDef, Task } from "./types";
 
+// Roles judged by a conclusion line (see orc/output.ts CONCL). The prompt states the rule
+// a second time as a self-check, because "写完了" in prose is the most common way a stage stalls.
+const CONCL_TAG: Partial<Record<OutputKind, string>> = { impl: "done", verdict: "approve", test: "pass", report: "report" };
+const ROLE_HAS_CONCLUSION = new Set<OutputKind>(Object.keys(CONCL_TAG) as OutputKind[]);
+
 export const CONTRACT: Record<OutputKind, string> = {
   plan: `{"spec": "可验收的规格：要做什么、不做什么、验收标准", "subtasks": [{"title": "…", "spec": "…", "deps": [0]}], "summary": "一句话", "notes": ["值得团队记住的发现/决策"]}
 - 只有当工作确实可以并行、且每块能独立验收时才拆 subtasks（2～5 个）；否则 subtasks 给空数组 []。
@@ -93,7 +98,9 @@ export function buildStagePrompt(c: PromptContext): string {
 
   out.push(`## 角色说明\n${role.prompt}`);
   out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
-  out.push(`## 输出约定（必须遵守）\n这一轮回复结束就等于交付：后台作业要等它跑完、结果落盘再收尾，不要以「继续」「等它跑完」结束。\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}`);
+  out.push(`## 输出约定（必须遵守）\n这一轮回复结束就等于交付：后台作业要等它跑完、结果落盘再收尾，不要以「继续」「等它跑完」结束。\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}${
+    ROLE_HAS_CONCLUSION.has(role.output) ? `\n- 自检：回复发出前看最后一行是不是上面的标记行。**整条回复以结论行开头的那一行结尾**——不写这句话，本轮会被判为没收尾、白跑一次。别的任何写法（「完成了」「已修复」、或者在段落里夹一句 [[${CONCL_TAG[role.output]}]]）都不算。` : ""
+  }`);
   return out.join("\n\n");
 }
 
