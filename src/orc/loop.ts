@@ -378,7 +378,18 @@ export class LoopEngine {
     l.sup = { sessionId: res.sessionId ?? (fresh ? undefined : l.sup.sessionId), turns: fresh ? 1 : l.sup.turns + 1 };
     l.guard.infraErrors = 0;
     l.budget.activeMs += Date.now() - t0;
+    const markers = L.listActionMarkers(res.text);
     const a = L.parseSignal(res.text);
+
+    // 同轮多个标记：全部不执行并说清楚（旧逻辑 last-wins 会静默丢掉前面的 instruct）
+    if (markers.length > 1) {
+      const names = markers.join("+");
+      L.observe(l, n, "system", `本轮写了 ${markers.length} 个标记（${names}），协议只允许一个，已全部忽略。下一轮只留一个：要派工只写 [[instruct]]，取证留到下一轮再 [[verify]]。不要据此认定「平台未派工」。`);
+      l.step = n;
+      this.store.addStep({ taskId: task.id, n, reason: p.reason, action: null, accepted: false, verdict: `多标记忽略：${names}`, observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
+      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 多标记已忽略，请只留一个`, notifies, next: [{ reason: "next" }] });
+      return;
+    }
 
     // 没写动作标记 = 它还在想：不报错、不计数、不问人，下一轮接着来（预算兜底）
     if (!a) {

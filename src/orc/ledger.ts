@@ -266,6 +266,8 @@ export function parseChange(body: string): ChangeSet {
 
 const MARKER_RE = /^[ \t]*\[\[\s*([a-z_]+)\s*\]\][ \t]*(.*)$/i;
 const CLEAN = (t: string) => t.replace(/^[\s\-*>`]+/, "").replace(/`/g, "").trim();
+/** 监督循环动作标记；同轮出现多个时一律不执行（见 parseSignal） */
+const LOOP_ACTIONS = new Set(["instruct", "replan", "verify", "review", "wait", "ask", "finish", "abort"]);
 
 export interface Block { name: string; body: string }
 
@@ -281,11 +283,22 @@ export function markerBlocks(text: string): Block[] {
   return out.map((b) => ({ name: b.name, body: b.body.trim() }));
 }
 
-/** 这一轮想做什么；没有标记 / 标记内容为空 = 它还在想（undefined，不当错误） */
+/** 本轮写出的监督动作标记名（含空 body；用于发现 instruct+verify 同轮） */
+export function listActionMarkers(text: string): string[] {
+  return markerBlocks(text).filter((b) => LOOP_ACTIONS.has(b.name)).map((b) => b.name);
+}
+
+/**
+ * 这一轮想做什么。
+ * - 没有标记 / 标记内容为空 = 还在想（undefined）
+ * - **同轮多个动作标记 = undefined**（不再静默 last-wins：否则 instruct 会被后面的 verify 吃掉，worker 永不派发）
+ */
 export function parseSignal(text: string): LoopAction | undefined {
-  const blocks = markerBlocks(text);
-  const b = blocks[blocks.length - 1];
-  if (!b || !b.body) return undefined;
+  const blocks = markerBlocks(text).filter((b) => LOOP_ACTIONS.has(b.name));
+  if (blocks.length !== 1) return undefined;
+  const b = blocks[0];
+  // review 允许空 focus；其余动作需要 body
+  if (!b.body && b.name !== "review") return undefined;
   switch (b.name) {
     case "instruct": return { action: "instruct", text: b.body };
     case "replan": return { action: "replan", change: parseChange(b.body) };

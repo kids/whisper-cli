@@ -35,7 +35,10 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
 // ---- 协议：正文 + [[标记]]，没有标记就是"还在想" -------------------------------
 {
   const p = (t: string) => L.parseSignal(t);
-  check("last marker wins", p('先看看。\n[[verify]]\nls -a\n\n再想想\n[[finish]]\n做完了')?.action === "finish");
+  check("single marker still works", p("[[finish]]\n做完了")?.action === "finish");
+  check("multiple markers → undefined (no silent last-wins)", p('先看看。\n[[verify]]\nls -a\n\n再想想\n[[finish]]\n做完了') === undefined);
+  check("instruct+verify same turn → undefined", p("[[instruct]]\n修 --qr\n[[verify]]\nls") === undefined);
+  check("listActionMarkers lists both", L.listActionMarkers("[[instruct]]\nx\n[[verify]]\ny").join("+") === "instruct+verify");
   const v: any = p("[[verify]]\n- `pytest -q`\n* npm test");
   check("verify: one command per line, decoration stripped", v?.action === "verify" && v.checks.map((c: any) => c.cmd).join("|") === "pytest -q|npm test", v);
   const i: any = p("[[instruct]]\n把 X 改成 Y\n再跑一遍测试");
