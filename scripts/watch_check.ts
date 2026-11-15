@@ -153,9 +153,14 @@ check("cancel only own chat", !W.cancelWatch(wb.id, "oc_w") && W.cancelWatch(wb.
 for (let i = 0; i < W.MAX_ACTIVE_PER_CHAT; i++) mk({ cmd: "exit 1" }, "oc_cap");
 check("per-chat cap", throws(() => mk({ cmd: "exit 1" }, "oc_cap"), /上限/));
 
-// --- rendering (card == agent note only) ---
+// --- rendering (card == agent note; empty note is seeded) ---
 const card = W.renderWatchCard(W.getWatch(wa.id)!);
-check("fired card without note is bare id", card === `监控 #${wa.id} mgr`, card);
+check("omitted note is seeded from title", W.getWatch(wa.id)!.note === "mgr" && card === "mgr", { note: W.getWatch(wa.id)!.note, card });
+const logPath = join(dir, "train_seed.log");
+writeFileSync(logPath, "x\n");
+const seeded = W.addWatch({ chatId: "oc_seed", bot: "bot", sessionKey: "oc_seed", cwd: dir, spec: W.parseWatchSpec({ log: logPath, pid: 4242 }, dir) });
+check("log-as-title seeds human note", /长作业进行中/.test(seeded.note!) && /pid 4242/.test(seeded.note!) && /train_seed\.log/.test(seeded.note!), seeded.note);
+check("explicit note wins over seed", W.seedWatchNote(seeded.spec, "Adam 刚启动") === "Adam 刚启动");
 const ctx = W.formatWatchContext("oc_cap");
 check("context: protocol + active list", ctx.includes("[[watch]]") && ctx.includes("setsid") && ctx.includes("本群进行中的监控") && ctx.includes("note"));
 const wake = W.buildWakePrompt({ ...W.getWatch(wa.id)!, spec: { ...W.getWatch(wa.id)!.spec, onWake: "跑 eval" } }, { fire: { kind: "file", reason: "产物已出现" }, summary: "", evidence: "日志末尾：ok", logOffset: 0 });

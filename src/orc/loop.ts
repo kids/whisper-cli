@@ -13,7 +13,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { addWatch, cancelWatch, checkWatch, describeSpec, getWatch, parseDuration, parseWatchSpec, PATROL, type CheckResult, type Watch } from "../watch";
+import { addWatch, cancelWatch, checkWatch, describeSpec, getWatch, parseDuration, parseWatchSpec, setWatchNote, PATROL, type CheckResult, type Watch } from "../watch";
 
 /** While parked on a watch the supervisor patrols this often by default (min 10m) */
 const DEFAULT_HEARTBEAT_S = 30 * 60;
@@ -551,18 +551,29 @@ export class LoopEngine {
           }
           const hb = l.heartbeatS;
           const why = a.reason ? `：${clip(a.reason, 200)}` : "";
+          // 巡检带了判断依据 → 写入监控 note，并刷新群卡片（避免一直只显示 log 文件名）
+          if (a.reason?.trim()) {
+            const updated = setWatchNote(wid, a.reason.trim());
+            if (updated) try { this.opts.onWatchCreated?.(task, updated); } catch { /* card best-effort */ }
+          }
           // healthy patrol: card progress only, no group message
           return { status: "waiting", progress: `第 ${n} 轮 · 巡检正常，继续等待监控 #${wid}${why}`, obs: `巡检后继续等待监控 #${wid}${why}`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: wid }] : [], turn: "" };
         }
-        const spec = parseWatchSpec(a.watch, wtp);
+        const watchRaw: Record<string, unknown> = { ...(a.watch ?? {}) };
+        const noteFromWatch = typeof watchRaw.note === "string" ? String(watchRaw.note).trim() : "";
+        delete watchRaw.note;
+        // title 常被填成 log 文件名；有 reason 时用它当标题，卡片才不像「只有一个 log」
+        if (!watchRaw.title && a.reason) watchRaw.title = clip(a.reason, 40);
+        const spec = parseWatchSpec(watchRaw, wtp);
         spec.onWake ||= a.reason || "叫醒监督者";
-        const w = addWatch({ chatId: task.chatId!, bot: this.opts.watchBot!(task)!, sessionKey: `orc-loop:${id}`, cwd: wtp, spec });
+        const note = [a.reason, noteFromWatch].filter(Boolean).join("\n") || undefined;
+        const w = addWatch({ chatId: task.chatId!, bot: this.opts.watchBot!(task)!, sessionKey: `orc-loop:${id}`, cwd: wtp, spec, note });
         l.waitWatch = w.id;
         l.heartbeatS = Math.max(600, a.heartbeat ? parseDuration(a.heartbeat) : DEFAULT_HEARTBEAT_S);
         try { this.opts.onWatchCreated?.(task, w); } catch { /* card is best-effort */ }
         return {
           status: "waiting", progress: `等待监控 #${w.id}：${spec.title}`,
-          obs: `已挂起，等待监控 #${w.id}（${describeSpec(spec)}）${a.reason ? "：" + a.reason : ""}`,
+          obs: `已挂起，等待监控 #${w.id}（${describeSpec(spec)}）${a.reason ? "：" + a.reason : ""}${w.note ? `\n卡片 note：${clip(w.note, 200)}` : ""}`,
           notifies: [], next: l.heartbeatS ? [{ reason: "heartbeat", delayMs: l.heartbeatS * 1000, ref: w.id }] : [],
           turn: `⏳ 监控 #${w.id} ${spec.title}：${describeSpec(spec)}${l.heartbeatS ? `；每 ${Math.round(l.heartbeatS / 60)} 分钟心跳` : ""}`,
         };

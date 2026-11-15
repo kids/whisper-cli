@@ -177,6 +177,24 @@ export function parseWatchNote(raw: any): string | undefined {
   return note.slice(0, MAX_NOTE);
 }
 
+/**
+ * Card body when the agent omits `note`. Never leave the card as bare `#N foo.log`
+ * (title often defaults to the log basename) — seed a short human line instead.
+ * Explicit note always wins.
+ */
+export function seedWatchNote(spec: WatchSpec, explicit?: string): string {
+  const n = explicit?.trim();
+  if (n) return n.slice(0, MAX_NOTE);
+  const logBase = spec.log?.split("/").pop();
+  const titleIsLog = !!(logBase && spec.title === logBase);
+  const parts: string[] = [];
+  if (spec.title && !titleIsLog) parts.push(spec.title);
+  else parts.push("长作业进行中");
+  if (spec.pid) parts.push(`pid ${spec.pid}`);
+  if (logBase) parts.push(`日志 ${logBase}`);
+  return parts.join(" · ").slice(0, MAX_NOTE);
+}
+
 /** `[[watch]] {"id":7,"note":"…"}` — refresh the card body without touching probes. */
 export function isWatchNoteUpdate(raw: any): boolean {
   return raw != null && typeof raw === "object" && raw.id != null && (raw.note != null || raw.card != null);
@@ -387,7 +405,8 @@ export function addWatch(input: { chatId: string; bot: string; sessionKey: strin
     const st = statSync(input.spec.log);
     if (now - st.mtimeMs > 5 * 60_000) logOffset = st.size;
   }
-  const note = input.note?.trim().slice(0, MAX_NOTE) || undefined;
+  // Always seed a human note so the IM card is never just「监控 #N xxx.log」
+  const note = seedWatchNote(input.spec, input.note);
   const w: Watch = {
     id: d.nextId++, chatId: input.chatId, bot: input.bot, sessionKey: input.sessionKey, cwd: input.cwd,
     spec: input.spec, status: "active", createdAt: now,

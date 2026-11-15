@@ -316,7 +316,7 @@ export function parseSignal(text: string): LoopAction | undefined {
       if (kv.keep && !/^(0|false|no)$/i.test(kv.keep)) return { action: "wait", keep: true, reason: kv.reason };
       const watch: Record<string, unknown> = {};
       if (kv.pid) watch.pid = Number(kv.pid);
-      for (const k of ["title", "log", "done", "stale", "every", "timeout", "cmd", "file"] as const) if (kv[k]) watch[k] = kv[k];
+      for (const k of ["title", "log", "done", "stale", "every", "timeout", "cmd", "file", "note"] as const) if (kv[k]) watch[k] = kv[k];
       if (kv.wake_on) watch.wake_on = kv.wake_on.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
       if (kv.metrics) watch.metrics = { path: kv.metrics };
       return Object.keys(watch).length ? { action: "wait", watch, heartbeat: kv.heartbeat, reason: kv.reason } : undefined;
@@ -418,7 +418,7 @@ const SIGNAL_HINT = `## 要做的事写成一行标记（不写 = 你还在想�
 - \`[[replan]]\` 人改了目标 / 验收 / 口径时，先重新安排再继续：reason: 一句原因；criteria: / constraints: 后面每行 - 一条（整体替换）；invalidate: E3,E5 作废旧证据；reset_worker: no 可以保留 worker 会话
 - \`[[verify]]\` 你自己要跑的只读命令，一行一条
 - \`[[review]]\` 可选：换一个模型审当前改动，这一行后面写审查重点
-- \`[[wait]]\` 挂起等长作业，后面写 key=value：pid=123 / log=out/train.log / done=训练完成 / stale=30m / every=5m / timeout=2d；巡检正常写 \`[[wait]]\` 再一行 keep=1
+- \`[[wait]]\` 挂起等长作业，后面写 key=value：pid=123 / log=out/train.log / done=训练完成 / stale=30m / every=5m / timeout=2d / note=刚启动 Adam（群卡片用人话，勿只写 log 文件名）；巡检正常写 \`[[wait]]\` 再一行 keep=1，并写 reason=判断依据（会刷新卡片）
 - \`[[ask]]\` 只有不可逆、高成本或目标有歧义才用，第一行可写 why=irreversible
 - \`[[finish]]\` 结论
 - \`[[abort]]\` 为什么放弃

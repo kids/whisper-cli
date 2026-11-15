@@ -328,6 +328,11 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       onWatchCreated: (t, w) => {
         const f = clientFor(t.chatId);
         if (!f || !t.chatId) return;
+        // 已有卡片 → 原地刷新 note；否则新建（巡检 keep 写 note 时会再调一次）
+        if (w.cardId) {
+          void f.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+          return;
+        }
         void f.sendCardAndGetId(t.chatId, renderWatchCard(w)).then((id) => { if (id) updateWatch(w.id, { cardId: id }); }).catch(() => {});
       },
       onRun: loopRunCard,
