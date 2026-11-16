@@ -374,7 +374,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 ## 11. 现状与后续
 
-已上线（`whisper-feishu.service`，systemd 托管，直接运行工作区代码）：单 agent、群公告、群记忆、监控、附件发送、orc 流水线、监督循环 M1。
+已上线（`whisper-feishu.service.example` → 本机 `whisper-feishu.service` / systemd 托管，直接运行工作区代码）：单 agent、群公告、群记忆、监控、附件发送、orc 流水线、监督循环 M1。
 
 未完成：
 

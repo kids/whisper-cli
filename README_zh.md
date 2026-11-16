@@ -151,12 +151,13 @@ npm start
 
 systemd（Linux）：
 ```bash
-sudo cp whisper-cli.service /etc/systemd/system/
+cp whisper-feishu.service.example whisper-feishu.service   # 按本机改 PATH / 路径
+sudo cp whisper-feishu.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now whisper-cli
+sudo systemctl enable --now whisper-feishu
 ```
 
-> 服务直接运行工作目录里的代码；更新代码后 `systemctl restart <服务名>` 生效。
+> 服务直接运行工作目录里的代码；更新代码后 `systemctl restart whisper-feishu` 生效。真正的 unit 文件是本机本地的（已 gitignore），仓库只保留 `.example`。
 
 ### 4. 使用
 在群里直接说话即可（企微群里要 @ 机器人），所有配置的 Agent 组同时在线。不需要记命令：

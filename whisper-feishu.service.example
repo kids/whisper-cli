@@ -1,0 +1,36 @@
+# Linux systemd unit template for whisper-feishu.
+# Install:
+#   1. cp whisper-feishu.service.example whisper-feishu.service
+#      (edit WorkingDirectory / PATH / EnvironmentFile / log paths for this machine;
+#       PATH should point at a Node ≥20 bin dir, e.g. nvm's current LTS or newer)
+#   2. sudo cp whisper-feishu.service /etc/systemd/system/whisper-feishu.service
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now whisper-feishu
+#
+# The real whisper-feishu.service (repo root or /etc) is machine-local and gitignored.
+# Prefer overriding only PATH via a drop-in if the rest of the unit is shared:
+#   /etc/systemd/system/whisper-feishu.service.d/node-path.conf
+
+[Unit]
+Description=whisper-feishu (Feishu bot -> AI CLI / whisper-cli)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/data/dev/whisper-cli
+Environment=PATH=/root/.nvm/versions/node/v26.5.0/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
+EnvironmentFile=-/data/dev/whisper-cli/.env
+ExecStart=/data/dev/whisper-cli/node_modules/.bin/tsx src/index.ts
+Restart=on-failure
+RestartSec=5
+# 飞书长连接 + agent 子进程可能较长
+TimeoutStopSec=30
+
+StandardOutput=append:/data/dev/whisper-cli/whisper-cli.log
+StandardError=append:/data/dev/whisper-cli/whisper-cli.log
+
+[Install]
+WantedBy=multi-user.target

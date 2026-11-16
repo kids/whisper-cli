@@ -152,12 +152,13 @@ npm start
 
 systemd (Linux):
 ```bash
-sudo cp whisper-cli.service /etc/systemd/system/
+cp whisper-feishu.service.example whisper-feishu.service   # edit PATH / paths for this host
+sudo cp whisper-feishu.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now whisper-cli
+sudo systemctl enable --now whisper-feishu
 ```
 
-> The service runs the code in its working directory; after updating, `systemctl restart <service>`.
+> The service runs the code in its working directory; after updating, `systemctl restart whisper-feishu`. The real unit file is machine-local (gitignored); only the `.example` is in the repo.
 
 ### 4. Usage
 Just talk in the group (in WeCom groups, @ the bot) — all configured agent groups run simultaneously. No commands to learn:
