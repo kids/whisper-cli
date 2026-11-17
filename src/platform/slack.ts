@@ -402,7 +402,8 @@ export class SlackClient implements ImClient {
     const hit = this.rules.get(channel);
     if (hit && Date.now() - hit.at < RULES_TTL_MS) return hit;
     try {
-      const r = await this.call<{ items?: { message?: { text?: string; ts?: string } }[] }>("pins.list", { channel });
+      // pins.* predates JSON bodies: form-encoded only, otherwise invalid_arguments
+      const r = await this.call<{ items?: { message?: { text?: string; ts?: string } }[] }>("pins.list", { channel }, { form: true });
       for (const item of r.items ?? []) {
         const text = item.message?.text || "";
         if (!text.startsWith(RULES_MARK)) continue;
@@ -443,7 +444,7 @@ export class SlackClient implements ImClient {
       await this.call("chat.update", { channel, ts: hit.ts, text, mrkdwn: true });
     } else {
       const r = await this.call<{ ts: string }>("chat.postMessage", { channel, text, mrkdwn: true, unfurl_links: false });
-      await this.call("pins.add", { channel, timestamp: r.ts }).catch(() => { /* pins:write missing → rules still readable? no; degraded */ });
+      await this.call("pins.add", { channel, timestamp: r.ts }, { form: true }).catch(() => { /* pins:write missing → degraded to "no announcement" */ });
     }
     this.rules.delete(channel);
     return newRev;
