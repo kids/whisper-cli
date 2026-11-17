@@ -31,7 +31,7 @@
                ├─ 普通对话 → 单 agent：直接跑 CLI
                └─ 要团队 / 说到进行中的任务 / 待回答的问题 / 任务卡片回复串 → 主 agent（lead）选动作
           │
-上下文层 群公告（announcement.ts）· 群记忆（memory.ts）· 最近对话（recent.ts）· 监控 / 发送提示
+上下文层 群公告（announcement.ts）· 群记忆（memory.ts）· 最近对话（recent.ts）· 任务事实（orc/facts.ts）· 监控 / 发送提示
           │
 执行层   各 CLI 适配（src/ai/*.ts）：每轮一个子进程，-p 模式，可续接会话
           │
@@ -362,7 +362,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 | 脚本 | 类型 | 内容 |
 |---|---|---|
-| `orc_check.ts` / `orc_extras_check.ts` | 离线 | 流水线解析、状态机、假执行器端到端、崩溃恢复 |
+| `orc_check.ts` / `orc_extras_check.ts` | 离线 | 流水线解析、状态机（含退回/收敛判定）、任务事实渲染、修订要求、假执行器端到端、崩溃恢复 |
 | `orc_loop_check.ts` | 离线 | 监督循环：标记解析、会话续接、不可逆批准、长作业等待、无动作继续、运行故障、崩溃恢复 |
 | `runner_wiring_check.ts` / `memory_check.ts` / `watch_check.ts` / `outgoing_check.ts` | 离线 | 路由接线、记忆、监控（含自然语言停监控）、附件 |
 | `route_check.ts` | 离线 | 消息分派规则（57 条）、`[[task]]` 解析 |
