@@ -135,6 +135,7 @@
 | 群公告（本群的长期指令） | 飞书群公告（docx） | 每轮注入所有 agent（单 agent、主 agent、orc 各角色） | 人直接改；主 agent 的 `announce` 动作需人确认后追加，带版本校验 |
 | 群记忆（事实、偏好） | `state/chat-memory/`（`CHAT_MEMORY_DIR`），每群 ≤60 条 | 每轮注入 | `/记住`、`/记忆 forget/clear`；单 agent 回复里的 `[[remember]]` / `[[forget]]`；主 agent 的 `remember` / `forget`。orc 的 worker 只读 |
 | 最近对话 | `state/recent-turns.json` | orc 主 agent（每条消息都是新会话，只靠它接上下文） | 单 agent 和主 agent 每轮自动记录 |
+| 任务事实（卡点、决策说明、最近运行、分支与 worktree） | `<群工作区>/.whisper/task-<id>.md`（写进本地 `git info/exclude`，不提交、不弄脏仓库） | 单 agent / 主 agent：每轮在任务行里注入一段摘要（卡点 + 建议 + 路径），全文按需读文件 | `src/orc/facts.ts`，在每次构造 prompt 时按任务重写 |
 
 不用 CodeBuddy 自带的 Auto Memory：它按 cwd 区分，共用仓库的群会串，orc 的 worktree 会把它打散，其他 CLI 也看不到。
 
@@ -171,7 +172,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 ### 6.1 入口与主 agent
 
-- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，默认模型见 §6.2 角色表下方，可用 `ORC_LEAD_MODEL` 覆盖。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。
+- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，默认模型见 §6.2 角色表下方，可用 `ORC_LEAD_MODEL` 覆盖。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。任务行由 `src/orc/facts.ts` 生成：除状态和进展外，还带最近一次未过评审的结论、advisor 决策说明里的「建议 / 需要你定」，以及 `.whisper/task-<id>.md` 明细路径。所以「为什么没过」这类追问不必落到“我这边看不到”，lead 也不会再拿主仓库的干净工作区误判任务没产出（分支和 worktree 就在任务行里）。
 - **任务索引卡**（与监控卡同思路）：只显示 `#N 标题` + 当前 `progress` 原文（含 agent 的 `[[progress]]`），没有阶段 / 预算 / plan 等状态壳；卡主要当回复串锚点。问进展由主 agent `reply` 用人话答，代码不再复读整卡。
 - 兜底命令（用户一般不用）：`/mode auto|single|orc [组合]`、`/task <目标>`、`/task <id>`、`/task stop|retry|attach <id> …`、`/tasks`、`/orc`、`/orc preset <名> | reset | confirm | cancel`。bot 自己的提示文案只教自然语言（"回复「确认」""说「再试一次」"），不再教命令。
 - 主 agent 只输出一个动作，由代码执行：

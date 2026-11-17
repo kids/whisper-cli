@@ -16,6 +16,7 @@ import { Orchestrator } from "../src/orc/scheduler";
 import { OrcStore } from "../src/orc/store";
 import type { NotifyPayload, Task } from "../src/orc/types";
 import { parseLeadAction, resolveChatPreset } from "../src/orc/chat";
+import { renderFactsMarkdown, renderTaskFacts, taskFacts } from "../src/orc/facts";
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail?: unknown) {
@@ -53,6 +54,41 @@ function throws(fn: () => unknown, re: RegExp): boolean {
   check("classify cancel", classifyResult("🛑 任务已被用户终止。").cancelled);
   check("progress from cb tool_use", eventToProgress({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "npm test" } }] } }) === "Bash: npm test");
   check("progress from codex cmd", eventToProgress({ type: "item.started", item: { type: "command_execution", command: "ls" } }) === "shell: ls");
+}
+
+// ---- task facts (prompt lines + detail file) --------------------------------
+{
+  const task: any = {
+    id: 21, kind: "pipeline", parentId: null, title: "组合式产品创意研究方案", goal: "", spec: "", bar: "",
+    origin: "human", repo: "/r", baseRef: "b", branch: "orc/x", worktree: "/w",
+    preset: {
+      name: "research", version: 1, kind: "pipeline",
+      roles: { researcher: { name: "researcher", output: "report" }, critic: { name: "critic", output: "verdict" } },
+      stages: [{ id: "research", role: "researcher" }, { id: "critique", role: "critic" }],
+    },
+    stageIdx: 1, status: "blocked", loops: { critique: 2 }, replan: "", deps: [], feedback: "",
+    inbox: [], chatId: "oc_x", progress: "评审反复没过，等你决定（决策说明见回复）", createdAt: 1, updatedAt: 2,
+  };
+  const attempts: any[] = [
+    { id: 1, taskId: 21, stageId: "research", role: "researcher", status: "done", startedAt: 1, endedAt: 2, parsed: { kind: "report", pass: true, summary: "三线调研完成", notes: [], body: "" } },
+    { id: 2, taskId: 21, stageId: "critique", role: "critic", status: "done", startedAt: 3, endedAt: 4, parsed: { kind: "verdict", pass: false, summary: "时间窗错位、旧产品混入", notes: ["HN 已改为快照"], body: "", issues: [{ severity: "major", file: "docs/x.md", line: 67, desc: "防泄漏条件写反" }] } },
+    { id: 3, taskId: 21, stageId: "brief", role: "advisor", status: "done", startedAt: 5, endedAt: 6, parsed: { kind: "brief", pass: true, summary: "现在到哪一步：做到了三线调研", notes: [], body: "## 现在到哪一步\n\n做到了调研\n\n## 我的建议\n\n走 A，把 A 级降级\n\n## 需要你给的\n\n确认只做 B 级\n\n[[none]]" } },
+  ];
+  const src = { listAttempts: () => attempts, getLedger: () => undefined };
+  const f = taskFacts(src, task);
+  check("facts: latest failing verdict", f.lastFail?.stage === "critique" && /时间窗错位/.test(f.lastFail.summary), f.lastFail);
+  check("facts: advisor brief", !!f.brief && f.brief.summary.length > 0, f.brief);
+  check("facts: brief digest prefers advice + decision", /走 A/.test(f.brief?.summary ?? "") && /需要你定：确认只做 B 级/.test(f.brief?.summary ?? "") && !/\[\[none\]\]/.test(f.brief?.summary ?? ""), f.brief);
+  const lead = renderTaskFacts(f, "lead", ".whisper/task-21.md");
+  check("facts: lead line carries blocker + path", /卡点：时间窗错位/.test(lead) && /\.whisper\/task-21\.md/.test(lead), lead);
+  check("facts: lead line maps actions", /\[\[retry\]\]/.test(lead) && /\[\[accept\]\]/.test(lead), lead);
+  const single = renderTaskFacts(f, "single", ".whisper/task-21.md");
+  check("facts: single line has no action markers", !/\[\[/.test(single), single);
+  const passed = taskFacts(src, { ...task, status: "ready" });
+  check("facts: passed task hides old blocker", !/卡点：/.test(renderTaskFacts(passed, "single", ".whisper/task-21.md")), renderTaskFacts(passed, "single"));
+  const md = renderFactsMarkdown(f, ["abc123 提交"]);
+  check("facts: detail file has issues + commits", /docs\/x\.md:67/.test(md) && /abc123/.test(md), md.slice(0, 300));
+  check("facts: no source still renders", typeof renderTaskFacts(taskFacts(undefined, task), "lead") === "string");
 }
 
 // ---- config / patch ---------------------------------------------------------

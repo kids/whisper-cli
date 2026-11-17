@@ -1136,7 +1136,7 @@ export class AgentRunner {
 
       // Wrap with project system prompt (unless review)
       if (!isReview) {
-        const bg = activeTaskSummary(chatId);
+        const bg = activeTaskSummary(chatId, workspace);
         if (bg) promptText = `${bg}\n\n---\n\n${promptText}`;
         const project = getProjects().projects[label];
         promptText = wrapWithProjectPrompt(workspace, project?.systemPromptFile, promptText);

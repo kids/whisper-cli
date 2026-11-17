@@ -233,6 +233,7 @@ export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): 
   const prompt = buildLeadPrompt({
     userText: ev.text,
     presetLine,
+    workspace: h.workspaceFor(chatId),
     tasks: o.store.listTasks({ chatId, limit: 8 }),
     presets: [...loadPresets().keys()],
     roles: [...loadRoles().keys()],

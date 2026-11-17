@@ -11,9 +11,10 @@ import { getChatInstructions } from "../announcement";
 import { formatMemory, joinInstructions } from "../memory";
 import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
-import { acceptable, stageName } from "./core";
+import { acceptable } from "./core";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { clip, type Ledger , markerBlocks } from "./ledger";
+import { renderTaskFacts, taskFacts, writeTaskFacts } from "./facts";
 import { findJsonObjects } from "./output";
 import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
@@ -373,11 +374,6 @@ export async function submitFromChat(
   return { task, receiptInThread };
 }
 
-const STATUS_WORD: Record<string, string> = {
-  queued: "排队", running: "进行中", waiting: "等外部作业", waiting_children: "子任务在跑",
-  ready: "已完成待验收", blocked: "等人决定", failed: "失败", dropped: "已终止", done: "已完成",
-};
-
 /** Read-only snapshot of every orc task; agents can read it for details we don't inline. */
 export const TASK_SNAPSHOT_PATH = resolve(import.meta.dirname, "../../state/orc-tasks.json");
 
@@ -398,17 +394,13 @@ function writeTaskSnapshot(tasks: Task[]): void {
   } catch { /* a failed snapshot must not break the turn */ }
 }
 
-const ago = (ms: number): string => {
-  const m = Math.max(1, Math.round(ms / 60_000));
-  return m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;
-};
-
 /**
  * This chat's tasks for the single agent's context: open ones plus anything that
  * finished in the last 24h (so "那个任务怎样了" is answerable without the lead),
- * one line each, plus where to read the full list.
+ * one line each — blocker and decision brief included — plus the detail file it
+ * can read from its own cwd.
  */
-export function activeTaskSummary(chatId: string): string | undefined {
+export function activeTaskSummary(chatId: string, workspace?: string): string | undefined {
   if (!orc) return undefined;
   const all = orc.store.listTasks({ limit: 300 });
   writeTaskSnapshot(all);
@@ -420,12 +412,14 @@ export function activeTaskSummary(chatId: string): string | undefined {
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, 8);
   if (!mine.length) return undefined;
-  const lines = mine.map((t) =>
-    `- #${t.id} ${t.title}｜${STATUS_WORD[t.status] ?? t.status}｜${clip(t.progress || "无进展记录", 60)}｜${ago(now - t.updatedAt)}更新`);
+  const lines = mine.map((t) => {
+    const f = taskFacts(orc!.store, t);
+    return renderTaskFacts(f, "single", writeTaskFacts(f, workspace));
+  });
   return [
     "【本群团队任务】",
     ...lines,
-    `说明：状态以上面为准；用户要细节时读 ${TASK_SNAPSHOT_PATH}（只读，不要改）。用户没问就别报编号。`,
+    "说明：状态、卡点和评审结论以上面为准，回答“为什么没过/做到哪”要引用它，别说看不到；明细文件是只读事实，别改。用户没问就别报编号。",
   ].join("\n");
 }
 
@@ -463,28 +457,27 @@ export type LeadAction =
 
 const ACTIONS = ["submit", "attach", "answer", "stop", "retry", "accept", "config", "confirm", "cancel", "announce", "remember", "forget", "chat", "mode", "reply"];
 
-/** One task line for the lead; loop tasks carry their open question so the lead can map a reply onto it */
-function leadTaskLine(t: Task, store?: OrcStore): string {
-  const head = `- #${t.id} [${t.status}] ${t.kind === "loop" ? "（监督循环）" : ""}${t.title} —— ${t.progress}`;
-  if (t.kind !== "loop") {
-    const st = acceptable(t);
-    return st ? `${head}\n  ⚠️ 卡在${stageName(st.id)}上等人决定：人说「再试一次」就 [[retry]]，「接受这版」就 [[accept]]，「放弃」就 [[stop]]` : head;
-  }
-  if (!store) return head;
+/**
+ * One task line for the lead. Facts come from ./facts (blocker, decision brief,
+ * detail path) so "为什么没过 / 做到哪" is answerable without visiting the repo.
+ */
+function leadTaskLine(t: Task, store?: OrcStore, workspace?: string): string {
+  const f = taskFacts(store, t);
+  const line = renderTaskFacts(f, "lead", writeTaskFacts(f, workspace));
+  if (t.kind !== "loop" || !store) return line;
   const l = store.getLedger<Ledger>(t.id);
-  if (!l) return head;
+  if (!l) return line;
   const roles = `  角色：${Object.values(t.preset.roles).map((r) => `${r.name}=${r.cli}${r.model ? ":" + r.model : ""}`).join("，")}；播报：${l.verbosity}`;
-  const ask = l.pendingAsk
-    ? `\n  ⚠️ 正在等人回答：${l.pendingAsk.question}（没人答就一直等；人随口说一句就行）`
-    : "";
-  return `${head}\n${roles}${ask}`;
+  return `${line}\n${roles}`;
 }
 
 export function buildLeadPrompt(c: {
   userText: string; presetLine: string; tasks: Task[]; presets: string[]; roles: string[]; history?: string;
   store?: OrcStore; pending?: string; threadTask?: number; mode?: ChatMode; routeWhy?: string;
+  /** Chat workspace: where .whisper/task-<id>.md detail files are written and read */
+  workspace?: string;
 }): string {
-  const tasks = c.tasks.length ? c.tasks.map((t) => leadTaskLine(t, c.store)).join("\n") : "（无）";
+  const tasks = c.tasks.length ? c.tasks.map((t) => leadTaskLine(t, c.store, c.workspace)).join("\n") : "（无）";
   const mode = c.mode ?? "orc";
   const modeLine = mode === "orc"
     ? "本群是编排模式：所有消息都先到你这里。要动手做的事一律 submit 交给团队；chat 只用于闲聊、问答。"
