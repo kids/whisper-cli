@@ -5,6 +5,7 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { AgentFile, AgentImage, FeishuConfig, IncomingAttachment } from "../types";
+import { appendAnnouncementText, fetchAnnouncement, getChatInstructions } from "../announcement";
 import { chunkMarkdown, markdownToPostBody } from "../post";
 import type { CardOpts, ChatEvent, ImClient, MessageHandler } from "./types";
 
@@ -336,6 +337,20 @@ export class FeishuClient implements ImClient {
     } catch (e) {
       return { chatId: null, message: `⚠️ Failed: ${String(e)}` };
     }
+  }
+
+  // ---- instructions (docx group announcement) -----------------------------
+
+  getInstructions(chatId: string): Promise<string | undefined> {
+    return getChatInstructions(this.client, chatId);
+  }
+
+  async instructionsRevision(chatId: string): Promise<number> {
+    return (await fetchAnnouncement(this.client, chatId)).revisionId;
+  }
+
+  appendInstructions(chatId: string, paragraphs: string[], expectRevision: number): Promise<number> {
+    return appendAnnouncementText(this.client, chatId, paragraphs, expectRevision);
   }
 
   /** Send a plain text message */

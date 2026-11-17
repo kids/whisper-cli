@@ -7,7 +7,7 @@
 
 ## 0. 定位
 
-把飞书群（也支持企业微信智能机器人、Telegram，见 §1.1）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi），把回复发回群里。在此之上提供：
+把飞书群（也支持企业微信智能机器人、Telegram、Slack，见 §1.1）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi），把回复发回群里。在此之上提供：
 
 - **群级上下文**：群公告当指令、群记忆、最近对话，按群隔离，CLI 无关。
 - **长任务监控**：后台训练等作业由代码定时探测，不占 CLI 进程、不耗 token。
@@ -23,7 +23,7 @@
 ## 1. 分层
 
 ```
-入口层   ImClient（src/platform/types.ts）：飞书 feishu.ts · 企微 wecom.ts · Telegram telegram.ts
+入口层   ImClient（src/platform/types.ts）：飞书 feishu.ts · 企微 wecom.ts · Telegram telegram.ts · Slack slack.ts
           │
 路由层   AgentRunner（src/agent-runner.ts）：一个 bot 一个实例
           ├─ 斜杠命令：/help /reset /model /new /status /记住 /记忆 /watch /mode /orc /task /tasks /stop
@@ -45,18 +45,18 @@
 
 ### 1.1 平台适配
 
-`AgentRunner` 只依赖 `ImClient` 接口（`src/platform/types.ts`）；群 id 带前缀区分平台：飞书 `oc_…`（原样）、企微 `wc_<chatid 或 userid>`、Telegram `tg_<chat id>`，`isChatKey()` 用它区分真实会话和内部 session key。
+`AgentRunner` 只依赖 `ImClient` 接口（`src/platform/types.ts`）；群 id 带前缀区分平台：飞书 `oc_…`（原样）、企微 `wc_<chatid 或 userid>`、Telegram `tg_<chat id>`、Slack `sl_<channel>`，`isChatKey()` 用它区分真实会话和内部 session key。
 
-| 能力 | 飞书 | 企微智能机器人（`@wecom/aibot-node-sdk` 长连接） | Telegram（Bot API 长轮询） |
-|---|---|---|---|
-| 收消息 | 全部 | 群里只收 @ 的；文本 / 语音（已转文字）/ 图片 / 文件 / 图文混排 | 隐私模式关闭才收全部；文本、图片、文件（带说明文字） |
-| 回复原地刷新 | 卡片 patch | 只能刷新"回复触发消息的流式消息"，`WECOM_STREAM_MAX_MS` 后收尾，结果另发 | `editMessageText`，3 秒一刷，429 时丢中间帧 |
-| 监控卡片 / 任务卡片刷新 | ✅ | ❌（发一次，不刷新） | ✅ |
-| 回复串 | 话题 | ❌（`replyInThread` 返回 false，改发群里） | 回复卡片消息；回复 bot 消息带 `rootId`，所以回复任务卡片 = 进卡片回复串 |
-| 群公告 | ✅ | ❌（lead 的 announce 动作改为提示"记住…"） | ❌ |
-| 建群 / 管理台 | ✅ | ❌（`ADMIN_MODE` 忽略，`/new` 提示手动拉群） | ❌ |
-| 附件下载 | `messageResource` | 链接 5 分钟失效，收到消息时就下载到内存，处理时落盘 | `getFile`，≤20MB |
-| markdown | 卡片 / post | 原样（单条 ≤20KB，按字节分段） | 转 HTML 子集，解析失败退回纯文本；4000 字分段 |
+| 能力 | 飞书 | 企微智能机器人（`@wecom/aibot-node-sdk` 长连接） | Telegram（Bot API 长轮询） | Slack（Socket Mode） |
+|---|---|---|---|---|
+| 收消息 | 全部 | 群里只收 @ 的；文本 / 语音（已转文字）/ 图片 / 文件 / 图文混排 | 隐私模式关闭才收全部；文本、图片、文件（带说明文字） | 频道里全部（bot 要先 `/invite`）；文本、图片、文件 |
+| 回复原地刷新 | 卡片 patch | 只能刷新"回复触发消息的流式消息"，`WECOM_STREAM_MAX_MS` 后收尾，结果另发 | `editMessageText`，3 秒一刷，429 时丢中间帧 | `chat.update`，每频道约 1 次/秒（内部 1.1s 节流，`SLACK_UPDATE_MIN_MS`） |
+| 监控卡片 / 任务卡片刷新 | ✅ | ❌（发一次，不刷新） | ✅ | ✅ |
+| 回复串 | 话题 | ❌（`replyInThread` 返回 false，改发群里） | 回复卡片消息；回复 bot 消息带 `rootId`，所以回复任务卡片 = 进卡片回复串 | `thread_ts` 与消息 `ts` 1:1；回复卡片消息即进线程 |
+| 群公告 | ✅ docx | ❌（lead 的 announce 动作改为提示"记住…"） | ❌ | 一条置顶的 `[whisper-rules]` 消息，`rev` 递增做乐观锁 |
+| 建群 / 管理台 | ✅ | ❌（`ADMIN_MODE` 忽略，`/new` 提示手动拉群） | ❌ | 建私有频道（`conversations.create`）；管理台仍只飞书 |
+| 附件下载 | `messageResource` | 链接 5 分钟失效，收到消息时就下载到内存，处理时落盘 | `getFile`，≤20MB | `url_private` + Bearer；`files.upload` v2 上传 |
+| markdown | 卡片 / post | 原样（单条 ≤20KB，按字节分段） | 转 HTML 子集，解析失败退回纯文本；4000 字分段 | 转 mrkdwn；表格转代码块；4000 字分段 |
 
 ## 2. 一条消息的路径
 
@@ -166,7 +166,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 - 图片 ≤10MB，超了或不是图片格式就按文件发送；其他文件 ≤30MB；每条回复最多 10 个。
 - 发不出去时在回复末尾说明原因。
 - 兜底：回复里直接出现的图片绝对路径仍会静默发送；其他类型的裸路径**不会**再自动上传（以前会，有泄露风险）。
-- 平台层实现 `sendAgentImages` / `sendAgentFiles`：飞书先上传拿 key 再发；企微 `uploadMedia` + `sendMediaMessage`；Telegram `sendPhoto` / `sendDocument`。
+- 平台层实现 `sendAgentImages` / `sendAgentFiles`：飞书先上传拿 key 再发；企微 `uploadMedia` + `sendMediaMessage`；Telegram `sendPhoto` / `sendDocument`；Slack `files.getUploadURLExternal` → PUT → `files.completeUploadExternal`。
 
 ## 6. orc 编排
 
@@ -357,6 +357,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `ORC_AGENT_CARD_THROTTLE_MS` | 5 秒 | agent 卡片更新节流 |
 | `WECOM_STREAM_MAX_MS` | 5 分钟 | 企微流式回复多久后主动收尾（结果改为另发） |
 | `WECOM_MD_MAX_BYTES` | 20000 | 企微单条 markdown 上限；发送失败自动按 4000 字节重发 |
+| `SLACK_UPDATE_MIN_MS` | 1100 | Slack 同一频道两次 `chat.update` 的最小间隔（每频道约 1 次/秒） |
 
 ## 10. 验证脚本（`scripts/`）
 
@@ -368,6 +369,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `route_check.ts` | 离线 | 消息分派规则（57 条）、`[[task]]` 解析 |
 | `marker_check.ts` | 离线 | 标记表与源码一致、一个标记只属于一层、越界标记不生效 |
 | `im_check.ts` | 离线 | 企微（假 SDK）/ Telegram（假 fetch）适配器、配置解析、分段工具 |
+| `slack_check.ts` | 离线 | Slack：入站文本清洗、markdown→mrkdwn（含表格降级）、分段、事件映射（@、线程、附件、去重、bot 回声）、`chat.update` 接线（假 fetch） |
 | `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（22 条，含 auto 模式下交回单 agent、切换模式） |
 | `outgoing_agent_check.ts` | 真实模型 | agent 是否按 `[[image]]` / `[[file]]` 协议发图、发文件 |
 | `announce_check.ts` / `memory_live_check.ts` / `watch_live_check.ts` / `outgoing_live_check.ts` | 真实飞书 | 临时建群验证后解散 |
@@ -380,7 +382,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 未完成：
 
-- **企微 / Telegram 真机验证**：适配器只有离线检查，还没用真实机器人跑过。
+- **企微 / Telegram / Slack 真机验证**：适配器只有离线检查，还没用真实机器人跑过（Slack 需要 `xoxb-` + `xapp-`、把 bot `/invite` 进频道，并确认机器能出网到 `slack.com` / `wss-primary.slack.com`）。
 - **监督循环在真实群里的端到端使用**：卡片回复串、监控交回任务目前只有离线检查。
 - **监督者汇报附图**：report / ask 还不能带 `[[image]]`。
 - **后续里程碑**（详见 architecture.html）：M2 小训练脚本模拟长任务 + 中途重启；M3 审查调用流水线、`loop-dev` / `loop-train` 组合、主 agent 自动选形态；M4 断线补拉历史消息；M5 远端作业平台（太极、k8s）的作业句柄与探测适配、GPU 时长预算。

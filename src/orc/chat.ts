@@ -4,10 +4,8 @@
 // =============================================================================
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { larkOf } from "../platform/feishu";
 import type { ImClient } from "../platform/types";
 import type { AgentConfig } from "../types";
-import { getChatInstructions } from "../announcement";
 import { formatMemory, joinInstructions } from "../memory";
 import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
@@ -288,8 +286,7 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
     instructionsFor: async (t) => {
       if (!t.chatId) return undefined;
       const f = clientFor(t.chatId);
-      const lark = larkOf(f);
-      const ann = lark ? await getChatInstructions(lark, t.chatId) : undefined;
+      const ann = f?.getInstructions ? await f.getInstructions(t.chatId) : undefined;
       return joinInstructions(ann, formatMemory(t.chatId)); // workers read group memory, never write it
     },
     onProgress: (t) => void refreshCard(t, TERMINAL.includes(t.status)),

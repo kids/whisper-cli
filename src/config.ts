@@ -63,9 +63,9 @@ function collectGroups(env: Record<string, string>): RawGroup[] {
 }
 
 function validatePlatform(p: string): Platform {
-  if (p === "feishu" || p === "wecom" || p === "telegram") return p;
+  if (p === "feishu" || p === "wecom" || p === "telegram" || p === "slack") return p;
   if (p === "tg") return "telegram";
-  throw new Error(`Unsupported platform: "${p}". Supported: feishu, wecom, telegram`);
+  throw new Error(`Unsupported platform: "${p}". Supported: feishu, wecom, telegram, slack`);
 }
 
 const AI_CLI_ALIASES: Record<string, AiCli> = {
@@ -157,6 +157,17 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
       return null;
     }
     config.telegram = { botToken, apiBase: e.TELEGRAM_API_BASE || undefined };
+  }
+  if (platform === "slack") {
+    // Socket Mode: bot token (xoxb-) for the Web API, app-level token (xapp-) for the socket.
+    // Without the app token there is no inbound path (Events API is not implemented).
+    const botToken = e.SLACK_BOT_TOKEN;
+    const appToken = e.SLACK_APP_TOKEN;
+    if (!botToken || !appToken) {
+      console.warn(`[config] Skipping AGENT_${raw.index}: missing SLACK_BOT_TOKEN or SLACK_APP_TOKEN (Socket Mode)`);
+      return null;
+    }
+    config.slack = { botToken, appToken, apiBase: e.SLACK_API_BASE || undefined };
   }
   // admin console (/新任务 creates groups) needs Feishu group creation
   if (platform !== "feishu" && config.adminMode) {

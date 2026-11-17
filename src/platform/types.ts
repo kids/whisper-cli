@@ -56,14 +56,24 @@ export interface ImClient {
   sendAgentImages(chatId: string, images: AgentImage[]): Promise<void>;
   sendAgentFiles(chatId: string, files: AgentFile[]): Promise<void>;
   createSessionChat?(name: string, ownerId: string, description?: string): Promise<{ chatId: string | null; message: string }>;
+  /**
+   * Long-lived chat instructions ("group announcement"). Feishu reads the docx
+   * announcement; Slack keeps one pinned message. Absent = the platform has no
+   * such concept (WeCom / Telegram) and callers fall back to chat memory.
+   */
+  getInstructions?(chatId: string): Promise<string | undefined>;
+  /** Current revision, for optimistic concurrency when appending (0 = none yet) */
+  instructionsRevision?(chatId: string): Promise<number>;
+  /** Append paragraphs; returns the new revision. Throws on revision conflict. */
+  appendInstructions?(chatId: string, paragraphs: string[], expectRevision: number): Promise<number>;
 }
 
 /** A real chat (any platform), as opposed to an internal session key */
 export function isChatKey(id: string): boolean {
-  return /^(oc_|wc_|tg_)/.test(id);
+  return /^(oc_|wc_|tg_|sl_)/.test(id);
 }
 
-export const PLATFORM_LABEL: Record<Platform, string> = { feishu: "飞书", wecom: "企微", telegram: "Telegram" };
+export const PLATFORM_LABEL: Record<Platform, string> = { feishu: "飞书", wecom: "企微", telegram: "Telegram", slack: "Slack" };
 
 /** Split text into pieces of at most `maxBytes` UTF-8 bytes, preferring line breaks */
 export function chunkByBytes(text: string, maxBytes: number): string[] {

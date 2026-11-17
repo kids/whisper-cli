@@ -3,7 +3,7 @@
 // =============================================================================
 
 /** Supported IM platforms */
-export type Platform = "feishu" | "wecom" | "telegram";
+export type Platform = "feishu" | "wecom" | "telegram" | "slack";
 
 /** Supported AI CLI tools */
 export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini" | "pi";
@@ -26,6 +26,8 @@ export interface AgentConfig {
   wecom?: WeComConfig;
   /** Telegram config (when platform === "telegram") */
   telegram?: TelegramConfig;
+  /** Slack config (when platform === "slack") */
+  slack?: SlackConfig;
   /** CodeBuddy-specific config (when aiCli === "codebuddy") */
   codebuddy?: CodeBuddyConfig;
   /** Cursor-specific config (when aiCli === "cursor") */
@@ -78,6 +80,18 @@ export interface AgentFile {
 export interface WeComConfig {
   botId: string;
   secret: string;
+}
+
+/**
+ * Slack — Socket Mode for inbound (no public endpoint), Web API for everything else.
+ * `appToken` (xapp-, connections:write) is what opens the socket; `botToken` (xoxb-)
+ * does the talking.
+ */
+export interface SlackConfig {
+  botToken: string;
+  appToken: string;
+  /** Override for an internal proxy; default https://slack.com/api */
+  apiBase?: string;
 }
 
 /** Telegram Bot API (long polling) */

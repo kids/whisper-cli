@@ -13,10 +13,8 @@
 //   /tasks                            this chat's tasks
 // A lead turn only picks an action; the code below executes it (002 §2.3).
 // =============================================================================
-import { larkOf } from "../platform/feishu";
 import { PLATFORM_LABEL, type ChatEvent, type ImClient } from "../platform/types";
 import type { AgentConfig } from "../types";
-import { appendAnnouncementText, fetchAnnouncement } from "../announcement";
 import { applyMemoryOps } from "../memory";
 import { formatRecent, recordTurn } from "../recent";
 import { fallbackNote, loadPresets, loadRoles, presetSummary } from "./config";
@@ -206,9 +204,8 @@ async function confirmPending(h: OrcChatHost, chatId: string): Promise<void> {
     return;
   }
   try {
-    const lark = larkOf(h.im);
-    if (!lark) throw new Error("群公告只有飞书支持");
-    const rev = await appendAnnouncementText(lark, chatId, p.pending.paragraphs, p.pending.revision);
+    if (!h.im.appendInstructions) throw new Error(`${PLATFORM_LABEL[h.im.platform]}没有群公告`);
+    const rev = await h.im.appendInstructions(chatId, p.pending.paragraphs, p.pending.revision);
     setProfile(chatId, { ...p, pending: undefined });
     await say(`✅ 已写入群公告（rev ${rev}），从下一轮起对本群所有 agent 生效。`);
   } catch (e) {
@@ -364,14 +361,13 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       return;
     }
     case "announce": {
-      const lark = larkOf(h.im);
-      if (!lark) {
+      if (!h.im.appendInstructions || !h.im.instructionsRevision) {
         await say(`🧭 ${PLATFORM_LABEL[h.im.platform]}没有群公告。想让本群一直遵守，可以说「记住：${act.paragraphs[0] ?? "…"}」，存进本群记忆。`);
         return;
       }
       try {
-        const snap = await fetchAnnouncement(lark, chatId);
-        setProfile(chatId, { ...p, pending: { kind: "announce", paragraphs: act.paragraphs, revision: snap.revisionId } });
+        const revision = await h.im.instructionsRevision(chatId);
+        setProfile(chatId, { ...p, pending: { kind: "announce", paragraphs: act.paragraphs, revision } });
         await say(`🧭 拟在群公告（=本群长期指令）末尾追加${act.reason ? `（${act.reason}）` : ""}：\n${act.paragraphs.map((x) => `> ${x}`).join("\n")}\n\n回复「确认」写入，「算了」放弃。`);
       } catch (e) {
         await say(`🧭 读不到本群公告，无法修改：${(e as Error).message}`);

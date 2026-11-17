@@ -1,4 +1,4 @@
-This project is a ChatOps automation tool for developers. It turns a Feishu (Lark) group — or a WeCom / Telegram chat — into a mobile/remote "command-line terminal".
+This project is a ChatOps automation tool for developers. It turns a Feishu (Lark) group — or a WeCom / Telegram / Slack chat — into a mobile/remote "command-line terminal".
 
 With this tool, you can simply send natural language or specific commands in a chat window. The underlying bot will automatically invoke and drive AI-powered programming CLI tools like Codex, Claude Code, Gemini, Cursor, CodeBuddy and Pi on your local or cloud environment. Whether you are on the go fixing an emergency bug via your phone, triggering a code review, or multi-tasking at your desk, it puts your development workflow right at your fingertips.
 
@@ -102,6 +102,13 @@ AGENT_7_CODEBUDDY_API_KEY=ck_xxx
 AGENT_8_PLATFORM=telegram
 AGENT_8_AI_CLI=claude
 AGENT_8_TELEGRAM_BOT_TOKEN=123456:ABC-xxx
+
+# Group 9: Slack (Socket Mode) ↔ CodeBuddy
+AGENT_9_PLATFORM=slack
+AGENT_9_AI_CLI=codebuddy
+AGENT_9_CODEBUDDY_API_KEY=ck_xxx
+AGENT_9_SLACK_BOT_TOKEN=xoxb-xxx
+AGENT_9_SLACK_APP_TOKEN=xapp-xxx
 ```
 
 > Each bot group needs its **own bot credentials** (different Feishu `APP_ID` / WeCom bot id / Telegram token); long-connection events cannot be shared. `AI_CLI` aliases: `codex-cli`, `claude-code` / `claude-code-cli`, `gemini-cli`. All optional keys (allowlist, workdir, Pi provider …) are listed in `.env.example`.

@@ -1,5 +1,5 @@
 // =============================================================================
-// Feishu post helpers — markdown → post body + chunking (from feishu-cursor)
+// Render helpers — Feishu post body, Slack mrkdwn, chunking
 // =============================================================================
 
 export type PostNode = { tag: string; text?: string; [key: string]: unknown };
@@ -24,6 +24,51 @@ export function markdownToPostBody(text: string, title = ""): PostBody {
       content: paragraphs.map((p) => [{ tag: "md", text: p }]),
     },
   };
+}
+
+/**
+ * Markdown → Slack mrkdwn. Slack is not GFM: bold is single-asterisk, links are
+ * <url|text>, and tables do not exist — a table becomes a code block so columns
+ * stay aligned instead of collapsing into pipes.
+ */
+export function markdownToSlackMrkdwn(md: string): string {
+  const out: string[] = [];
+  const parts = md.split(/(```[^\n]*\n[\s\S]*?```)/g);
+  for (const part of parts) {
+    if (/^```/.test(part)) { out.push(part); continue; }
+    const lines = part.split("\n");
+    const kept: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      // a table block: consecutive lines starting with |
+      if (/^\s*\|/.test(lines[i])) {
+        const table: string[] = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { table.push(lines[i].trim()); i++; }
+        i--;
+        out.push(kept.join("\n"));
+        kept.length = 0;
+        out.push(["```", ...table, "```"].join("\n"));
+        continue;
+      }
+      kept.push(lines[i]);
+    }
+    out.push(kept.join("\n"));
+  }
+  return out.join("")
+    .split(/(`[^`\n]+`)/g)
+    .map((seg) => {
+      if (/^`[^`\n]+`$/.test(seg)) return seg;
+      let s = seg;
+      s = s.replace(/^#{1,6}\s+(.+)$/gm, "*$1*");
+      s = s.replace(/\*\*([^*\n]+)\*\*/g, "*$1*");
+      s = s.replace(/__([^_\n]+)__/g, "*$1*");
+      s = s.replace(/~~([^~\n]+)~~/g, "~$1~");
+      s = s.replace(/!\[([^\]\n]*)\]\((https?:\/\/[^)\s]+)\)/g, (_m, alt: string, url: string) => alt ? `<${url}|${alt}>` : url);
+      s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, t: string, url: string) => `<${url}|${t}>`);
+      return s;
+    })
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /** Split oversized content into multiple posts (~30KB Feishu card limit) */

@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "
 import { resolve } from "node:path";
 import type { AgentConfig, AiResult, CumulativeUsage, AgentState } from "./types";
 import { emptyCumulativeUsage } from "./types";
-import { FeishuClient, buildPromptWithAttachments, larkOf } from "./platform/feishu";
+import { FeishuClient, buildPromptWithAttachments } from "./platform/feishu";
+import { SlackClient } from "./platform/slack";
 import { WeComClient } from "./platform/wecom";
 import { TelegramClient } from "./platform/telegram";
 import { PLATFORM_LABEL, isChatKey, type ChatEvent, type ImClient } from "./platform/types";
@@ -39,7 +40,6 @@ import {
   clearClaudeSession,
   setClaudeSession,
   getClaudeSession,
-  CLAUDE_MODEL_ALIASES,
 } from "./ai/claude";
 import {
   runGemini,
@@ -352,6 +352,9 @@ export class AgentRunner {
     } else if (platform === "wecom") {
       if (!this.config.wecom) throw new Error("Missing WeCom config");
       im = new WeComClient(this.config.wecom);
+    } else if (platform === "slack") {
+      if (!this.config.slack) throw new Error("Missing Slack config");
+      im = new SlackClient(this.config.slack);
     } else {
       if (!this.config.telegram) throw new Error("Missing Telegram config");
       im = new TelegramClient(this.config.telegram);
@@ -1154,7 +1157,7 @@ export class AgentRunner {
     }
 
     // Telegram rate-limits edits (≈20/min in groups); others take 2/s fine
-    const streamEveryMs = im.platform === "telegram" ? 3000 : 500;
+    const streamEveryMs = im.platform === "telegram" ? 3000 : im.platform === "slack" ? 1200 : 500;
     let pendingText = "";
     let updateTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleUpdate = () => {
@@ -1374,17 +1377,20 @@ export class AgentRunner {
     run: { readOnly?: boolean; hardTimeoutMs?: number; staleTimeoutMs?: number; model?: string } = {},
   ): Promise<AiResult> {
     const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig } = this.config;
-    const model = run.model || models.get(chatId);
+    // Per-chat override → this CLI's pinned default → let the CLI decide.
+    // Without the middle step CodeBuddy silently falls back to its own (old) default
+    // even though /model already reports the pinned one.
+    const model = run.model || models.get(chatId) || this.getDefaultModelName();
     const { hardTimeoutMs, staleTimeoutMs } = run;
     const roTools = run.readOnly ? READ_ONLY_DENY : undefined;
     const addDirs = this.resolveAddDirs(workspace, label);
 
-    // Group announcement (= this chat's rules, revision-cached) + per-chat memory, every turn.
+    // Group announcement (= this chat's rules) + per-chat memory, every turn.
     // Session keys look like "<chatId>" or "<chatId>#role:x" - the chat is the prefix.
-    // Group announcements exist on Feishu only; memory / hints work on every platform.
+    // Instructions are a platform capability (Feishu docx / Slack pinned message);
+    // platforms without one (WeCom / Telegram) fall back to chat memory only.
     const chat = chatOf(chatId);
-    const lark = larkOf(this.im);
-    const announcement = lark ? await getChatInstructions(lark, chat) : undefined;
+    const announcement = this.im?.getInstructions ? await this.im.getInstructions(chat) : undefined;
     const instructions = joinInstructions(
       announcement,
       isChatKey(chat) ? formatWorkspaceHint({ workspace, label }) : undefined,
@@ -1520,6 +1526,9 @@ export class AgentRunner {
 
   private getDefaultModelName(): string | undefined {
     if (this.config.aiCli === "codex") return getCodexDefaultModel();
+    // CodeBuddy's own fallback is claude-sonnet-4.6 — old and slow for this workload.
+    // Pin it so a chat never silently lands on the CLI default.
+    if (this.config.aiCli === "codebuddy") return "deepseek-v4.1-flash";
     if (this.config.aiCli === "cursor") return "auto";
     if (this.config.aiCli === "gemini") return "auto";
     return undefined;
@@ -1535,7 +1544,6 @@ export class AgentRunner {
       if (configured.length) return ["default-model", ...configured];
       return queryCodebuddyModels(this.bins.codebuddyBin || "codebuddy");
     }
-    if (aiCli === "claude") return CLAUDE_MODEL_ALIASES;
     if (aiCli === "gemini") return GEMINI_MODEL_ALIASES;
     return [];
   }

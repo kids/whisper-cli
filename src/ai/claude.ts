@@ -57,16 +57,6 @@ export function stopClaudeRun(runKey: string): boolean {
   return true;
 }
 
-/** Common Claude Code model aliases for `/model`. Full IDs (claude-*) also accepted. */
-export const CLAUDE_MODEL_ALIASES = [
-  "sonnet",
-  "opus",
-  "haiku",
-  "claude-sonnet-4-6",
-  "claude-opus-4-6",
-  "claude-haiku-4-5",
-];
-
 interface StreamEvent {
   type: string;
   subtype?: string;

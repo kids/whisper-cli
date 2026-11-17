@@ -1,4 +1,4 @@
-本项目是一个 ChatOps 开发自动化工具。解除了开发环境的地理限制，把飞书群（也支持企业微信、Telegram）变成移动端/远程的"命令行终端"。
+本项目是一个 ChatOps 开发自动化工具。解除了开发环境的地理限制，把飞书群（也支持企业微信、Telegram、Slack）变成移动端/远程的"命令行终端"。
 
 通过本项目，你只需在聊天框中发送自然语言或特定指令，背后的机器人就能自动调用、驱动本地或云端的 Codex、Claude Code、Gemini、Cursor、CodeBuddy、Pi 等 AI 辅助编程 CLI 工具。无论是出门在外通过手机紧急修复 Bug、触发代码审查，还是在工位上实现多端联动，它都能让你随时随地，触手可得。
 
@@ -101,6 +101,13 @@ AGENT_7_CODEBUDDY_API_KEY=ck_xxx
 AGENT_8_PLATFORM=telegram
 AGENT_8_AI_CLI=claude
 AGENT_8_TELEGRAM_BOT_TOKEN=123456:ABC-xxx
+
+# 第 9 组：Slack（Socket Mode）↔ CodeBuddy
+AGENT_9_PLATFORM=slack
+AGENT_9_AI_CLI=codebuddy
+AGENT_9_CODEBUDDY_API_KEY=ck_xxx
+AGENT_9_SLACK_BOT_TOKEN=xoxb-xxx
+AGENT_9_SLACK_APP_TOKEN=xapp-xxx
 ```
 
 > 每组 Bot 必须使用**独立的机器人凭证**（不同飞书 `APP_ID` / 企微 Bot ID / Telegram token），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`。完整的可选项（白名单、工作目录、Pi 的 provider 等）见 `.env.example`。
