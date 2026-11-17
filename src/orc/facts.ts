@@ -219,15 +219,18 @@ export function renderTaskFacts(f: TaskFacts, audience: "lead" | "single", detai
   if (audience !== "lead") return line;
 
   const detail = detailPath ? `；需要全文读 ${detailPath}` : "";
+  // Loop ask sets status=blocked too — ask must win, or lead sees pipeline
+  // retry/stop and may terminate on "继续…" (rl-close incident).
+  if (f.ask) {
+    return `${line}\n  ⚠️ 正在等人回答：人随口说一句 / 继续 / 纠偏 / 扩目标 →[[answer]]（把原话带上）；`
+      + `只有明确说放弃、停掉、终止、算了才 →[[stop]]；问到细节照上面答${detail}`;
+  }
   if (f.status === "blocked") {
     const acts = f.stage?.acceptable
       ? "「再试一次」→[[retry]]、「接受这版」→[[accept]]、「放弃」→[[stop]]"
       : "「再试一次」→[[retry]]、「放弃」→[[stop]]";
     return `${line}\n  ⚠️ 卡在${f.stage?.label ?? "这一步"}上等人决定：${acts}；`
       + `问到细节（为什么没过、做到哪）就照上面答，别答“看不到”${detail}`;
-  }
-  if (f.ask) {
-    return `${line}\n  ⚠️ 正在等人回答：人随口说一句就是回答（[[answer]]）；问到细节照上面答${detail}`;
   }
   return line;
 }

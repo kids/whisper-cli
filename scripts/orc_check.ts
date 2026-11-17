@@ -90,6 +90,37 @@ function throws(fn: () => unknown, re: RegExp): boolean {
   const md = renderFactsMarkdown(f, ["abc123 提交"]);
   check("facts: detail file has issues + commits", /docs\/x\.md:67/.test(md) && /abc123/.test(md), md.slice(0, 300));
   check("facts: no source still renders", typeof renderTaskFacts(taskFacts(undefined, task), "lead") === "string");
+
+  // loop blocked + pendingAsk must steer lead to answer, not pipeline stop
+  // (rl-close: 「继续团队任务」 was misread as [[stop]] when facts said 放弃→stop)
+  const loopPreset = resolvePreset(loadPresets().get("loop")!, loadRoles());
+  const loopTask: Task = {
+    ...task,
+    id: 15,
+    title: "冻结 E2 入场",
+    kind: "loop",
+    status: "blocked",
+    stageIdx: 0,
+    preset: loopPreset,
+    progress: "等你决定：改入场 / 加特征 / 收工",
+    loops: {},
+  };
+  const loopAsk = {
+    step: 84,
+    question: "入围终档批量 test 对比写完，请选：1 改入场 2 加特征 3 收工记失败 4 其他",
+    why: "high_cost",
+    askedAt: 1,
+  };
+  const loopSrc = {
+    listAttempts: () => [],
+    getLedger: () => ({ pendingAsk: loopAsk }),
+  };
+  const loopFacts = taskFacts(loopSrc, loopTask);
+  check("facts: loop ask populated", !!loopFacts.ask && /入围终档/.test(loopFacts.ask!), loopFacts.ask);
+  const loopLead = renderTaskFacts(loopFacts, "lead", ".whisper/task-15.md");
+  check("facts: loop ask → answer not stop", /\[\[answer\]\]/.test(loopLead) && !/放弃》?→\[\[stop\]\]|「放弃」→\[\[stop\]\]/.test(loopLead), loopLead);
+  check("facts: loop ask forbids casual stop", /只有明确说放弃/.test(loopLead), loopLead);
+  check("facts: pipeline blocked still maps retry/stop", /\[\[retry\]\]/.test(lead) && /\[\[stop\]\]/.test(lead), lead);
 }
 
 // ---- config / patch ---------------------------------------------------------

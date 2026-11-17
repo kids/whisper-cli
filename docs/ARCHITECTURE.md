@@ -173,6 +173,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 ### 6.1 入口与主 agent
 
 - 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，默认模型见 §6.2 角色表下方，可用 `ORC_LEAD_MODEL` 覆盖。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。任务行由 `src/orc/facts.ts` 生成：除状态和进展外，还带最近一次未过评审的结论、advisor 决策说明里的「建议 / 需要你定」，以及 `.whisper/task-<id>.md` 明细路径。所以「为什么没过」这类追问不必落到“我这边看不到”，lead 也不会再拿主仓库的干净工作区误判任务没产出（分支和 worktree 就在任务行里）。
+- **监督循环等人时**：任务行优先标「正在等人回答 → `answer`」；人说「继续…」「纠偏」「扩目标」一律 `answer`（解阻续跑）。`stop` 只认明确放弃用语（放弃 / 停掉 / 终止 / 算了等），不能把「继续团队任务」判成终止。流水线卡在评审 / 测试上的 `blocked`（无 pendingAsk）才用 retry / accept / stop。
 - **任务索引卡**（与监控卡同思路）：只显示 `#N 标题` + 当前 `progress` 原文（含 agent 的 `[[progress]]`），没有阶段 / 预算 / plan 等状态壳；卡主要当回复串锚点。问进展由主 agent `reply` 用人话答，代码不再复读整卡。
 - 兜底命令（用户一般不用）：`/mode auto|single|orc [组合]`、`/task <目标>`、`/task <id>`、`/task stop|retry|attach <id> …`、`/tasks`、`/orc`、`/orc preset <名> | reset | confirm | cancel`。bot 自己的提示文案只教自然语言（"回复「确认」""说「再试一次」"），不再教命令。
 - 主 agent 只输出一个动作，由代码执行：
@@ -370,7 +371,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `marker_check.ts` | 离线 | 标记表与源码一致、一个标记只属于一层、越界标记不生效 |
 | `im_check.ts` | 离线 | 企微（假 SDK）/ Telegram（假 fetch）适配器、配置解析、分段工具 |
 | `slack_check.ts` | 离线 | Slack：入站文本清洗、markdown→mrkdwn（含表格降级）、分段、事件映射（@、线程、附件、去重、bot 回声）、`chat.update` 接线（假 fetch） |
-| `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（22 条，含 auto 模式下交回单 agent、切换模式） |
+| `orc_lead_check.ts` | 真实模型 | 主 agent 意图识别（含 auto 交回单 agent、切换模式、「继续团队任务」→ answer 而非 stop） |
 | `outgoing_agent_check.ts` | 真实模型 | agent 是否按 `[[image]]` / `[[file]]` 协议发图、发文件 |
 | `announce_check.ts` / `memory_live_check.ts` / `watch_live_check.ts` / `outgoing_live_check.ts` | 真实飞书 | 临时建群验证后解散 |
 

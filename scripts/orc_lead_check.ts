@@ -43,6 +43,9 @@ const cases: { msg: string; want: string; pending?: string; mode?: "auto" | "orc
   // supervisor-loop steering, all in plain words
   { msg: "超参那个可以推了", want: "answer#15:b" },
   { msg: "训练那个先别推，我还要再看看曲线", want: "answer#15:a" },
+  // rl-close class: 「继续团队任务 + 扩目标」 while ask pending → answer, never stop
+  { msg: "继续团队任务：对比这个模型和基线各自有什么 favor，做成完整的盘前选标的再盘中交易的系统", want: "answer#15" },
+  { msg: "调优训练超参那个任务放弃吧", want: "stop#15" },
   { msg: "调参任务的执行者换成 claude 跑吧", want: "config#15" },
   { msg: "15 别每轮都刷屏了，有结果再告诉我", want: "config#15" },
   { msg: "记一下：我们的 GPU 机器只有 2 张卡", want: "remember" },
