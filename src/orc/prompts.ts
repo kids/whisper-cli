@@ -53,6 +53,19 @@ export const CONTRACT: Record<OutputKind, string> = {
   action: `{"action": "…"}（监督者动作，格式见 loop 提示词）`,
 };
 
+/**
+ * Rework discipline, appended to every "必须处理的反馈". A bare issue list (file:line + text)
+ * makes the agent patch exactly those lines: the number is fixed, the table is not; one file
+ * is fixed, another still says the opposite. Classification first, then a repo-wide sweep.
+ */
+export const REVISION_RULES = [
+  "### 修订要求（别只改被点名的行）",
+  "1. 先归类：定义/判据（怎么算命中、怎么判泄漏）、数据/口径（时间窗、计数、来源）、实现/调用点、文档与注释同步。",
+  "2. 定义/判据类先定死，只定一次；再改数据与实现，最后同步文档。顺序反了会来回返工。",
+  "3. 每改一个说法，在整仓搜同类表述：相反的说法、表格里的旧数字、中英文对应段落、复制过去的实现，一次改完。",
+  "4. 收尾逐条自查：上面每条反馈现在还能在原处（或别处）找到没改的内容吗？能就还没改完。",
+].join("\n");
+
 export interface PromptContext {
   task: Task;
   stage: StageDef;
@@ -87,7 +100,7 @@ export function buildStagePrompt(c: PromptContext): string {
   if (role.output === "verdict" || role.output === "test") {
     out.push(`## 评审口径（按任务性质定的，以它为准）\n${task.bar || "没有特别说明：按「目标是否达成、结论是否站得住」把关。会让结论错的问题才算不过；风格、可维护性、更进一步的严谨性记为建议。"}`);
   }
-  if (task.feedback) out.push(`## 必须处理的反馈\n${task.feedback}`);
+  if (task.feedback) out.push(`## 必须处理的反馈\n${task.feedback}\n\n${REVISION_RULES}`);
   if (c.inbox.length) out.push(`## 新增输入（来自人）\n${c.inbox.map((m) => `- ${m}`).join("\n")}`);
   if (c.diff) {
     out.push(`## 本任务相对基线的改动\n提交：\n\`\`\`\n${c.diff.log || "(无提交)"}\n\`\`\`\n统计：\n\`\`\`\n${c.diff.stat || "(无改动)"}\n\`\`\``);

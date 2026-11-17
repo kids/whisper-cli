@@ -192,10 +192,12 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
   const cap = ctx.cap ?? stage.maxLoops ?? 500;
   const fresh = before ? now.major.filter((k) => !before.major.includes(k)) : [];
 
-  // Nothing new (the set shrank or stayed the same) → keep reworking: that is progress.
-  // New problems keep appearing → the bar is the question, not the work: let the advisor arbitrate
-  // instead of spending another blind round. The cap is only a runaway guard.
-  const keepGoing = used <= cap && fresh.length === 0;
+  // Key equality is too strict an identity for LLM prose: re-wording an issue, or moving it to
+  // another file, mints a new key. So convergence is judged by the major count first — a drop
+  // means issues are really closing, whatever the wording. Only "new problems, and no drop"
+  // means the bar (not the work) may be the question → let the advisor arbitrate.
+  const converging = !!before && now.major.length < before.major.length;
+  const keepGoing = used <= cap && (fresh.length === 0 || converging);
   if (keepGoing) {
     const target = task.preset.stages.findIndex((s) => s.id === stage.onFail);
     d.patch = {
@@ -203,13 +205,13 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
       status: "running",
       loops,
       feedback: formatFeedback(stage.id, p),
-      progress: `${stage.id} 未通过，退回 ${stage.onFail}（第 ${used} 次；问题从 ${before?.major.length ?? "?"} 条到 ${now.major.length} 条）`,
+      progress: `${stage.id} 未通过，退回 ${stage.onFail}（第 ${used} 次；问题从 ${before?.major.length ?? "?"} 条到 ${now.major.length} 条${fresh.length && converging ? `，其中 ${fresh.length} 条换了说法` : ""}）`,
     };
     d.launches.push({ taskId: task.id, stageIdx: target });
     return d;
   }
 
-  d.patch = { ...d.patch, status: "running", loops, progress: `${stageName(stage.id)}这一轮又换了新问题，正在核对评审口径` };
+  d.patch = { ...d.patch, status: "running", loops, progress: `${stageName(stage.id)}又冒出新问题、数量没降（${before?.major.length ?? "?"} → ${now.major.length}），正在核对评审口径` };
   d.brief = { stageIdx: task.stageIdx, mode: before && used <= cap ? "arbitrate" : "escalate", rounds: used };
   return d;
 }

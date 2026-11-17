@@ -17,6 +17,7 @@ import { OrcStore } from "../src/orc/store";
 import type { NotifyPayload, Task } from "../src/orc/types";
 import { parseLeadAction, resolveChatPreset } from "../src/orc/chat";
 import { renderFactsMarkdown, renderTaskFacts, taskFacts } from "../src/orc/facts";
+import { buildStagePrompt } from "../src/orc/prompts";
 
 let passed = 0, failed = 0;
 function check(name: string, ok: boolean, detail?: unknown) {
@@ -145,6 +146,45 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("still reworks below the cap when nothing new appears", d.patch.stageIdx === idx("impl") && !d.brief, d);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"), { cap: 6 });
   check("cap reached → escalate", d.brief?.mode === "escalate" && d.brief.rounds === 7, d.brief);
+
+  // Wording drift is not "new problems": fewer majors means the work is converging
+  const prev7: any = parseRoleOutput("verdict", issuesText("第一轮", [
+    { severity: "major", file: "a.md", line: 1, desc: "泄漏条件写反了" },
+    { severity: "major", file: "b.md", line: 2, desc: "时间窗混入了下一年" },
+    { severity: "major", file: "c.md", line: 3, desc: "随机基线抽的是同一个池子" },
+    { severity: "major", file: "d.md", line: 4, desc: "命中只要求一个机制" },
+    { severity: "major", file: "e.md", line: 5, desc: "没有快照就当成新产品" },
+    { severity: "major", file: "f.md", line: 6, desc: "探针不能证明没见过答案" },
+    { severity: "major", file: "g.md", line: 7, desc: "加星事件不等于存量" },
+  ]));
+  const now6: any = parseRoleOutput("verdict", issuesText("第二轮", [
+    { severity: "major", file: "z1.md", line: 11, desc: "仍要求截止时间早于 T" },
+    { severity: "major", file: "z2.md", line: 12, desc: "窗口边界算进了两年" },
+    { severity: "major", file: "z3.md", line: 13, desc: "两个机制只对一个就算命中" },
+    { severity: "major", file: "z4.md", line: 14, desc: "对照组满足不了来源条件" },
+    { severity: "major", file: "z5.md", line: 15, desc: "缺少首发的正面证据" },
+    { severity: "major", file: "z6.md", line: 16, desc: "探针只能说明未检出" },
+  ]));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), { kind: "parsed", parsed: now6 }, { prev: prev7 });
+  check("re-worded issues + fewer majors → keep reworking", d.patch.stageIdx === idx("impl") && !d.brief, d);
+
+  const prev5: any = parseRoleOutput("verdict", issuesText("上一轮", [
+    { severity: "major", file: "p1.md", line: 1, desc: "问题甲" },
+    { severity: "major", file: "p2.md", line: 2, desc: "问题乙" },
+    { severity: "major", file: "p3.md", line: 3, desc: "问题丙" },
+    { severity: "major", file: "p4.md", line: 4, desc: "问题丁" },
+    { severity: "major", file: "p5.md", line: 5, desc: "问题戊" },
+  ]));
+  const now6b: any = parseRoleOutput("verdict", issuesText("这一轮", [
+    { severity: "major", file: "q1.md", line: 21, desc: "新问题一" },
+    { severity: "major", file: "q2.md", line: 22, desc: "新问题二" },
+    { severity: "major", file: "q3.md", line: 23, desc: "新问题三" },
+    { severity: "major", file: "q4.md", line: 24, desc: "新问题四" },
+    { severity: "major", file: "q5.md", line: 25, desc: "新问题五" },
+    { severity: "major", file: "q6.md", line: 26, desc: "新问题六" },
+  ]));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("review") }), { kind: "parsed", parsed: now6b }, { prev: prev5 });
+  check("new issues + no shrinkage → advisor arbitrates", d.brief?.mode === "arbitrate", d.brief);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), feedback: "【review 未通过】x" }), parsed("verdict", "[[approve]] 可以"));
   check("approve clears own feedback", d.patch.feedback === "" && d.patch.stageIdx === idx("test"));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("test") }), parsed("test", "[[pass]] 全绿"));
@@ -239,6 +279,20 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("accept on last stage → ready", accLast.patch.status === "ready" && accLast.notifies[0].kind === "ready" && /orc\/task-1/.test(accLast.notifies[0].text));
 }
 
+
+// ---- rework prompt ----------------------------------------------------------
+{
+  const stage = devPreset.stages.find((s) => s.id === "impl")!;
+  const role = devPreset.roles[stage.role];
+  const base = {
+    stage, role, launch: { taskId: 1, stageIdx: 1 }, history: [],
+    notesPath: "/tmp/notes.md", notesTail: "", inbox: [],
+  };
+  const rework = buildStagePrompt({ ...base, task: mkTask({ stageIdx: 1, feedback: "【impl 未通过】登录没有鉴权\n- src/a.ts:1 缺校验" }) } as any);
+  check("rework prompt carries revision discipline", /修订要求/.test(rework) && /整仓搜同类表述/.test(rework), rework.slice(0, 300));
+  const fresh = buildStagePrompt({ ...base, task: mkTask({ stageIdx: 1 }) } as any);
+  check("fresh prompt has no revision block", !/修订要求/.test(fresh));
+}
 
 // ---- lead agent action parsing ----------------------------------------------
 {
