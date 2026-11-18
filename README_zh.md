@@ -108,9 +108,20 @@ AGENT_9_AI_CLI=codebuddy
 AGENT_9_CODEBUDDY_API_KEY=ck_xxx
 AGENT_9_SLACK_BOT_TOKEN=xoxb-xxx
 AGENT_9_SLACK_APP_TOKEN=xapp-xxx
+
+# 第 10 组：飞书 ↔ DeepSeek Harness（dsh --profile headless --json）
+AGENT_10_NAME=DeepSeek Bot
+AGENT_10_PLATFORM=feishu
+AGENT_10_AI_CLI=dsh
+AGENT_10_FEISHU_APP_ID=cli_ddd
+AGENT_10_FEISHU_APP_SECRET=ddd
+AGENT_10_DEEPSEEK_API_KEY=sk-xxx
+# AGENT_10_DSH_PROFILE=headless
 ```
 
-> 每组 Bot 必须使用**独立的机器人凭证**（不同飞书 `APP_ID` / 企微 Bot ID / Telegram token），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`。完整的可选项（白名单、工作目录、Pi 的 provider 等）见 `.env.example`。
+> 每组 Bot 必须使用**独立的机器人凭证**（不同飞书 `APP_ID` / 企微 Bot ID / Telegram token），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`、`deepseek` / `deepseek-harness` / `dsh-cli`。完整的可选项（白名单、工作目录、Pi 的 provider 等）见 `.env.example`。
+
+> **dsh 说明：** 适配 `dsh --profile headless --json`，prompt 走 stdin、事件走 NDJSON、`--session-id` 续接；单 agent 与 orc 编排都能用（只读角色走 `--permission-mode read-only`，其余 `workspace-write` + `--approval-policy never`）。两点限制来自 dsh 本身：headless 没有 `--model` 参数（模型在 `~/.dsh/settings.yaml` 的 `agentDefaultModel`，所以 `/model` 对 dsh 组不生效）；`--session-id` 只在同一 cwd 下有效（换工作区后首轮自动重开会话）。
 
 > **Codex 认证说明：** Codex 使用的是 OAuth 持久化认证（`codex login`），与 OpenAI API Key（`sk-xxx`）**不是同一回事**：
 >

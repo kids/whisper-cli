@@ -54,6 +54,43 @@ export interface LoopRunEvent {
 }
 
 const FINAL: TaskStatus[] = ["ready", "failed", "dropped"];
+
+/**
+ * A task freezes its roles at submit time. If the CLI a role was pinned to is no
+ * longer configured (bot migrated to another CLI, key removed, binary gone),
+ * re-bind those roles to the first available CLI before a retry/answer — otherwise
+ * every retry fails on an adapter that cannot run and the task is stuck forever.
+ * Sessions belong to the old CLI, so they are dropped (worker starts fresh).
+ * Returns the change lines, empty when nothing had to move.
+ */
+export function rebindUnavailableRoles(store: OrcStore, task: Task, available: CliName[]): string[] {
+  if (!available.length) return [];
+  const to = available[0];
+  const preset = structuredClone(task.preset);
+  const lines: string[] = [];
+  for (const [name, role] of Object.entries(preset.roles)) {
+    if (available.includes(role.cli)) continue;
+    lines.push(`${name}：${role.cli}${role.model ? ":" + role.model : ""} → ${to}`);
+    role.cli = to;
+    delete role.model; // model ids are per-CLI; dsh/cursor pick their own
+  }
+  if (!lines.length) return [];
+  store.updateTask(task.id, { preset });
+  const l = store.getLedger<L.Ledger>(task.id);
+  if (l) {
+    if (l.worker?.sessionId) {
+      l.worker.sessionId = undefined;
+      l.worker.turns = 0;
+      l.worker.rotations++;
+    }
+    if (l.sup?.sessionId) l.sup.sessionId = undefined;
+    l.workerEpoch = (l.workerEpoch ?? 0) + 1;
+    L.observe(l, l.step, "system", `原 CLI 不可用，角色已改到 ${to}：${lines.join("；")}`);
+    store.saveLedger(task.id, l);
+  }
+  task.preset = preset;
+  return lines;
+}
 const DONE_KINDS = ["done", "metrics", "file", "cmd"];
 const clip = L.clip;
 const shortStat = (stat: string) => stat.trim().split("\n").pop()?.trim() ?? "";
@@ -172,6 +209,8 @@ export class LoopEngine {
     const task = this.store.getTask(taskId);
     const name = task?.title ?? "这个任务";
     if (!task || task.kind !== "loop") return `「${name}」不是监督循环任务`;
+    // 「继续」/回答也可能把停住的任务带回来：先确认角色 CLI 还在
+    rebindUnavailableRoles(this.store, task, this.exec.available());
     const l = this.ledger(taskId)!;
     const ask = l.pendingAsk;
     if (task.status !== "blocked" || !ask) return `「${name}」现在没有待回答的问题`;
@@ -198,6 +237,7 @@ export class LoopEngine {
   resume(taskId: number, note?: string): boolean {
     const task = this.store.getTask(taskId);
     if (!task || task.kind !== "loop" || !["blocked", "failed", "dropped"].includes(task.status)) return false;
+    rebindUnavailableRoles(this.store, task, this.exec.available());
     const l = this.ledger(taskId)!;
     if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, l.pendingAsk.code === "budget" ? "more" : undefined, note || "继续"); return true; }
     L.resetGuards(l);

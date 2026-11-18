@@ -17,7 +17,7 @@ import { stageName } from "./core";
 import { childStartStage, decideAccept, decideAfterAttempt, decideParent, depsGate, type Decision, type Outcome } from "./core";
 import { parseRoleOutput, lastProgressLine } from "./output";
 import { buildBriefPrompt, buildReplanPrompt, buildStagePrompt } from "./prompts";
-import { LoopEngine, type LoopOptions } from "./loop";
+import { LoopEngine, rebindUnavailableRoles, type LoopOptions } from "./loop";
 import type { Executor } from "./runner";
 import type { OrcStore } from "./store";
 import type { Attempt, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, ResolvedRole, Task } from "./types";
@@ -115,6 +115,8 @@ export class Orchestrator {
     const task = this.store.getTask(taskId);
     if (task?.kind === "loop") return this.loop.resume(taskId, note);
     if (!task || !["blocked", "failed", "dropped"].includes(task.status)) return false;
+    // the CLI this task was pinned to may be gone (bot switched CLI) — re-bind first
+    rebindUnavailableRoles(this.store, task, this.exec.available());
     const stage = task.preset.stages[Math.min(task.stageIdx, task.preset.stages.length - 1)];
     const loops = { ...task.loops };
     for (const k of Object.keys(loops)) if (k === stage.id || k.endsWith(`:${stage.id}`)) delete loops[k];

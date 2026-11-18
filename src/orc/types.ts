@@ -2,7 +2,7 @@
 // orc — shared types (docs/orc/001, 002)
 // =============================================================================
 
-export type CliName = "codebuddy" | "codex" | "claude" | "gemini" | "cursor" | "pi";
+export type CliName = "codebuddy" | "codex" | "claude" | "gemini" | "cursor" | "pi" | "dsh";
 
 /** What a role's final message must contain; drives the pass rule in core */
 export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report" | "action" | "brief";

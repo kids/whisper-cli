@@ -6,7 +6,7 @@
 export type Platform = "feishu" | "wecom" | "telegram" | "slack";
 
 /** Supported AI CLI tools */
-export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini" | "pi";
+export type AiCli = "codebuddy" | "cursor" | "codex" | "claude" | "gemini" | "pi" | "dsh";
 
 /** A single agent group configuration parsed from .env */
 export interface AgentConfig {
@@ -40,6 +40,8 @@ export interface AgentConfig {
   gemini?: GeminiConfig;
   /** Pi-specific config (when aiCli === "pi") */
   pi?: PiConfig;
+  /** DeepSeek Harness config (when aiCli === "dsh") */
+  dsh?: DshConfig;
   /** Allowed user open_ids (optional) */
   allowlist: Set<string>;
   /**
@@ -140,6 +142,13 @@ export interface GeminiConfig {
 export interface PiConfig {
   /** Provider name for `pi --provider`; defaults to "openai-codex" (ChatGPT Plus/Pro OAuth). */
   provider?: string;
+}
+
+export interface DshConfig {
+  /** Optional DeepSeek API key. If omitted, dsh uses ~/.dsh/.credentials.yaml / ~/.dsh/.env. */
+  apiKey?: string;
+  /** dsh profile; defaults to "headless" (AGENT_<N>_DSH_PROFILE). */
+  profile?: string;
 }
 
 /** AI CLI run result */

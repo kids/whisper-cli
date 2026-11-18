@@ -7,7 +7,7 @@
 
 ## 0. 定位
 
-把飞书群（也支持企业微信智能机器人、Telegram、Slack，见 §1.1）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi），把回复发回群里。在此之上提供：
+把飞书群（也支持企业微信智能机器人、Telegram、Slack，见 §1.1）里的消息转给本机的 AI CLI（codebuddy / codex / claude / cursor / gemini / pi / dsh），把回复发回群里。在此之上提供：
 
 - **群级上下文**：群公告当指令、群记忆、最近对话，按群隔离，CLI 无关。
 - **长任务监控**：后台训练等作业由代码定时探测，不占 CLI 进程、不耗 token。
@@ -216,9 +216,11 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | critic | codebuddy / gpt-6.1-sol | verdict | 只读 |
 | critic_alt | codebuddy / claude-opus-5.5 | verdict | 只读 |
 
-模型写在 `orc/roles/<角色>.md` 文件头。把角色换到别的 CLI 而不指定模型时，用那个 CLI 的默认模型；换到 cursor 一律是 `auto`。主 agent 默认：codebuddy bot 用 claude-sonnet-5.5，cursor bot 用 auto，其他 CLI 用各自默认；`ORC_LEAD_MODEL` 优先。
+模型写在 `orc/roles/<角色>.md` 文件头。把角色换到别的 CLI 而不指定模型时，用那个 CLI 的默认模型；换到 cursor 一律是 `auto`，换到 dsh 则不传模型（dsh headless 没有 `--model`，模型在 `~/.dsh/settings.yaml`）。主 agent 默认：codebuddy bot 用 claude-sonnet-5.5，cursor bot 用 auto，其他 CLI 用各自默认；`ORC_LEAD_MODEL` 优先。
 
-本机没有某个角色的默认 CLI 时（比如没装 codebuddy），这个角色自动改用本机已配置的 CLI：优先用本群 bot 自己的 CLI，模型用那个 CLI 的默认值（cursor 为 `auto`）。提交任务、`/orc` 和主 agent 看到的编排都会说明改用了什么。人明确指定的 CLI 不会被替换，没配置就报错。
+本机没有某个角色的默认 CLI 时（比如没装 codebuddy），这个角色自动改用本机已配置的 CLI：优先用本群 bot 自己的 CLI，模型用那个 CLI 的默认值（cursor 为 `auto`）。提交任务、`/orc` 和主 agent 看到的编排都会说明改用了什么。人明确指定的 CLI 不会被替换，没配置就报错。dsh 只看二进制是否安装；只读角色用 `--permission-mode read-only` 落实隔离。
+
+任务在提交时快照角色。之后 bot 换了 CLI（旧 key 删掉、二进制卸载），`/task retry` 或「继续」/回答之前会把这些角色自动改绑到当前可用的 CLI（优先本群 bot 的 CLI），并丢掉旧 CLI 的会话（worker 重新开），不会因为旧适配器跑不起来而永远卡住。
 
 通用机制：每个任务一个 git worktree 和分支，写入角色每轮自动提交；只读角色越权写入会被回滚；角色并发名额限制；所有副作用（启动、通知、轮次）都是持久化 effect，崩溃恢复后重放。
 
@@ -343,6 +345,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 |---|---|---|
 | `AGENT_STALL_MS` / `AGENT_MAX_MS` | 45 分钟 / 不限 | CLI 无输出超时 / 总时长上限 |
 | `AGENT_<N>_CODEBUDDY_EFFORT` / `..._AUTOCOMPACT` | 空 / 空 | 透传 `--effort` / `--autocompact`；不写前缀的 `CODEBUDDY_EFFORT` / `CODEBUDDY_AUTOCOMPACT` 对本机所有 CodeBuddy 组生效 |
+| `DSH_STALE_MS` / `DSH_MAX_MS` | 15 分钟 / 60 分钟 | dsh 无输出超时 / 总时长上限（headless 首个 token 前没有心跳） |
 | `WHISPER_WATCH_HINT` | 开 | 设为 `0` 不注入监控用法 |
 | `WHISPER_SEND_ROOTS` | 空 | 额外允许发送附件的目录，冒号分隔 |
 | `WATCH_TICK_MS` / `WATCHES_PATH` | 15 秒 / `state/watches.json` | 监控扫描间隔 / 存储位置 |

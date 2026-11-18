@@ -109,9 +109,20 @@ AGENT_9_AI_CLI=codebuddy
 AGENT_9_CODEBUDDY_API_KEY=ck_xxx
 AGENT_9_SLACK_BOT_TOKEN=xoxb-xxx
 AGENT_9_SLACK_APP_TOKEN=xapp-xxx
+
+# Group 10: Feishu ↔ DeepSeek Harness (dsh --profile headless --json)
+AGENT_10_NAME=DeepSeek Bot
+AGENT_10_PLATFORM=feishu
+AGENT_10_AI_CLI=dsh
+AGENT_10_FEISHU_APP_ID=cli_ddd
+AGENT_10_FEISHU_APP_SECRET=ddd
+AGENT_10_DEEPSEEK_API_KEY=sk-xxx
+# AGENT_10_DSH_PROFILE=headless
 ```
 
-> Each bot group needs its **own bot credentials** (different Feishu `APP_ID` / WeCom bot id / Telegram token); long-connection events cannot be shared. `AI_CLI` aliases: `codex-cli`, `claude-code` / `claude-code-cli`, `gemini-cli`. All optional keys (allowlist, workdir, Pi provider …) are listed in `.env.example`.
+> Each bot group needs its **own bot credentials** (different Feishu `APP_ID` / WeCom bot id / Telegram token); long-connection events cannot be shared. `AI_CLI` aliases: `codex-cli`, `claude-code` / `claude-code-cli`, `gemini-cli`, `deepseek` / `deepseek-harness` / `dsh-cli`. All optional keys (allowlist, workdir, Pi provider …) are listed in `.env.example`.
+
+> **dsh notes:** runs `dsh --profile headless --json` with the prompt on stdin, NDJSON events on stdout and `--session-id` for continuation; usable for plain chats and orc roles (read-only roles get `--permission-mode read-only`, the rest `workspace-write` + `--approval-policy never`). Two limits come from dsh itself: headless has no `--model` flag (the model lives in `~/.dsh/settings.yaml` → `agentDefaultModel`, so `/model` is a no-op for dsh groups), and `--session-id` is only valid in the same cwd (a workspace switch starts a fresh session on the next turn).
 
 > **Codex Auth:** Codex uses OAuth persistent login (`codex login`) — this is **not** the same as an OpenAI API Key (`sk-xxx`):
 >

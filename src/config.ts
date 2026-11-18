@@ -81,13 +81,17 @@ const AI_CLI_ALIASES: Record<string, AiCli> = {
   gemini: "gemini",
   "gemini-cli": "gemini",
   pi: "pi",
+  dsh: "dsh",
+  "dsh-cli": "dsh",
+  deepseek: "dsh",
+  "deepseek-harness": "dsh",
 };
 
 function validateAiCli(c: string): AiCli {
   const canonical = AI_CLI_ALIASES[c];
   if (canonical) return canonical;
   throw new Error(
-    `Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex, claude (claude-code / claude-code-cli), gemini (gemini-cli), pi`,
+    `Unsupported AI CLI: "${c}". Supported: codebuddy, cursor, codex, claude (claude-code / claude-code-cli), gemini (gemini-cli), pi, dsh (deepseek / deepseek-harness)`,
   );
 }
 
@@ -222,6 +226,14 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
     // Provider defaults to openai-codex; override via AGENT_<N>_PI_PROVIDER.
     config.pi = { provider: e.PI_PROVIDER || undefined };
   }
+  if (aiCli === "dsh") {
+    // DeepSeek Harness reads DEEPSEEK_API_KEY; without one it falls back to
+    // ~/.dsh/.credentials.yaml or ~/.dsh/.env, so the key is optional here.
+    config.dsh = {
+      apiKey: e.DSH_API_KEY || e.DEEPSEEK_API_KEY || undefined,
+      profile: e.DSH_PROFILE || undefined,
+    };
+  }
 
   return config;
 }
@@ -290,6 +302,7 @@ export interface GlobalConfig {
   claudeBin: string;
   geminiBin: string;
   piBin: string;
+  dshBin: string;
   logLevel: string;
   /** Agent stall timeout (ms); 0 = disabled. Default 45min (feishu-cursor) */
   agentStallMs: number;
@@ -336,6 +349,12 @@ export function loadGlobalConfig(env: Record<string, string>): GlobalConfig {
       "/opt/homebrew/bin/pi",
       "/usr/local/bin/pi",
       "/usr/bin/pi",
+    ]),
+    dshBin: env.DSH_BIN || findBinary("dsh", [
+      resolve(home, ".local/bin/dsh"),
+      resolve(home, ".npm-global/bin/dsh"),
+      "/opt/homebrew/bin/dsh",
+      "/usr/local/bin/dsh",
     ]),
     logLevel: env.LOG_LEVEL || "info",
     agentStallMs: Number(env.AGENT_STALL_MS || 45 * 60 * 1000),

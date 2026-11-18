@@ -10,6 +10,7 @@ import { runCodebuddy, setCodebuddySession, clearCodebuddySession, getCodebuddyS
 import { runCodex, setCodexSession, clearCodexSession, getCodexSession, stopCodexRun } from "../ai/codex";
 import { runClaude, setClaudeSession, clearClaudeSession, getClaudeSession, stopClaudeRun } from "../ai/claude";
 import { runCursor, setCursorSession, clearCursorSession, getCursorSession, stopCursorRun } from "../ai/cursor";
+import { runDsh, setDshSession, clearDshSession, getDshSession, stopDshRun } from "../ai/dsh";
 import type { CliName } from "./types";
 
 export interface RunRequest {
@@ -64,6 +65,12 @@ export function eventToProgress(ev: any): string | undefined {
     return clip(`shell: ${ev.item.command ?? ""}`);
   }
   if (ev?.type === "item.completed" && ev.item?.type === "file_change") return clip(`edit: ${JSON.stringify(ev.item.changes ?? "").slice(0, 120)}`);
+  // dsh headless: {"type":"tool_call","tool":"bash","input":{"command":"ls -1"}}
+  if (ev?.type === "tool_call" && typeof ev.tool === "string") {
+    const inp = ev.input ?? {};
+    const arg = inp.command ?? inp.path ?? inp.pattern ?? inp.description ?? inp.url ?? "";
+    return clip(`${ev.tool}${arg ? ": " + String(arg) : ""}`);
+  }
   // cursor-agent: {"type":"tool_call","subtype":"started","tool_call":{"shellToolCall":{"args":{"command":"…"}}}}
   if (ev?.type === "tool_call" && ev.subtype === "started" && ev.tool_call && typeof ev.tool_call === "object") {
     const [kind, body] = Object.entries<any>(ev.tool_call)[0] ?? [];
@@ -85,12 +92,12 @@ export function classifyResult(text: string): Pick<RunResult, "timedOut" | "canc
   return { timedOut: false, cancelled: false };
 }
 
-export interface ExecutorBins { codebuddyBin?: string; codexBin?: string; claudeBin?: string; cursorAgentBin?: string }
+export interface ExecutorBins { codebuddyBin?: string; codexBin?: string; claudeBin?: string; cursorAgentBin?: string; dshBin?: string }
 
 export class CliExecutor implements Executor {
   constructor(private agents: AgentConfig[], private bins: ExecutorBins) {}
 
-  private cfg<K extends "codebuddy" | "claude" | "codex" | "cursor">(k: K): AgentConfig[K] | undefined {
+  private cfg<K extends "codebuddy" | "claude" | "codex" | "cursor" | "dsh">(k: K): AgentConfig[K] | undefined {
     return this.agents.find((a) => a[k])?.[k];
   }
 
@@ -99,9 +106,14 @@ export class CliExecutor implements Executor {
     if (this.cfg("codebuddy")) out.push("codebuddy");
     if (this.bins.codexBin && existsSync(this.bins.codexBin)) out.push("codex");
     if (this.bins.claudeBin && existsSync(this.bins.claudeBin)) out.push("claude");
+    // dsh carries its own credentials (~/.dsh/…) and needs no key here
+    if (this.bins.dshBin && existsSync(this.bins.dshBin)) out.push("dsh");
     // cursor-agent needs an API key (a bot group with AGENT_<N>_CURSOR_API_KEY, or CURSOR_API_KEY)
     if (this.cursorKey() && (!this.bins.cursorAgentBin || existsSync(this.bins.cursorAgentBin))) out.push("cursor");
-    return out;
+    // The owning bot's own CLI leads the fallback order (agents[0] is that bot;
+    // same intent as clisFor() in commands.ts).
+    const own = this.agents[0]?.aiCli as CliName | undefined;
+    return own && out.includes(own) ? [own, ...out.filter((c) => c !== own)] : out;
   }
 
   private cursorKey(): string | undefined {
@@ -113,6 +125,7 @@ export class CliExecutor implements Executor {
     if (cli === "codex") return stopCodexRun(sessionKey);
     if (cli === "claude") return stopClaudeRun(sessionKey);
     if (cli === "cursor") return stopCursorRun(sessionKey);
+    if (cli === "dsh") return stopDshRun(sessionKey);
     return false;
   }
 
@@ -162,6 +175,17 @@ export class CliExecutor implements Executor {
         hardTimeoutMs: req.hardTimeoutMs, staleTimeoutMs: req.staleTimeoutMs,
       });
       res.sessionId ||= getCursorSession(key);
+    } else if (req.cli === "dsh") {
+      if (req.resumeSessionId) setDshSession(key, req.resumeSessionId); else clearDshSession(key);
+      res = await runDsh({
+        // no --append-prompt in headless: instructions go first in the task
+        prompt: req.appendSystemPrompt ? `${req.appendSystemPrompt}\n\n---\n\n${req.prompt}` : req.prompt,
+        chatId: key, config: this.cfg("dsh") ?? {}, workspace: req.cwd, dshBin: this.bins.dshBin,
+        // no --model: dsh reads agentDefaultModel from ~/.dsh/settings.yaml
+        readOnly: req.readOnly, onStreamUpdate, onEvent,
+        hardTimeoutMs: req.hardTimeoutMs, staleTimeoutMs: req.staleTimeoutMs,
+      });
+      res.sessionId ||= getDshSession(key);
     } else {
       throw new Error(`orc executor: cli "${req.cli}" not supported yet`);
     }

@@ -76,6 +76,7 @@ async function main(): Promise<void> {
         claudeBin: globalConfig.claudeBin,
         geminiBin: globalConfig.geminiBin,
         piBin: globalConfig.piBin,
+        dshBin: globalConfig.dshBin,
       },
       stateDir,
     );

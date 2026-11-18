@@ -56,6 +56,13 @@ import {
   setPiSession,
   getPiSession,
 } from "./ai/pi";
+import {
+  runDsh,
+  stopDshRun,
+  clearDshSession,
+  setDshSession,
+  getDshSession,
+} from "./ai/dsh";
 import { getProjects, loadProjects, matchProjectPrefix, routePrompt, watchProjects } from "./projects";
 import { getChatInstructions } from "./announcement";
 import {
@@ -165,6 +172,7 @@ function pushSessionToAi(aiCli: AgentConfig["aiCli"], chatId: string, sid: strin
   else if (aiCli === "claude") setClaudeSession(chatId, sid);
   else if (aiCli === "gemini") setGeminiSession(chatId, sid);
   else if (aiCli === "pi") setPiSession(chatId, sid);
+  else if (aiCli === "dsh") setDshSession(chatId, sid);
 }
 
 /**
@@ -295,6 +303,7 @@ export interface AgentBins {
   claudeBin?: string;
   geminiBin?: string;
   piBin?: string;
+  dshBin?: string;
 }
 
 export class AgentRunner {
@@ -699,6 +708,7 @@ export class AgentRunner {
     if (aiCli === "claude") return stopClaudeRun(key);
     if (aiCli === "gemini") return stopGeminiRun(key);
     if (aiCli === "pi") return stopPiRun(key);
+    if (aiCli === "dsh") return stopDshRun(key);
     return false;
   }
 
@@ -1025,6 +1035,16 @@ export class AgentRunner {
     const chatId = ev.chatId;
     const { aiCli } = this.config;
 
+    // dsh headless has no --model flag; the model is part of the dsh profile.
+    if (aiCli === "dsh") {
+      await im.sendMarkdown(chatId, [
+        "dsh headless 没有 `--model` 参数，模型由 `~/.dsh/settings.yaml`（`agentDefaultModel`）决定。",
+        "",
+        "改完设置后发 `/reset` 重开会话即可生效。",
+      ].join("\n"));
+      return true;
+    }
+
     if (!arg) {
       const effective = this.getEffectiveModel(chatId);
       const listed = this.listKnownModels();
@@ -1340,7 +1360,13 @@ export class AgentRunner {
     this._orcHost = {
       im: this.im!,
       agents,
-      bins: { codebuddyBin: this.bins.codebuddyBin, codexBin: this.bins.codexBin, claudeBin: this.bins.claudeBin, cursorAgentBin: this.bins.cursorAgentBin },
+      bins: {
+        codebuddyBin: this.bins.codebuddyBin,
+        codexBin: this.bins.codexBin,
+        claudeBin: this.bins.claudeBin,
+        cursorAgentBin: this.bins.cursorAgentBin,
+        dshBin: this.bins.dshBin,
+      },
       workspaceFor: (chatId) => this.workspaceOf(chatId).workspace,
       // Lead agent (002 §2.3): stateless (fresh session; recent turns come in the prompt),
       // read-only, short timeouts, optional cheaper model via ORC_LEAD_MODEL.
@@ -1376,7 +1402,7 @@ export class AgentRunner {
     /** Per-call overrides (orc lead agent): no writes, short timeouts, own model */
     run: { readOnly?: boolean; hardTimeoutMs?: number; staleTimeoutMs?: number; model?: string } = {},
   ): Promise<AiResult> {
-    const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig } = this.config;
+    const { aiCli, codebuddy: cbConfig, cursor: curConfig, codex: codexConfig, claude: claudeConfig, gemini: geminiConfig, pi: piConfig, dsh: dshConfig } = this.config;
     // Per-chat override → this CLI's pinned default → let the CLI decide.
     // Without the middle step CodeBuddy silently falls back to its own (old) default
     // even though /model already reports the pinned one.
@@ -1499,6 +1525,23 @@ export class AgentRunner {
       return result;
     }
 
+    if (aiCli === "dsh" && dshConfig) {
+      const result = await runDsh({
+        prompt: prefixed,
+        chatId,
+        config: dshConfig,
+        workspace,
+        dshBin: this.bins.dshBin,
+        addDirs,
+        readOnly: run.readOnly,
+        // no --model in dsh headless: the model lives in ~/.dsh/settings.yaml
+        onStreamUpdate,
+        hardTimeoutMs,
+        staleTimeoutMs,
+      });
+      return result;
+    }
+
     throw new Error(`Cannot dispatch: no config for "${aiCli}"`);
   }
 
@@ -1521,6 +1564,7 @@ export class AgentRunner {
   private getEffectiveModel(chatId: string): string {
     const override = models.get(chatId);
     if (override) return override;
+    if (this.config.aiCli === "dsh") return "dsh 配置默认";
     return this.getDefaultModelName() || "default";
   }
 
@@ -1567,6 +1611,7 @@ export class AgentRunner {
     if (aiCli === "claude") clearClaudeSession(key);
     if (aiCli === "gemini") clearGeminiSession(key);
     if (aiCli === "pi") clearPiSession(key);
+    if (aiCli === "dsh") clearDshSession(key);
     sessions.delete(key);
   }
 
@@ -1578,6 +1623,7 @@ export class AgentRunner {
     if (this.config.aiCli === "claude") return getClaudeSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "gemini") return getGeminiSession(chatId) || sessions.get(chatId);
     if (this.config.aiCli === "pi") return getPiSession(chatId) || sessions.get(chatId);
+    if (this.config.aiCli === "dsh") return getDshSession(chatId) || sessions.get(chatId);
     return sessions.get(chatId);
   }
 
