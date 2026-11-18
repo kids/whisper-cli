@@ -107,6 +107,25 @@ interface StreamEvent {
   reason?: string | { kind?: string };
   /** present on status / step_end events */
   usage?: Record<string, unknown>;
+  /** tool_call / tool_result */
+  tool?: string;
+  input?: Record<string, unknown>;
+}
+
+const clip = (s: string, n: number) => s.replace(/\s+/g, " ").trim().slice(0, n);
+
+/** One human-readable progress line for a tool call / reasoning step */
+function activityOf(ev: StreamEvent): string | undefined {
+  if (ev.type === "tool_call" && typeof ev.tool === "string") {
+    const inp = ev.input ?? {};
+    const arg = inp.command ?? inp.path ?? inp.pattern ?? inp.description ?? inp.url ?? inp.query ?? "";
+    return `🔧 ${ev.tool}${arg ? ": " + clip(String(arg), 110) : ""}`;
+  }
+  if (ev.type === "thinking") {
+    const t = str(ev.text);
+    return t ? `💭 ${clip(t, 110)}` : undefined;
+  }
+  return undefined;
 }
 
 function str(v: unknown): string | undefined {
@@ -207,6 +226,10 @@ export function runDsh(opts: RunDshOptions): Promise<AiResult> {
       let resultText = "";
       let lastText = "";
       let errText = "";
+      /** transient progress lines (tool calls / reasoning) shown on the streaming card */
+      const activity: string[] = [];
+      const ACTIVITY_MAX = 6;
+      const showActivity = () => opts.onStreamUpdate?.([...activity, stripAnsi(lastText)].filter(Boolean).join("\n\n"));
       let lineBuf = "";
       let outSessionId: string | undefined;
       let usage: AiResult["usage"];
@@ -275,7 +298,19 @@ export function runDsh(opts: RunDshOptions): Promise<AiResult> {
             const t = textOf(ev);
             if (t) {
               lastText = t;
-              opts.onStreamUpdate?.(stripAnsi(lastText));
+              showActivity();
+            }
+            break;
+          }
+          case "tool_call":
+          case "thinking": {
+            // Visible progress: a long lead/agent turn otherwise shows nothing
+            // until a committed assistant message arrives.
+            const line = activityOf(ev);
+            if (line) {
+              activity.push(line);
+              if (activity.length > ACTIVITY_MAX) activity.splice(0, activity.length - ACTIVITY_MAX);
+              showActivity();
             }
             break;
           }
