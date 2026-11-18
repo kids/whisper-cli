@@ -82,7 +82,7 @@ export function parsePresetYaml(src: string): PresetDef {
       requireReview: Boolean(l.require_review ?? false),
       verbosity: (["quiet", "normal", "verbose"].includes(l.verbosity) ? l.verbosity : "normal") as Verbosity,
       budget: {
-        maxSteps: Number(b.max_steps ?? 60),
+        maxSteps: Number(b.max_steps ?? 500),
         maxWorkerRuns: Number(b.max_worker_runs ?? 25),
         maxActiveHours: Number(b.max_active_hours ?? 8),
       },

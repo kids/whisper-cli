@@ -13,7 +13,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { addWatch, cancelWatch, checkWatch, describeSpec, getWatch, parseDuration, parseWatchSpec, setWatchNote, PATROL, type CheckResult, type Watch } from "../watch";
+import { addWatch, cancelWatch, checkWatch, describeSpec, getWatch, parseDuration, parseWatchNote, parseWatchSpec, setWatchNote, PATROL, type CheckResult, type Watch } from "../watch";
 
 /** While parked on a watch the supervisor patrols this often by default (min 10m) */
 const DEFAULT_HEARTBEAT_S = 30 * 60;
@@ -34,6 +34,8 @@ export interface LoopOptions {
   watchBot?: (task: Task) => string | undefined;
   /** a watch was registered for a loop task (post its card) */
   onWatchCreated?: (task: Task, w: Watch) => void;
+  /** watch note / card body changed — refresh the existing IM card */
+  onWatchNote?: (task: Task, w: Watch) => void;
   /** an agent run inside round n started / progressed / ended (per-round thread card, agent-cards.ts) */
   onRun?: (task: Task, ev: LoopRunEvent) => void;
   /** max loop tasks running a round at the same time */
@@ -384,11 +386,11 @@ export class LoopEngine {
       : undefined;
     const reasonText = ({
       start: "任务刚开始", next: "上一个动作已完成", human: "人发来了消息", watch: "等待的监控触发了",
-      heartbeat: `定时巡检（作业还在跑）。${PATROL}正常就写 [[wait]] 再一行 keep=1，并写一句判断依据。`,
+      heartbeat: `定时巡检（作业还在跑）。${PATROL}正常就：单独一行写 [[wait]]，下一行 keep=1，再一行 reason=阶段/步数/收益%/笔数/判断（reason 会写到群里监控卡片；[[wait]] 必须独占一行否则解析失败会停心跳）。`,
       resume: "人要求继续 / 重试", retry: "上一轮出错后重试",
     } as Record<string, string>)[p.reason] ?? p.reason;
     // 首轮或会话用满就重建上下文；其余轮次续接同一个监督者会话（它有前几轮的记忆）。
-    // 上限跟任务预算同一个寿命（默认 maxSteps=60 轮）：预算用完本来就要停下来问人，
+    // 上限跟任务预算同一个寿命（默认 maxSteps=500 轮）：预算用完本来就要停下来问人，
     // 所以在预算之内不再另设一个轮数；ORC_LOOP_SUP_TURNS 可以单独收紧（0 = 不限）。
     const supTurns = Number(process.env.ORC_LOOP_SUP_TURNS || 0) || l.limits.maxSteps;
     const fresh = !l.sup.sessionId || l.sup.turns >= supTurns;
@@ -438,7 +440,11 @@ export class LoopEngine {
       L.observe(l, n, "thought", clip(stripSignals(res.text), 1500) || "（这一轮没有输出）");
       l.step = n;
       this.store.addStep({ taskId: task.id, n, reason: p.reason, action: null, accepted: true, verdict: "没有动作，继续", observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
-      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 监督者在看现场`, notifies, next: [{ reason: "next" }] });
+      // 仍挂在监控上时绝不能只排 next——waiting 会 skip next，心跳就此断档（卡片停更）
+      const next = wasWaiting && l.waitWatch && l.heartbeatS
+        ? [{ reason: "heartbeat", delayMs: l.heartbeatS * 1000, ref: l.waitWatch }]
+        : [{ reason: "next" }];
+      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 监督者在看现场`, notifies, next });
       return;
     }
 
@@ -595,8 +601,8 @@ export class LoopEngine {
           const why = a.reason ? `：${clip(a.reason, 200)}` : "";
           // 巡检带了判断依据 → 写入监控 note，并刷新群卡片（避免一直只显示 log 文件名）
           if (a.reason?.trim()) {
-            const updated = setWatchNote(wid, a.reason.trim());
-            if (updated) try { this.opts.onWatchCreated?.(task, updated); } catch { /* card best-effort */ }
+            const updated = setWatchNote(wid, clip(a.reason.trim(), 500));
+            if (updated) try { (this.opts.onWatchNote ?? this.opts.onWatchCreated)?.(task, updated); } catch { /* card best-effort */ }
           }
           // healthy patrol: card progress only, no group message
           return { status: "waiting", progress: `第 ${n} 轮 · 巡检正常，继续等待监控 #${wid}${why}`, obs: `巡检后继续等待监控 #${wid}${why}`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: wid }] : [], turn: "" };
@@ -608,7 +614,7 @@ export class LoopEngine {
         if (!watchRaw.title && a.reason) watchRaw.title = clip(a.reason, 40);
         const spec = parseWatchSpec(watchRaw, wtp);
         spec.onWake ||= a.reason || "叫醒监督者";
-        const note = [a.reason, noteFromWatch].filter(Boolean).join("\n") || undefined;
+        const note = [a.reason && clip(a.reason, 500), noteFromWatch || parseWatchNote(a.watch)].filter(Boolean).join("\n") || undefined;
         const w = addWatch({ chatId: task.chatId!, bot: this.opts.watchBot!(task)!, sessionKey: `orc-loop:${id}`, cwd: wtp, spec, note });
         l.waitWatch = w.id;
         l.heartbeatS = Math.max(600, a.heartbeat ? parseDuration(a.heartbeat) : DEFAULT_HEARTBEAT_S);

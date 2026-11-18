@@ -507,13 +507,15 @@ export function stopWatches(): void {
 // ---- rendering / protocol -----------------------------------------------------
 
 /**
- * Card == agent note, verbatim. No status icons, age, probe summary, or stop hints —
- * those are templates; humans should read what the agent wrote. Empty note → bare id line
- * so a card can exist until the first report.
+ * Card == agent note, verbatim. No status icons, age, or stop hints — those are templates.
+ * Empty note → show probe summary so the card is not a blank "train.log" while waiting
+ * for the first keep/report（orc-loop 的 report 软叫醒是空操作，尤其依赖这一层兜底）.
  */
 export function renderWatchCard(w: Watch): string {
   const note = w.note?.trim();
   if (note) return note.slice(0, MAX_NOTE);
+  const sum = w.summary?.trim();
+  if (sum) return `监控 #${w.id} ${w.spec.title}\n${sum}`.slice(0, MAX_NOTE);
   return `监控 #${w.id} ${w.spec.title}`;
 }
 

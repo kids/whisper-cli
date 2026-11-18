@@ -1020,7 +1020,16 @@ export class AgentRunner {
 
   /** Soft wake: agent refreshes the card note; watch stays active */
   private async onWatchReport(w: Watch, r: CheckResult): Promise<void> {
-    if (w.sessionKey.startsWith("orc-loop:")) return; // loop tasks use their own heartbeat
+    if (w.sessionKey.startsWith("orc-loop:")) {
+      // loop 靠 heartbeat 巡检；这里至少把探测摘要刷到卡片，避免 note 空时群里只剩 "train.log"
+      if (!w.note?.trim() && r.summary) {
+        const updated = setWatchNote(w.id, `（探测）${r.summary}`.slice(0, 500));
+        if (updated?.cardId) void this.im?.updateCardMessage(updated.cardId, renderWatchCard(updated)).catch(() => {});
+      } else if (w.cardId) {
+        void this.im?.updateCardMessage(w.cardId, renderWatchCard(getWatch(w.id) ?? w)).catch(() => {});
+      }
+      return;
+    }
     const ev: ChatEvent = {
       messageId: `watch-report-${w.id}-${Date.now()}`, chatId: w.chatId, chatType: "group", messageType: "text",
       text: buildReportPrompt(w, r), senderOpenId: "", content: "", attachments: [],

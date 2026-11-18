@@ -333,6 +333,11 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
         }
         void f.sendCardAndGetId(t.chatId, renderWatchCard(w)).then((id) => { if (id) updateWatch(w.id, { cardId: id }); }).catch(() => {});
       },
+      onWatchNote: (t, w) => {
+        const f = clientFor(t.chatId);
+        if (!f || !w.cardId) return;
+        void f.updateCardMessage(w.cardId, renderWatchCard(w)).catch(() => {});
+      },
       onRun: loopRunCard,
     },
   });

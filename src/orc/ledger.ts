@@ -309,11 +309,15 @@ export function parseSignal(text: string): LoopAction | undefined {
     case "review": return { action: "review", focus: b.body || undefined };
     case "wait": {
       const kv: Record<string, string> = {};
+      let freeReason: string | undefined;
       for (const line of b.body.split(/\r?\n/)) {
-        const m = /^([a-z_]+)\s*[:=]\s*(.+)$/i.exec(line.trim());
+        const t = line.trim();
+        if (!t) continue;
+        const m = /^([a-z_]+)\s*[:=]\s*(.+)$/i.exec(t);
         if (m) kv[m[1].toLowerCase()] = m[2].trim();
+        else if (!freeReason) freeReason = t; // keep 后第一行非 kv 也当 reason（写到监控卡片）
       }
-      if (kv.keep && !/^(0|false|no)$/i.test(kv.keep)) return { action: "wait", keep: true, reason: kv.reason };
+      if (kv.keep && !/^(0|false|no)$/i.test(kv.keep)) return { action: "wait", keep: true, reason: kv.reason || freeReason };
       const watch: Record<string, unknown> = {};
       if (kv.pid) watch.pid = Number(kv.pid);
       for (const k of ["title", "log", "done", "stale", "every", "timeout", "cmd", "file", "note"] as const) if (kv[k]) watch[k] = kv[k];
