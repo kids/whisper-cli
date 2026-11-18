@@ -41,6 +41,9 @@ export interface OrcChatHost {
 
 const orcOf = (h: OrcChatHost) => getOrc(h.agents, h.bins);
 
+/** This bot's own CLI: the orc engine is shared, so rebinding must be told which bot is talking */
+const ownCli = (h: OrcChatHost): CliName | undefined => h.agents[0]?.aiCli as CliName | undefined;
+
 const VERBOSITY_WORDS: Record<string, Verbosity> = { quiet: "quiet", 安静: "quiet", normal: "normal", 正常: "normal", verbose: "verbose", 详细: "verbose" };
 const VERBOSITY_ZH: Record<Verbosity, string> = {
   quiet: "安静（回复串里不发每个 agent 的卡片，只发结果、提问和失败）",
@@ -174,7 +177,7 @@ export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<b
       const id = Number(sm[2]);
       const verb = sm[1].toLowerCase();
       const name = o.store.getTask(id)?.title ?? "这个任务";
-      const ok = verb === "stop" ? o.stop(id) : verb === "retry" ? o.retry(id, sm[3] || undefined) : verb === "accept" ? o.accept(id, sm[3] || undefined) : o.attach(id, sm[3], false);
+      const ok = verb === "stop" ? o.stop(id) : verb === "retry" ? o.retry(id, sm[3] || undefined, ownCli(h)) : verb === "accept" ? o.accept(id, sm[3] || undefined) : o.attach(id, sm[3], false, undefined, ownCli(h));
       await say(ok ? `「${name}」${verb === "stop" ? "已终止" : verb === "retry" ? "已重新排队" : verb === "accept" ? "已接受现在这版，继续后面的环节" : "补充已排队，下一轮交给 agent"}` : `「${name}」当前状态不支持 ${verb}`);
       return true;
     }
@@ -323,7 +326,7 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       return;
     }
     case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 「${name(act.task)}」已终止` : `「${name(act.task)}」无法终止`); return;
-    case "retry": await say(own(act.task) && o.retry(act.task, act.note) ? `🔁 「${name(act.task)}」已重新排队` : `「${name(act.task)}」当前状态不能重试`); return;
+    case "retry": await say(own(act.task) && o.retry(act.task, act.note, ownCli(h)) ? `🔁 「${name(act.task)}」已重新排队` : `「${name(act.task)}」当前状态不能重试`); return;
     case "accept": {
       const t = own(act.task) ? o.store.getTask(act.task) : undefined;
       const st = t && acceptable(t);
@@ -333,13 +336,13 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       return;
     }
     case "attach": {
-      const ok = own(act.task) && o.attach(act.task, act.text, act.urgent, userText);
+      const ok = own(act.task) && o.attach(act.task, act.text, act.urgent, userText, ownCli(h));
       await say(ok ? (act.urgent ? `⚡ 已打断「${name(act.task)}」，带着你的补充续接原会话重跑` : `📎 已把补充交给「${name(act.task)}」，下一轮生效`) : `「${name(act.task)}」不在进行中`);
       return;
     }
     case "answer": {
       if (!own(act.task)) { await say("本群没有这个任务"); return; }
-      await say(o.loop.answer(act.task, act.option, act.text, userText));
+      await say(o.loop.answer(act.task, act.option, act.text, userText, ownCli(h)));
       return;
     }
     case "confirm": await confirmPending(h, chatId); return;

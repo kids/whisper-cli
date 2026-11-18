@@ -20,7 +20,7 @@ import { buildBriefPrompt, buildReplanPrompt, buildStagePrompt } from "./prompts
 import { LoopEngine, rebindUnavailableRoles, type LoopOptions } from "./loop";
 import type { Executor } from "./runner";
 import type { OrcStore } from "./store";
-import type { Attempt, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, ResolvedRole, Task } from "./types";
+import type { Attempt, CliName, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, ResolvedRole, Task } from "./types";
 import { TERMINAL } from "./types";
 import * as wt from "./worktree";
 
@@ -111,12 +111,12 @@ export class Orchestrator {
   }
 
   /** Resume a blocked/failed task at its current stage with fresh loop budget */
-  retry(taskId: number, note?: string): boolean {
+  retry(taskId: number, note?: string, prefer?: CliName): boolean {
     const task = this.store.getTask(taskId);
-    if (task?.kind === "loop") return this.loop.resume(taskId, note);
+    if (task?.kind === "loop") return this.loop.resume(taskId, note, prefer);
     if (!task || !["blocked", "failed", "dropped"].includes(task.status)) return false;
     // the CLI this task was pinned to may be gone (bot switched CLI) — re-bind first
-    rebindUnavailableRoles(this.store, task, this.exec.available());
+    rebindUnavailableRoles(this.store, task, this.exec.available(), prefer);
     const stage = task.preset.stages[Math.min(task.stageIdx, task.preset.stages.length - 1)];
     const loops = { ...task.loops };
     for (const k of Object.keys(loops)) if (k === stage.id || k.endsWith(`:${stage.id}`)) delete loops[k];
@@ -142,9 +142,9 @@ export class Orchestrator {
   }
 
   /** Queue human input for the task's next attempt; urgent = interrupt current run and resume */
-  attach(taskId: number, text: string, urgent = false, raw?: string): boolean {
+  attach(taskId: number, text: string, urgent = false, raw?: string, prefer?: CliName): boolean {
     const task = this.store.getTask(taskId);
-    if (task?.kind === "loop") return this.loop.attach(taskId, text, urgent, raw);
+    if (task?.kind === "loop") return this.loop.attach(taskId, text, urgent, raw, prefer);
     if (!task || TERMINAL.includes(task.status)) return false;
     this.store.updateTask(taskId, { inbox: [...task.inbox, text] });
     // 人改了目标 / 口径时，先把影响面判断出来（等这一步跑完再生效）

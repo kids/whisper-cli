@@ -110,10 +110,10 @@ export class CliExecutor implements Executor {
     if (this.bins.dshBin && existsSync(this.bins.dshBin)) out.push("dsh");
     // cursor-agent needs an API key (a bot group with AGENT_<N>_CURSOR_API_KEY, or CURSOR_API_KEY)
     if (this.cursorKey() && (!this.bins.cursorAgentBin || existsSync(this.bins.cursorAgentBin))) out.push("cursor");
-    // The owning bot's own CLI leads the fallback order (agents[0] is that bot;
-    // same intent as clisFor() in commands.ts).
-    const own = this.agents[0]?.aiCli as CliName | undefined;
-    return own && out.includes(own) ? [own, ...out.filter((c) => c !== own)] : out;
+    // NB: no per-bot reordering here. getOrc() is a process-wide singleton built
+    // from the first bot that asks, so agents[0] is NOT the bot serving the
+    // current chat. Callers that know the bot pass its CLI explicitly.
+    return out;
   }
 
   private cursorKey(): string | undefined {

@@ -63,9 +63,11 @@ const FINAL: TaskStatus[] = ["ready", "failed", "dropped"];
  * Sessions belong to the old CLI, so they are dropped (worker starts fresh).
  * Returns the change lines, empty when nothing had to move.
  */
-export function rebindUnavailableRoles(store: OrcStore, task: Task, available: CliName[]): string[] {
+export function rebindUnavailableRoles(store: OrcStore, task: Task, available: CliName[], prefer?: CliName): string[] {
   if (!available.length) return [];
-  const to = available[0];
+  // The orc engine is a singleton shared by every bot, so the executor's list
+  // order says nothing about which bot serves this chat — callers pass `prefer`.
+  const to = prefer && available.includes(prefer) ? prefer : available[0];
   const preset = structuredClone(task.preset);
   const lines: string[] = [];
   for (const [name, role] of Object.entries(preset.roles)) {
@@ -186,11 +188,11 @@ export class LoopEngine {
   // ---- human steering -----------------------------------------------------
 
   /** A human message for the task: answers an open question, or lands in the inbox (urgent = interrupt the worker) */
-  attach(taskId: number, text: string, urgent = false, raw?: string): boolean {
+  attach(taskId: number, text: string, urgent = false, raw?: string, prefer?: CliName): boolean {
     const task = this.store.getTask(taskId);
     if (!task || task.kind !== "loop" || FINAL.includes(task.status)) return false;
     const l = this.ledger(taskId)!;
-    if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, undefined, text, raw); return true; }
+    if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, undefined, text, raw, prefer); return true; }
     L.noteHuman(l, raw || text);
     l.inbox.push({ at: Date.now(), text: withRaw(text, raw) });
     this.store.tx(() => {
@@ -205,12 +207,12 @@ export class LoopEngine {
   }
 
   /** 回答监督者的问题：人直接说，不用选项（只有预算确认还认「继续/停」） */
-  answer(taskId: number, option?: string, text?: string, raw?: string): string {
+  answer(taskId: number, option?: string, text?: string, raw?: string, prefer?: CliName): string {
     const task = this.store.getTask(taskId);
     const name = task?.title ?? "这个任务";
     if (!task || task.kind !== "loop") return `「${name}」不是监督循环任务`;
     // 「继续」/回答也可能把停住的任务带回来：先确认角色 CLI 还在
-    rebindUnavailableRoles(this.store, task, this.exec.available());
+    rebindUnavailableRoles(this.store, task, this.exec.available(), prefer);
     const l = this.ledger(taskId)!;
     const ask = l.pendingAsk;
     if (task.status !== "blocked" || !ask) return `「${name}」现在没有待回答的问题`;
@@ -234,12 +236,12 @@ export class LoopEngine {
   }
 
   /** Human retry of a blocked / failed / dropped loop task */
-  resume(taskId: number, note?: string): boolean {
+  resume(taskId: number, note?: string, prefer?: CliName): boolean {
     const task = this.store.getTask(taskId);
     if (!task || task.kind !== "loop" || !["blocked", "failed", "dropped"].includes(task.status)) return false;
-    rebindUnavailableRoles(this.store, task, this.exec.available());
+    rebindUnavailableRoles(this.store, task, this.exec.available(), prefer);
     const l = this.ledger(taskId)!;
-    if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, l.pendingAsk.code === "budget" ? "more" : undefined, note || "继续"); return true; }
+    if (task.status === "blocked" && l.pendingAsk) { this.answer(taskId, l.pendingAsk.code === "budget" ? "more" : undefined, note || "继续", undefined, prefer); return true; }
     L.resetGuards(l);
     if (L.budgetState(l).exhausted) L.extendBudget(l);
     l.pendingAsk = undefined;
