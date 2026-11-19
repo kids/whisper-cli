@@ -1047,7 +1047,7 @@ export class AgentRunner {
     // dsh headless has no --model flag; the model is part of the dsh profile.
     if (aiCli === "dsh") {
       await im.sendMarkdown(chatId, [
-        "dsh headless 没有 `--model` 参数，模型由 `~/.dsh/settings.yaml`（`agentDefaultModel`）决定。",
+        "dsh headless 没有 `--model` 参数，模型由 dsh profile 的 `agent-default-model` 决定（`~/.dsh/profiles/<profile>/cordis.patch.yml`）。",
         "",
         "改完设置后发 `/reset` 重开会话即可生效。",
       ].join("\n"));

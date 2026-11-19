@@ -4,7 +4,7 @@
 // Install: npm i -g @deepseek-ai/dsh   (Node >=24.9, see package engines)
 // Auth:    DEEPSEEK_API_KEY (per group) or ~/.dsh/.credentials.yaml / ~/.dsh/.env
 //
-//   dsh --profile headless --json --permission-mode workspace-write --approval-policy never
+//   dsh --profile headless --json --permission-mode danger-full-access --approval-policy never
 //   dsh --profile headless --json --session-id <id>  # resume
 //
 // NDJSON on stdout: session → status/text/thinking/tool_call/tool_result → final
@@ -12,8 +12,8 @@
 // when the runner itself fails). Exit 0 = turn completed; 1 = aborted / error.
 //
 // Two headless-specific constraints:
-//   • there is no `--model` flag — the model comes from ~/.dsh/settings.yaml
-//     (`agentDefaultModel`), so whisper's per-chat `/model` does not apply here;
+//   • there is no `--model` flag — the model comes from the profile's
+//     `agent-default-model` (cordis.patch.yml), so whisper's `/model` does not apply;
 //   • `--session-id` is only accepted for a session recorded in the *same cwd*,
 //     so switching a chat's workspace invalidates it (we retry once, fresh).
 // =============================================================================
@@ -189,11 +189,14 @@ export function runDsh(opts: RunDshOptions): Promise<AiResult> {
     const sid = resume ? sessions.get(chatId) : undefined;
     const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
     // No TTY: approval prompts could only stall, so the policy is always "never".
-    // workspace-write keeps writes inside the workspace/sandbox, which is what
-    // the other adapters' --force / bypassPermissions amounts to.
+    // Read-only roles get the read-only preset. Write roles get danger-full-access:
+    // workspace-write only covers the cwd, and an orc worktree keeps its git
+    // metadata in the *main* repo (often another volume), so `git add` dies on
+    // .git/worktrees/.../index.lock. That is the same trust level as cursor's
+    // --force / codebuddy's bypassPermissions / claude's --dangerously-skip-permissions.
     const args = [
       "--profile", profile, "--json",
-      "--permission-mode", opts.readOnly ? "read-only" : "workspace-write",
+      "--permission-mode", opts.readOnly ? "read-only" : "danger-full-access",
       "--approval-policy", "never",
     ];
     for (const dir of addDirs) args.push("--add-dir", dir);
