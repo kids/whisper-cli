@@ -17,6 +17,10 @@ import { addWatch, cancelWatch, checkWatch, describeSpec, getWatch, parseDuratio
 
 /** While parked on a watch the supervisor patrols this often by default (min 10m) */
 const DEFAULT_HEARTBEAT_S = 30 * 60;
+/** 要人拍板的指令：附全文的上限（平台会按 4000 字分段），超过就截断并注明 */
+const ASK_DETAIL_MAX = 12000;
+/** 对不可逆确认的拒绝（开头就是否定）；「不是，继续」= 误报放行，不算拒绝 */
+const REFUSAL = /^\s*(不要|不做|不行|不用|不同意|不可以|不允许|别|算了|停|取消|拒绝|先别|no\b|don'?t\b)/i;
 import * as L from "./ledger";
 import { parseRoleOutput } from "./output";
 import { CONTRACT } from "./prompts";
@@ -491,9 +495,27 @@ export class LoopEngine {
         const hit = L.irreversibleHit(a.text);
         const approval = l.approvals.find((x) => !x.used);
         if (hit && !approval) {
-          l.pendingAsk = { step: n, question: `这条指令涉及${hit}，要做吗？\n（${clip(a.text, 300)}）`, why: "irreversible", askedAt: Date.now() };
+          l.pendingAsk = {
+            step: n,
+            question: [
+              `团队下一步要**${hit.label}**，这一步做了收不回，所以先停下来等你确认。`,
+              ``,
+              `是这一句：`,
+              `> ${hit.excerpt}`,
+              ``,
+              `怎么回：`,
+              `- 同意：回「可以」，只放行这一次`,
+              `- 不同意：回「不要」，顺便说改成怎么做`,
+              `- 误会了，这句不是这个意思：回「不是，继续」`,
+            ].join("\n"),
+            // 指令比引用的那句长出不少时才附全文（短指令附了就是重复）；只给人看，不进 prompt
+            detail: a.text.length <= hit.excerpt.length + 40 ? undefined
+              : a.text.length > ASK_DETAIL_MAX ? `${a.text.slice(0, ASK_DETAIL_MAX)}\n\n…（后面还有 ${a.text.length - ASK_DETAIL_MAX} 字没贴）`
+              : a.text,
+            why: "irreversible", code: "guard", askedAt: Date.now(),
+          };
           return {
-            status: "blocked", progress: `等你确认：${hit}`, obs: `这条指令涉及不可逆操作（${hit}），先停下等确认；确认后下一轮放行一次`,
+            status: "blocked", progress: `等你确认：${hit.label}`, obs: `指令里有「${hit.phrase}」，按不可逆操作（${hit.label}）先停下等确认；确认后下一轮放行一次`,
             notifies: [this.askNotify(task, l.pendingAsk)], next: [], turn: "",
           };
         }
@@ -672,17 +694,22 @@ export class LoopEngine {
       L.observe(l, n, "human", `预算确认：继续${said && said !== "more" ? "；" + said : ""}`);
       return { status: "running", progress: "预算已追加，继续", notifies: [] };
     }
-    L.observe(l, n, "human", `人对「${ask.question}」的回答：${said}`);
-    // 不可逆的问题得到回答后记一次批准，监督者下次 instruct 里的不可逆操作放行一次
-    if (ask.why === "irreversible") l.approvals.push({ step: ask.step, question: ask.question, answer: said, at: Date.now() });
-    return { status: "running", progress: "收到回答，继续", notifies: [] };
+    const headline = ask.question.split("\n")[0].replace(/\*\*/g, "");
+    // 不可逆的问题：回「不要」这类拒绝不算批准；其余回答（可以 / 不是，继续）记一次批准，下次 instruct 放行一次
+    const refused = ask.why === "irreversible" && REFUSAL.test(said);
+    L.observe(l, n, "human", `人对「${headline}」的回答：${said}${refused ? "（拒绝，不放行）" : ""}`);
+    if (ask.why === "irreversible" && !refused) l.approvals.push({ step: ask.step, question: headline, answer: said, at: Date.now() });
+    return { status: "running", progress: refused ? "你没同意，按你的意思调整" : "收到回答，继续", notifies: [] };
   }
 
   private askNotify(task: Task, a: L.PendingAsk): NotifyPayload {
-    const tail = a.code === "budget"
-      ? "要接着花就回一句「继续」（追加 50% 预算），要停就回「停」。"
-      : "直接在群里说你的想法就行，在回答前不会往下走。";
-    return { taskId: task.id, kind: "ask", text: `${a.question}\n\n${tail}` };
+    // 代码拦下的不可逆操作：问话里已经写了怎么回，不再加通用尾巴
+    const tail = a.code === "budget" ? "\n\n要接着花就回一句「继续」（追加 50% 预算），要停就回「停」。"
+      : a.code === "guard" ? ""
+      : "\n\n直接在群里回一句你的想法就行，你回复之前不会往下走。";
+    // 决策需要的放前面；全文放最后（平台按 4000 字分段）
+    const detail = a.detail ? `\n\n---\n\n**完整指令**\n\n${a.detail}` : "";
+    return { taskId: task.id, kind: "ask", text: `${a.question}${tail}${detail}` };
   }
 
   private enqueue(taskId: number, reason: string, delayMs = 0, ref?: number): void {

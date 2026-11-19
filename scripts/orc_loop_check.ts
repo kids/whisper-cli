@@ -59,9 +59,16 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
 
 // ---- 不可逆操作：唯一保留的"看内容"规则 ---------------------------------------
 {
-  check("irreversible: git push", L.irreversibleHit("改完后 git push origin main") === "git push");
+  check("irreversible: git push", /git push/.test(L.irreversibleHit("改完后 git push origin main")?.label ?? ""));
   check("irreversible: negated", L.irreversibleHit("改完提交即可，不要 git push") === undefined);
-  check("irreversible: deploy", L.irreversibleHit("部署到生产环境") !== undefined);
+  check("irreversible: deploy", L.irreversibleHit("部署到生产环境")?.label === "部署上线");
+  check("irreversible: excerpt drops list / bold marks", L.irreversibleHit("**收尾**\n- 确认没报错后**直接发版**吧")?.excerpt === "确认没报错后直接发版吧");
+  check("irreversible: deploy imperative", L.irreversibleHit("测试全过就改完直接上线") !== undefined);
+  check("irreversible: deploy words only", L.irreversibleHit("在隔离的新目录里部署，先核对基线，部署目录不是 git 仓库，部署后跑 pytest") === undefined);
+  check("irreversible: hit is quoted", (() => {
+    const h = L.irreversibleHit("长指令\n第二段很长，最后一句是部署到生产，别忘了我")
+    return !!h && h.phrase === "部署到生产" && h.excerpt.includes("部署到生产");
+  })());
   check("irreversible: drop table", L.irreversibleHit("DROP TABLE users") !== undefined);
   check("irreversible: plain work", L.irreversibleHit("跑一下单测，修掉失败的用例") === undefined);
   check("budget: exhausted line", L.budgetState(mk({ limits: { maxSteps: 1, maxWorkerRuns: 1, maxActiveHours: 1 } })).exhausted === undefined);
@@ -212,16 +219,20 @@ async function e2e() {
     const t = orc.submit({ goal: "改个函数名", repo, preset: loopPreset, criteria: ["测试通过"], sourceText: "顺便把函数名改成 plusTwo" });
     const id = t.id;
     exec.worker.set(id, () => "[[done]] 改好了");
+    // 触发词放在 300 字之后：确认消息要给全背景，不能只截开头
+    const pushInstruct = `背景：这次只改函数名，不动行为。${"先看测试再动手。".repeat(40)}\n\n改完直接 git push origin main`;
     exec.sup.set(id, [
       () => { orc.attach(id, "函数名以后改成 plusTwo", false, "顺便把函数名改成 plusTwo 吧"); return S({ action: "instruct", text: "把 add 改名成 plusTwo" }); },
-      S({ action: "instruct", text: "改完直接 git push origin main" }),
-      S({ action: "instruct", text: "改完直接 git push origin main" }),
+      S({ action: "instruct", text: pushInstruct }),
+      S({ action: "instruct", text: pushInstruct }),
       S({ action: "abort", reason: "推不上去，远端拒绝" }),
     ]);
     await drive(() => store.getTask(id)!.status === "blocked");
     const blocked = store.getTask(id)!;
     check("B irreversible instruct asks instead of running", blocked.status === "blocked" && /git push/.test(blocked.progress), blocked.progress);
-    check("B question is a plain sentence", /要做吗/.test(asks(notes)[0]?.text ?? "") && !/选项/.test(asks(notes)[0]?.text ?? ""), asks(notes)[0]?.text);
+    const q = asks(notes)[0]?.text ?? "";
+    check("B question says what, why, and how to answer", /团队下一步要/.test(q) && /收不回/.test(q) && /回「可以」/.test(q) && /回「不要」/.test(q) && !/选项|监督者/.test(q), q);
+    check("B ask carries the full instruction", /完整指令/.test(q) && q.includes("改完直接 git push origin main"), q.length);
     check("B worker did not run the push turn", exec.of(id, "worker").length === 1);
     orc.loop.answer(id, undefined, "可以推，只推一次");
     const l = orc.loop.ledger(id)!;
@@ -230,6 +241,22 @@ async function e2e() {
     await drive(() => store.getTask(id)!.status === "failed");
     check("B second push passes on the approval (single use), then abort stops", exec.of(id, "worker").length === 2 && store.getTask(id)!.status === "failed");
     check("B abort is reported as a fault, not a question", notes.some((n) => n.kind === "failed") && asks(notes).length === 1, notes.map((n) => n.kind));
+    done();
+  }
+
+  // B2: 回「不要」不算批准，监督者再下同样的指令还会被拦
+  {
+    const { repo, store, exec, notes, orc, drive, done } = setup();
+    const id = orc.submit({ goal: "改个函数名", repo, preset: loopPreset, criteria: ["测试通过"] }).id;
+    exec.worker.set(id, () => "[[done]] 改好了");
+    exec.sup.set(id, [S({ action: "instruct", text: "改完直接 git push origin main" }), S({ action: "instruct", text: "改完直接 git push origin main" })]);
+    await drive(() => store.getTask(id)!.status === "blocked");
+    orc.loop.answer(id, undefined, "不要推，先留在分支上");
+    const l = orc.loop.ledger(id)!;
+    check("B2 refusal is not an approval", l.approvals.length === 0 && l.observations.some((o) => /拒绝，不放行/.test(o.text)), l.approvals);
+    await drive(() => store.getTask(id)!.status === "blocked");
+    check("B2 same push is stopped again", exec.of(id, "worker").length === 0 && asks(notes).length === 2, [exec.of(id, "worker").length, asks(notes).length]);
+    orc.stop(id);
     done();
   }
 

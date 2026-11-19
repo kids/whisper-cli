@@ -33,8 +33,10 @@ export interface PendingAsk {
   question: string;
   why: AskWhy;
   askedAt: number;
-  /** 代码自己发起的确认（只有预算这一种），其余都是监督者问的 */
-  code?: "budget";
+  /** budget = 代码发起的预算确认；guard = 代码拦下的不可逆指令（问话里自带回答方式）；其余是监督者问的 */
+  code?: "budget" | "guard";
+  /** 决策要读的完整背景（如被拦下的指令全文）。只发给人在群里看，不进监督者 / worker 的 prompt */
+  detail?: string;
 }
 export interface Observation { step: number; at: number; kind: string; text: string }
 export interface PlanItem { text: string; status: "todo" | "doing" | "done" | "dropped" }
@@ -360,24 +362,65 @@ export function applyChange(l: Ledger, c: ChangeSet, step: number): string[] {
 
 // ---- 不可逆操作（唯一保留的"看内容"规则）-----------------------------------
 
-const IRREVERSIBLE: [RegExp, string][] = [
-  [/\bgit\s+push\b/i, "git push"],
-  [/\b(kubectl|helm)\s+(apply|delete|upgrade|install|rollout|scale)\b/i, "改动集群"],
-  [/\bdeploy\b|部署|上线|发布到|发版/i, "部署 / 上线"],
-  [/\brm\s+-[a-z]*r[a-z]*\s+(\/|~|\$HOME)(\s|$)/i, "删除根目录或家目录"],
-  [/\b(drop|truncate)\s+(table|database|schema)\b/i, "删库 / 删表"],
-  [/删除(线上|生产|远端)?数据|清空(数据库|表|桶)/, "删除数据"],
-  [/对外(发送|发布)|发(邮件|消息)给(客户|用户|外部)/, "对外发消息"],
+/**
+ * 部署 / 上线只认「发到环境」的动作，不认提到这个词：`隔离部署`、`部署目录`、
+ * `部署后跑测试`、`部署在 /data/...` 都不算（在代码目录里复制一份跑实验不是上线）。
+ */
+const DEPLOY_TARGET = "生产|线上|正式|预发|灰度|测试|staging|prod|production|服务器|集群|k8s";
+const DEPLOY_NOUN_TAIL = "目录|路径|脚本|计划|方案|流程|文档|说明|配置|方式|位置|机器|时间|在|后|前|时|完";
+const DEPLOY = new RegExp([
+  // 动作 + 目标环境：部署到生产 / 发布到线上 / 推到线上 / 上线到灰度
+  `(?:部署|发布|上线|发版|推)[^。；;，,\\n]{0,10}?(?:到|至|进|上)[^。；;，,\\n]{0,10}?(?:${DEPLOY_TARGET})`,
+  // 祈使语气，没写目标也算：改完直接上线 / 然后发版 / 上线吧
+  `(?:直接|马上|立刻|现在就|现在|今天|明天|今晚|改完|做完|然后|接着|随后|确认后|准备|帮我|给我|记得|那就)\\s*(?:部署|发布|上线|发版)(?!${DEPLOY_NOUN_TAIL})`,
+  `(?:部署|发布|上线|发版)吧`,
+  // 英文命令式：deploy to prod（`deploy dir` 这类名词用法不算）
+  `\\bdeploy(?:ment)?\\b(?!\\s+(?:dir|directory|path|script|folder|plan|config|docs?))`,
+].join("|"), "i");
+
+// label 会直接拼进「团队下一步要**{label}**」，写成动宾短语
+const IRREVERSIBLE: { re: RegExp; label: string }[] = [
+  { re: /\bgit\s+push\b/i, label: "把代码推送到远端仓库（git push）" },
+  { re: /\b(kubectl|helm)\s+(apply|delete|upgrade|install|rollout|scale)\b/i, label: "改动线上集群" },
+  { re: DEPLOY, label: "部署上线" },
+  { re: /\brm\s+-[a-z]*r[a-z]*\s+(\/|~|\$HOME)(\s|$)/i, label: "删除根目录或家目录" },
+  { re: /\b(drop|truncate)\s+(table|database|schema)\b/i, label: "删库或删表" },
+  { re: /删除(线上|生产|远端)?数据|清空(数据库|表|桶)/, label: "删除数据" },
+  { re: /对外(发送|发布)|发(邮件|消息)给(客户|用户|外部)/, label: "对外发消息" },
 ];
 const NEGATION = /(不要|不能|别|禁止|不得|勿|切勿|无需|不用|don't|do not|never|no)\s*$/i;
 
+export interface IrreversibleHit {
+  /** 动宾短语，例如「部署上线」 */
+  label: string;
+  /** 命中的原文 */
+  phrase: string;
+  /** 触发词所在的那一句（去掉列表符号和加粗），给人上下文 */
+  excerpt: string;
+}
+
+/** 取命中位置所在的一句；过长时以触发词为中心开窗，保证问话里看得到它 */
+function sentenceAround(text: string, at: number, len: number, max = 140): string {
+  const stop = (ch: string) => ch === "。" || ch === "；" || ch === ";" || ch === "\n";
+  let s = at, e = at + len;
+  while (s > 0 && at - s < 60 && !stop(text[s - 1])) s--;
+  while (e < text.length && e - (at + len) < 60 && !stop(text[e])) e++;
+  const raw = text.slice(s, e).replace(/[ \t]+/g, " ");
+  const tidy = (t: string) => t.replace(/\*\*/g, "").replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim();
+  if (raw.length <= max) return tidy(raw);
+  const start = Math.max(0, Math.min(at - s - Math.floor(max / 3), raw.length - max));
+  return (start > 0 ? "…" : "") + tidy(raw.slice(start, start + max)) + (start + max < raw.length ? "…" : "");
+}
+
 /** First irreversible operation a text asks for (negated mentions like "不要 git push" don't count) */
-export function irreversibleHit(text: string): string | undefined {
-  for (const [re, label] of IRREVERSIBLE) {
+export function irreversibleHit(text: string): IrreversibleHit | undefined {
+  for (const { re, label } of IRREVERSIBLE) {
     const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
     for (const m of text.matchAll(g)) {
-      const before = text.slice(Math.max(0, (m.index ?? 0) - 10), m.index ?? 0);
-      if (!NEGATION.test(before)) return label;
+      const at = m.index ?? 0;
+      const before = text.slice(Math.max(0, at - 10), at);
+      if (NEGATION.test(before)) continue;
+      return { label, phrase: m[0], excerpt: sentenceAround(text, at, m[0].length) };
     }
   }
   return undefined;
