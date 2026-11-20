@@ -582,6 +582,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
     "- 长作业（训练、批处理）让 worker 后台跑并报 pid 和日志，然后 `[[wait]]`；等的时候盯着，跑偏了就 `[[instruct]]` 让它停掉改。",
     "- 能自己定的事别问人；只有不可逆（推送、部署、删数据、对外发消息）、高成本或目标本身有歧义才 `[[ask]]`。",
     "- 收尾 `[[finish]]` + 一句话结论，第一行照实写 outcome=achieved / negative / mixed——否定结论（假设不成立、没达标）也是有效收尾，群里会如实标出来；放弃 `[[abort]]` + 原因和试过什么。",
+    "- 收尾 / 放弃前，先让 worker 停掉它起的后台作业（尤其远端机器上的：任务结束时 orc 只会停本机从工作区起的进程，管不到远端）；还要保留的作业在结论里写明。",
   ].join("\n"));
   return out.join("\n\n");
 }

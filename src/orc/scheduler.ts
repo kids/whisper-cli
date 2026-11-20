@@ -18,6 +18,7 @@ import { childStartStage, decideAccept, decideAfterAttempt, decideParent, depsGa
 import { parseRoleOutput, lastProgressLine } from "./output";
 import { buildBriefPrompt, buildReplanPrompt, buildStagePrompt } from "./prompts";
 import { LoopEngine, rebindUnavailableRoles, type LoopOptions } from "./loop";
+import { reapStrays } from "./reap";
 import type { Executor } from "./runner";
 import type { OrcStore } from "./store";
 import type { Attempt, CliName, Effect, LaunchPayload, NotifyPayload, ResolvedPreset, ResolvedRole, Task } from "./types";
@@ -61,6 +62,7 @@ export class Orchestrator {
     this.loop = new LoopEngine(store, exec, {
       ...opts.loop, orcHome: opts.orcHome, instructionsFor: opts.instructionsFor, onProgress: opts.onProgress,
       ensureWorktree: (t) => this.prepareWorktree(t),
+      onEnded: (id) => this.reap(id),
     });
   }
 
@@ -108,7 +110,31 @@ export class Orchestrator {
       if (r.taskId === taskId) { r.cancelled = true; this.exec.stop(r.sessionKey, r.cli); }
     }
     this.emitProgress(taskId);
+    // after the agent itself has been killed (runner: SIGTERM, SIGKILL at +5s), so it isn't reported as a stray
+    if (stoppable) this.reap(taskId, REAP_AFTER_STOP_MS);
     return true;
+  }
+
+  /**
+   * A task ended: stop the background jobs it left running from its worktree (processes only —
+   * worktree, branch, logs and artifacts all stay). Tells the chat what was stopped.
+   */
+  reap(taskId: number, delayMs = 0): void {
+    if (process.env.ORC_REAP === "0") return;
+    const run = () => {
+      const t = this.store.getTask(taskId);
+      if (!t?.worktree || !["ready", "failed", "dropped"].includes(t.status)) return; // resumed meanwhile
+      const strays = reapStrays(t.worktree);
+      if (!strays.length) return;
+      console.log(`[orc] #${taskId} ended: stopped ${strays.length} leftover process(es): ${strays.map((s) => s.pid).join(",")}`);
+      this.store.addEffect("notify", {
+        taskId, kind: "info",
+        text: `任务已结束，顺手停掉了它留在后台的 ${strays.length} 个进程（文件、日志和产物都还在）：\n${strays.slice(0, 5).map((s) => `- \`${clipText(s.cmd, 100)}\``).join("\n")}${strays.length > 5 ? "\n- …" : ""}`,
+      } satisfies NotifyPayload);
+    };
+    // best-effort: cleanup must never take the scheduler down (e.g. the store closed meanwhile)
+    const safe = () => { try { run(); } catch (e) { console.error(`[orc] reap #${taskId}:`, (e as Error).message); } };
+    if (delayMs > 0) { const tm = setTimeout(safe, delayMs); tm.unref?.(); } else safe();
   }
 
   /**
@@ -603,6 +629,7 @@ export class Orchestrator {
   /** Persist a core decision (must run inside store.tx) */
   private applyDecision(task: Task, d: Decision): void {
     this.store.updateTask(task.id, d.patch as Partial<Task>);
+    if (d.patch.status && ["ready", "failed", "dropped"].includes(d.patch.status)) this.reap(task.id);
     for (const l of d.launches) this.store.addEffect("launch", l);
     for (const n of d.notifies) {
       // a child waiting on a human: say what else is held up by it
@@ -676,6 +703,7 @@ export class Orchestrator {
         this.store.updateTask(c.id, { status: "dropped", progress: "父任务已结束，不再执行" });
       });
       this.emitProgress(c.id);
+      this.reap(c.id);
       out.orphans++;
     }
 
@@ -734,6 +762,7 @@ export class Orchestrator {
 }
 
 const DAY_MS = 86_400_000;
+const REAP_AFTER_STOP_MS = 8000;
 const SWEEP_EVERY_MS = Number(process.env.ORC_SWEEP_MIN || 10) * 60_000;
 /** Waiting on a human this long → one reminder in the chat */
 const REMIND_MS = Number(process.env.ORC_REMIND_DAYS || 1) * DAY_MS;

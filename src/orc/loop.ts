@@ -46,6 +46,8 @@ export interface LoopOptions {
   concurrency?: number;
   /** how long a verify command may run */
   verifyTimeoutMs?: number;
+  /** the task reached ready / failed (finish / abort): clean up what it left running */
+  onEnded?: (taskId: number) => void;
 }
 
 export interface LoopRunEvent {
@@ -781,6 +783,9 @@ export class LoopEngine {
       if (o.wakeIfInbox && l.inbox.length && !next.some((x) => !x.delayMs)) this.enqueue(task.id, "human");
     });
     this.emit(task.id);
+    if (o.status && FINAL.includes(o.status) && this.store.getTask(task.id)?.status === o.status) {
+      try { this.opts.onEnded?.(task.id); } catch { /* cleanup must not break the loop */ }
+    }
   }
 
   private async run(task: Task, role: ResolvedRole, prompt: string, o: { key: string; readOnly: boolean; resumeSessionId?: string; n: number; label: string; tag?: string }): Promise<RunResult & { interrupted: boolean }> {
