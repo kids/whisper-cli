@@ -678,7 +678,7 @@ export class Orchestrator {
         this.store.updateTask(t.id, { progress: `等你决定 ${days(idle)} 天没人回复，已自动关掉` });
         this.store.addEffect("notify", {
           taskId: t.id, kind: "info",
-          text: `等你决定已经 ${days(idle)} 天没人回复，已自动关掉。${cur.branch ? `分支 \`${cur.branch}\` 和改动都还在，` : ""}想接着做就在它的卡片下说「再试一次」。`,
+          text: `等你决定已经 ${days(idle)} 天没人回复，已自动关掉。${cur.branch ? `分支 \`${cur.branch}\` 和改动都还在，` : ""}想接着做就引用这条消息回「再试一次」。`,
         } satisfies NotifyPayload);
         delete state.reminded[t.id]; dirty = true;
         this.emitProgress(t.id);
@@ -692,7 +692,7 @@ export class Orchestrator {
             `这个团队任务停下来等你决定，已经 ${days(idle)} 天没动了：`,
             why,
             "",
-            `在它的卡片下回复：「再试一次」接着做，或「停掉」不要了。${days(EXPIRE_MS)} 天没人理会就自动关掉（至少在这条提醒 ${days(GRACE_MS)} 天之后），分支和改动都会保留。`,
+            `引用这条消息回复：「再试一次」接着做，或「停掉」不要了（直接在群里说要带上任务名）。${days(EXPIRE_MS)} 天没人理会就自动关掉（至少在这条提醒 ${days(GRACE_MS)} 天之后），分支和改动都会保留。`,
           ].join("\n"),
         } satisfies NotifyPayload);
         state.reminded[t.id] = now; dirty = true;

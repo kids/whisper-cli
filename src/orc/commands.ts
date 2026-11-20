@@ -108,7 +108,7 @@ export function tidyAfterSubmit(o: ReturnType<typeof orcOf>, chatId: string, new
     .filter((t) => !t.parentId && t.id !== newId && now - t.updatedAt > STALE_TASK_MS);
   if (stale.length) {
     const days = (t: Task) => Math.floor((now - t.updatedAt) / 86_400_000);
-    out.push(`📌 本群还挂着 ${stale.length} 个很久没动的团队任务：${stale.slice(0, 3).map((t) => `「${clip(t.title, 24)}」（${days(t)} 天没动）`).join("、")}${stale.length > 3 ? " 等" : ""}。不需要了就在它的卡片下回「停掉」。`);
+    out.push(`📌 本群还挂着 ${stale.length} 个很久没动的团队任务：${stale.slice(0, 3).map((t) => `「${clip(t.title, 24)}」（${days(t)} 天没动）`).join("、")}${stale.length > 3 ? " 等" : ""}。不需要了就说「停掉 <任务名>」。`);
   }
   return out.join("\n");
 }
@@ -288,7 +288,43 @@ export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): 
     return;
   }
   recordTurn(chatId, "lead", describeAction(act));
+  if (act.action === "stop") {
+    const ask = stopTargetUnclear(o, chatId, act.task, ev.text, threadTask);
+    if (ask) { recordTurn(chatId, "lead", ask); await say(ask); return; }
+  }
   await executeLeadAction(h, chatId, act, ev.text);
+}
+
+/**
+ * Stopping kills a run and can't be undone from chat cheaply, so the target must be unambiguous:
+ * the message quotes that task's card / notice, names it (#id or title), or it is the chat's only
+ * open task. Otherwise ask which one (a bare 「停掉」 once stopped the running task instead of the
+ * reminded one). Returns the question, or undefined when the stop may proceed.
+ */
+export function stopTargetUnclear(o: ReturnType<typeof orcOf>, chatId: string, taskId: number, text: string, threadTask?: number): string | undefined {
+  if (threadTask === taskId) return undefined;
+  const t = o.store.getTask(taskId);
+  if (!t) return undefined;
+  const s = (text || "").replace(/\s+/g, "");
+  const norm = (x: string) => x.replace(/[\s「」『』"“”'`，,。.：:、]/g, "");
+  const title = norm(t.title);
+  // any 5-char run of the title counts as naming it (「停掉因果库召回那个」 → 「因果库召回与开放域覆盖对比」)
+  const win = Math.min(5, title.length);
+  const said = norm(s);
+  const named = new RegExp(`#\\s?${taskId}\\b|任务\\s?#?${taskId}\\b`).test(text || "")
+    || (title.length >= 4 && Array.from({ length: title.length - win + 1 }, (_, i) => title.slice(i, i + win)).some((w) => said.includes(w)));
+  if (named) return undefined;
+  const open = o.store.listTasks({ chatId, status: ["queued", "running", "waiting", "waiting_children", "blocked"], limit: 50 }).filter((x) => !x.parentId);
+  if (threadTask === undefined && open.length <= 1) return undefined;
+  const word = (x: Task) => (x.status === "blocked" || x.status === "waiting_children" ? "等你决定" : "进行中");
+  return [
+    threadTask !== undefined
+      ? `你引用的是「${o.store.getTask(threadTask)?.title ?? "另一个任务"}」，但我理解成了要停「${t.title}」，先不动，确认一下要停哪个：`
+      : `群里有 ${open.length} 个没结束的团队任务，没说停哪个，我先不动：`,
+    ...open.slice(0, 6).map((x) => `- 「${x.title}」（${word(x)}）`),
+    "",
+    "引用那个任务的卡片或提醒回「停掉」，或者直接说「停掉 <任务名>」。",
+  ].join("\n");
 }
 
 /** One line for the shared transcript */

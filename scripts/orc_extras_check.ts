@@ -135,5 +135,14 @@ check("bindChat records serving bot", getProfile("oc_bind").bot === "bot-b");
 check("binding persisted", JSON.parse(readFileSync(process.env.ORC_CHATS_PATH!, "utf8")).oc_bind.bot === "bot-b");
 check("hasOrcState false on fresh ORC_HOME", hasOrcState() === false && !existsSync(join(process.env.ORC_HOME!, "orc.db")));
 
+// --- notices: quoting a 「需要你决定」/ reminder message points at its task ---
+{
+  const { setNotice, taskForCard } = await import("../src/orc/chat");
+  setNotice("om_notice_1", 2);
+  check("notice message → task", taskForCard("om_notice_1") === 2);
+  check("unknown message → undefined", taskForCard("om_other") === undefined);
+  check("notices persisted", JSON.parse(readFileSync(join(process.env.ORC_HOME!, "notices.json"), "utf8")).om_notice_1 === 2);
+}
+
 console.log(failed ? `\n${failed} FAILED` : "\nall passed");
 process.exit(failed ? 1 : 0);

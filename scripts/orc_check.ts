@@ -636,6 +636,26 @@ async function e2e() {
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
   // H: finished-task headlines follow what a loop concluded; lead submit carries supersedes
+  // X: a bare 「停掉」 must not stop the running task when another one was just reminded (11-20 incident)
+  {
+    const { dir, repo, store, orc } = setup();
+    const { stopTargetUnclear } = await import("../src/orc/commands");
+    const chat = "oc_x";
+    const old = orc.submit({ goal: "old", repo, preset: devPreset, chatId: chat, title: "统一抽取构造测试池" });
+    store.updateTask(old.id, { status: "blocked" });
+    const live = orc.submit({ goal: "live", repo, preset: devPreset, chatId: chat, title: "因果库召回与开放域覆盖对比" });
+    store.updateTask(live.id, { status: "running" });
+    const q = stopTargetUnclear(orc, chat, live.id, "停掉");
+    check("X bare 停掉 with 2 open tasks → ask, not stop", !!q && q.includes("统一抽取构造测试池") && q.includes("因果库召回"), q);
+    check("X quoting the reminded task → its stop proceeds", stopTargetUnclear(orc, chat, old.id, "停掉", old.id) === undefined);
+    const mis = stopTargetUnclear(orc, chat, live.id, "停掉", old.id);
+    check("X quoting task A but lead picked B → ask", !!mis && /你引用的是「统一抽取构造测试池」/.test(mis), mis);
+    check("X naming the task → proceeds", stopTargetUnclear(orc, chat, live.id, "停掉因果库召回那个") === undefined);
+    check("X #id → proceeds", stopTargetUnclear(orc, chat, live.id, `停掉 #${live.id}`) === undefined);
+    store.updateTask(old.id, { status: "dropped" });
+    check("X only one open task → proceeds", stopTargetUnclear(orc, chat, live.id, "停掉") === undefined);
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
   {
     const { readyHead } = await import("../src/orc/chat");
     const loop = { kind: "loop" } as Task, pipe = { kind: "pipeline" } as Task;

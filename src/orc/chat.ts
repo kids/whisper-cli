@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import type { ImClient } from "../platform/types";
 import type { AgentConfig } from "../types";
 import { formatMemory, joinInstructions } from "../memory";
+import { recordTurn } from "../recent";
 import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
 import { acceptable } from "./core";
@@ -110,10 +111,29 @@ function setCard(taskId: number, messageId: string): void {
   renameSync(cardsPath() + ".tmp", cardsPath());
 }
 
-/** Task whose progress card is this message (thread replies under a card belong to that task) */
+// notice message id → taskId: a human quoting a 「需要你决定」/ reminder message is talking about that task
+let notices: Map<string, number> | null = null;
+const noticesPath = () => resolve(ORC_HOME, "notices.json");
+function noticeMap(): Map<string, number> {
+  if (notices) return notices;
+  try { notices = new Map(Object.entries(JSON.parse(readFileSync(noticesPath(), "utf8"))).map(([k, v]) => [k, Number(v)])); }
+  catch { notices = new Map(); }
+  return notices;
+}
+export function setNotice(messageId: string, taskId: number): void {
+  const m = noticeMap();
+  m.set(messageId, taskId);
+  const keep = [...m.entries()].slice(-1000);
+  notices = new Map(keep);
+  mkdirSync(ORC_HOME, { recursive: true });
+  writeFileSync(noticesPath() + ".tmp", JSON.stringify(Object.fromEntries(keep)));
+  renameSync(noticesPath() + ".tmp", noticesPath());
+}
+
+/** Task this message belongs to: its progress card, or a notice (提醒 / 需要你决定 …) posted about it */
 export function taskForCard(messageId: string): number | undefined {
   for (const [id, mid] of cardMap()) if (mid === messageId) return id;
-  return undefined;
+  return noticeMap().get(messageId);
 }
 
 /** Called once per bot group at startup */
@@ -333,7 +353,13 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
       const head = n.kind === "ready" ? readyHead(t, n.outcome)
         : { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
-      await f.sendMarkdown(t.chatId, `**${head} · ${taskLabel(t)}**\n\n${n.text}`);
+      const body = `**${head} · ${taskLabel(t)}**\n\n${n.text}`;
+      // posted as its own message and remembered: quoting it routes the reply to this task (taskForCard)
+      const mid = body.length <= 3800 ? await f.sendCardAndGetId(t.chatId, body).catch(() => undefined) : undefined;
+      if (mid) setNotice(mid, t.id);
+      else await f.sendMarkdown(t.chatId, body);
+      // the shared transcript: the lead / single agent must know what the bot just said, and about which task
+      recordTurn(t.chatId, "lead", `【${head.replace(/^\S+\s*/, "")} · ${t.title}】${clip(n.text.replace(/\s+/g, " "), 300)}`);
     },
     loop: {
       watchBot: (t) => {
@@ -511,12 +537,13 @@ export function buildLeadPrompt(c: {
     `本群任务：\n${tasks}`,
     c.pending ? `待用户确认的提议：${c.pending}` : "",
     c.history ? `最近对话：\n${c.history}` : "",
-    c.threadTask ? `（这条消息是在「${c.tasks.find((t) => t.id === c.threadTask)?.title ?? "某个任务"}」卡片的回复串里发的，多半是对这个任务说的）` : "",
+    c.threadTask ? `（这条消息是引用「${c.tasks.find((t) => t.id === c.threadTask)?.title ?? "某个任务"}」的卡片或提醒发的，就是对这个任务说的；停掉 / 再试一次 / 接受都指它，任务号 ${c.threadTask}）` : "",
     `用户消息：\n${c.userText}`,
     "",
     "决策（先看这条再选动作）：",
     "- 任务行写着「正在等人回答」→ 默认 `[[answer]]`，把人的原话 / 纠偏 / 新方向原样带上；「继续…」「接着做…」「继续团队任务：…」都是 answer，绝不是 stop",
     "- `[[stop]]` 只认明确放弃：放弃 / 停掉 / 终止 / 算了 / 别做了 / 收工别训了；没有这些词就不要 stop",
+    "- 停哪个要有依据：引用了某任务的卡片 / 提醒，或说了任务名；「最近对话」里刚提醒过某个任务等人决定，人随后一句「停掉」多半指它。群里有多个没结束的任务又分不清时，用 `[[reply]]` 问停哪个",
     "- 人要在旧任务上继续做更大或相邻的目标 → 优先 answer（解阻续跑）或 attach；只有旧目标已明确作废、且人要另起炉灶时才 stop，且必须紧跟 submit 接活，不能只 stop",
     "- 意图不清 → `[[reply]]` 问一句，不要猜 stop",
     "",
