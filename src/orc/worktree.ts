@@ -10,7 +10,7 @@
 // or a readonly check will wipe worker edits mid-flight (task #2 abort).
 // =============================================================================
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, lstatSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -60,13 +60,48 @@ export function branchName(title: string, id: number): string {
   return `orc/${taskSlug(title, id)}`;
 }
 
+function isIgnored(cwd: string, rel: string): boolean {
+  try {
+    execFileSync("git", ["check-ignore", "-q", rel], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 任务产物不应留在会被清理的 worktree 里：
+ * 若仓库把 `tmp/` 忽略，就把 worktree 的 `tmp` 软链到主仓库 `tmp/orc/<slug>/`，
+ * 这样相对路径 `tmp/...` 直接落在主仓库，worktree 删除也不丢数据。
+ */
+export function ensureArtifactLink(repo: string, path: string): void {
+  if (!isIgnored(repo, "tmp")) return;
+  const wtTmp = resolve(path, "tmp");
+  try {
+    if (lstatSync(wtTmp)) return;   // 已存在（真实目录或软链）就不动
+  } catch {
+    // 不存在，继续
+  }
+  const shared = resolve(repo, "tmp", "orc", basename(path));
+  mkdirSync(shared, { recursive: true });
+  try {
+    symlinkSync(shared, wtTmp, "dir");
+  } catch {
+    // 并发/权限问题不影响主流程
+  }
+}
+
 /** Create (or reuse) the task worktree on its own branch starting at `base` */
 export function ensureWorktree(repo: string, path: string, branch: string, base: string): void {
-  if (existsSync(resolve(path, ".git"))) return;
+  if (existsSync(resolve(path, ".git"))) {
+    ensureArtifactLink(repo, path);
+    return;
+  }
   mkdirSync(resolve(path, ".."), { recursive: true });
   const exists = git(repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { allowFail: true });
   if (exists) git(repo, ["worktree", "add", path, branch]);
   else git(repo, ["worktree", "add", "-b", branch, path, base]);
+  ensureArtifactLink(repo, path);
 }
 
 /** Merge extra dependency branches into the worktree; returns conflict message or undefined */
@@ -111,7 +146,7 @@ export function commitAll(wt: string, message: string): string | undefined {
 export function resetHard(wt: string): string {
   const files = statusPorcelain(wt);
   git(wt, ["reset", "--hard", "-q"]);
-  git(wt, ["clean", "-fdq"]);
+  git(wt, ["clean", "-fdq", "-e", "tmp"]);   // 保留 tmp 软链（产物在主仓库）
   return files;
 }
 

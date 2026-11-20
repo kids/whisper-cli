@@ -82,6 +82,7 @@ export interface PromptContext {
 export function buildStagePrompt(c: PromptContext): string {
   const { task, stage, role } = c;
   const total = task.preset.stages.length;
+  const slug = (task.branch || "").replace(/^orc\//, "");
   const out: string[] = [];
   out.push(`# orc 任务 #${task.id} · 阶段 ${stage.id}（${task.stageIdx + 1}/${total}）· 你的角色：${role.name}`);
   if (c.launch.recover) {
@@ -92,7 +93,8 @@ export function buildStagePrompt(c: PromptContext): string {
   out.push(`## 目标\n${task.goal}`);
   if (task.parentId) out.push(`（这是父任务 #${task.parentId} 拆出的子任务：${task.title}）`);
   out.push(`## 规格\n${task.spec || "（尚无规格）"}`);
-  out.push(`## 工作区\n当前目录是本任务专用的 git worktree（分支 \`${task.branch}\`，基线 \`${task.baseRef.slice(0, 12)}\`）。只在这里工作。`);
+  out.push(`## 工作区\n当前目录是本任务专用的 git worktree（分支 \`${task.branch}\`，基线 \`${task.baseRef.slice(0, 12)}\`）。代码改动只在这里工作。` +
+    `\n**产物落盘**：仓库忽略的 \`tmp/\` 已软链到主仓库 \`tmp/orc/${slug}/\`，数据、日志、中间结果直接写 \`tmp/...\` 就会落在主仓库；不要把大文件写进 git 跟踪目录，也不要留在 worktree 里。`);
 
   if (c.history.length) {
     out.push(`## 之前阶段的结论\n` + c.history.map(historyLine).join("\n"));
