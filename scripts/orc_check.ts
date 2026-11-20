@@ -661,6 +661,23 @@ async function e2e() {
     await orc.stop(t.id);
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
+  // C2: 「继续」 on a parent that already failed (child failed, sibling skipped) brings the group back
+  {
+    const { dir, repo, store, exec, orc } = setup();
+    exec.plan = '{"spec":"two parts","subtasks":[{"title":"part A","spec":"A"},{"title":"part B","spec":"B","deps":[0]}]}';
+    const t = orc.submit({ goal: "big", repo, preset: devPreset, chatId: "oc_c2" });
+    const tick = () => (orc as any).tick();
+    for (let i = 0; i < 3000 && !store.getTask(3); i++) { await tick(); await sleep(5); }
+    store.updateTask(2, { status: "failed", progress: "评审连续 3 次运行失败（spawn E2BIG）" });
+    store.updateTask(3, { status: "dropped", progress: "跳过：前置任务 part A 已放弃" });
+    store.updateTask(t.id, { status: "failed", progress: "子任务没有全部完成（0/2）" });
+    const went = orc.continueTask(t.id, "继续团队任务");
+    check("C2 failed child re-runs", went.join() === "part A" && store.getTask(2)!.status === "running", { went, s: store.getTask(2)!.status });
+    check("C2 skipped sibling re-queued", store.getTask(3)!.status === "running", store.getTask(3)!.status);
+    check("C2 parent waits on children again", store.getTask(t.id)!.status === "waiting_children", store.getTask(t.id)!.status);
+    await orc.stop(t.id);
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
   // X: a bare 「停掉」 must not stop the running task when another one was just reminded (11-20 incident)
   {
     const { dir, repo, store, orc } = setup();

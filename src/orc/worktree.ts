@@ -139,8 +139,42 @@ export function enforceReadonly(wt: string, _beforePorcelain: string, commitMsg:
   };
 }
 
+/**
+ * `git diff --stat` has one line per file: a task that commits a data snapshot (1300 files)
+ * produced a 100 KB list. Past `maxLines`, keep the biggest files and fold the rest per directory.
+ */
+export function compactStat(stat: string, maxLines = 60): string {
+  const lines = (stat || "").split("\n").filter((l) => l.trim());
+  if (lines.length <= maxLines + 1) return stat;
+  const summary = /files? changed/.test(lines[lines.length - 1]) ? lines.pop()! : "";
+  const rows = lines.map((l) => {
+    const [path, rest = ""] = l.split("|");
+    const n = Number(/(\d+)/.exec(rest)?.[1] ?? 0);
+    return { l, path: path.trim(), n };
+  });
+  const keep = [...rows].sort((a, b) => b.n - a.n).slice(0, Math.floor(maxLines / 2));
+  const kept = new Set(keep);
+  const byDir = new Map<string, { files: number; n: number }>();
+  for (const r of rows) {
+    if (kept.has(r)) continue;
+    const dir = r.path.includes("/") ? r.path.slice(0, r.path.lastIndexOf("/")) : ".";
+    const d = byDir.get(dir) ?? { files: 0, n: 0 };
+    d.files++; d.n += r.n;
+    byDir.set(dir, d);
+  }
+  const dirs = [...byDir.entries()].sort((a, b) => b[1].files - a[1].files);
+  const shown = dirs.slice(0, Math.ceil(maxLines / 2));
+  return [
+    ...rows.filter((r) => kept.has(r)).map((r) => r.l),
+    `（另有 ${rows.length - keep.length} 个文件，按目录汇总；看全部用 git diff --stat）`,
+    ...shown.map(([d, v]) => ` ${d}/  ${v.files} 个文件，${v.n} 行改动`),
+    dirs.length > shown.length ? ` …其余 ${dirs.length - shown.length} 个目录` : "",
+    summary,
+  ].filter(Boolean).join("\n");
+}
+
 export function diffSince(wt: string, base: string, maxChars = 30_000): { stat: string; diff: string; truncated: boolean } {
-  const stat = git(wt, ["diff", "--stat", `${base}..HEAD`], { allowFail: true });
+  const stat = compactStat(git(wt, ["diff", "--stat=200", `${base}..HEAD`], { allowFail: true }));
   const full = git(wt, ["diff", `${base}..HEAD`], { allowFail: true });
   const truncated = full.length > maxChars;
   return { stat, diff: truncated ? full.slice(0, maxChars) + "\n… (diff 已截断，用 git diff 查看全文)" : full, truncated };

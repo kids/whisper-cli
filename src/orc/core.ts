@@ -124,10 +124,14 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
         ? `连续 ${loops[k]} 次${outcome.kind === "run_error" ? `运行失败（${outcome.error.slice(0, 200)}）` : selfStopped ? "中途被打断" : "停下时没给结论"}，期间没有任何新改动`
         : `已续跑 ${total} 次仍没收尾`;
       d.patch = { status: "failed", loops, progress: `${name}${what}` };
+      // spawn errors (E2BIG, ENOENT…) are whisper's own: the agent never started, the task is fine
+      const ours = outcome.kind === "run_error" && /spawn|E2BIG|ENOENT|EACCES/i.test(outcome.error);
       d.notifies.push({
         taskId: task.id,
         kind: "failed",
-        text: `${name}${what}。这不是任务本身的问题，是上游模型或 whisper 出了故障，已停下。修好后说「重试」会从这里接着跑。`,
+        text: ours
+          ? `${name}${what}。agent 根本没能启动，是 whisper 自己的问题，任务本身和已做的改动都没事，已停下。修好后说「继续团队任务」会从这里接着跑。`
+          : `${name}${what}。这不是任务本身的问题，是上游模型或 whisper 出了故障，已停下。修好后说「重试」会从这里接着跑。`,
       });
       return d;
     }

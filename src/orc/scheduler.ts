@@ -150,10 +150,20 @@ export class Orchestrator {
       if (task.status === "blocked" && l?.pendingAsk) { this.loop.answer(taskId, undefined, note || "继续", note || "继续", prefer); return [task.title]; }
       return this.loop.resume(taskId, note, prefer) ? [task.title] : [];
     }
-    if (task.status === "waiting_children") {
-      return this.store.listTasks({ parentId: taskId })
+    const kids = this.store.listTasks({ parentId: taskId });
+    if (kids.length && ["waiting_children", "failed", "blocked"].includes(task.status)) {
+      // stuck / failed children re-run; ones skipped only because a dependency failed are re-queued
+      // too (their deps gate waits for the re-run); then the parent waits on them again
+      const went = kids
         .filter((c) => ["blocked", "failed", "waiting_children"].includes(c.status))
         .flatMap((c) => this.continueTask(c.id, note, prefer));
+      if (!went.length) return [];
+      for (const c of kids.filter((x) => x.status === "dropped" && x.progress.startsWith("跳过"))) {
+        if (this.retry(c.id, undefined, prefer)) this.store.updateTask(c.id, { progress: "等前置任务" });
+      }
+      if (task.status !== "waiting_children") this.store.updateTask(taskId, { status: "waiting_children", progress: `继续：${went.join("、")}` });
+      this.emitProgress(taskId);
+      return went;
     }
     return this.retry(taskId, note, prefer) ? [task.title] : [];
   }

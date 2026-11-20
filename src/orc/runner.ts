@@ -4,7 +4,9 @@
 // Bypasses AgentRunner.dispatchAi (which is bound to one CLI per bot group) so
 // critic can run on a different CLI/model than the implementer (002 §4.2).
 // =============================================================================
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import type { AgentConfig } from "../types";
 import { runCodebuddy, setCodebuddySession, clearCodebuddySession, getCodebuddySession, stopCodebuddyRun } from "../ai/codebuddy";
 import { runCodex, setCodexSession, clearCodexSession, getCodexSession, stopCodexRun } from "../ai/codex";
@@ -94,6 +96,34 @@ export function classifyResult(text: string): Pick<RunResult, "timedOut" | "canc
 
 export interface ExecutorBins { codebuddyBin?: string; codexBin?: string; claudeBin?: string; cursorAgentBin?: string; dshBin?: string }
 
+/**
+ * CLIs get the prompt as one argv string, and Linux caps a single argument at 128 KiB
+ * (MAX_ARG_STRLEN): past that, spawn fails with E2BIG before the agent even starts — a review
+ * of a task that committed 1300 data files died that way three times in a row. Over the limit,
+ * the full prompt goes to a file and the argument carries its head, its tail (where the output
+ * contract lives) and the path, with an instruction to read the whole file first.
+ */
+export const PROMPT_ARG_MAX = Number(process.env.ORC_PROMPT_ARG_MAX || 96 * 1024);
+export function fitPromptArg(prompt: string, sessionKey: string, dir = resolve(tmpdir(), "orc-prompts")): string {
+  if (Buffer.byteLength(prompt, "utf8") <= PROMPT_ARG_MAX) return prompt;
+  mkdirSync(dir, { recursive: true });
+  const file = resolve(dir, `${sessionKey.replace(/[^\w.-]+/g, "_").slice(0, 60)}-${Date.now()}.md`);
+  writeFileSync(file, prompt);
+  const head = prompt.slice(0, 6000);
+  const tail = prompt.slice(-5000);
+  return [
+    `【任务说明太长，完整版在文件 \`${file}\` 里（${Math.round(Buffer.byteLength(prompt, "utf8") / 1024)} KB）。先用读文件工具把它从头到尾读完再动手；下面只是开头和结尾的摘录，以文件为准。】`,
+    "",
+    "----- 开头摘录 -----",
+    head,
+    "",
+    "（……中间省略，见文件……）",
+    "",
+    "----- 结尾摘录 -----",
+    tail,
+  ].join("\n");
+}
+
 export class CliExecutor implements Executor {
   constructor(private agents: AgentConfig[], private bins: ExecutorBins) {}
 
@@ -130,6 +160,7 @@ export class CliExecutor implements Executor {
   }
 
   async run(req: RunRequest): Promise<RunResult> {
+    req = { ...req, prompt: fitPromptArg(req.prompt, req.sessionKey) };
     const key = req.sessionKey;
     const onEvent = (ev: any) => { const p = eventToProgress(ev); if (p) req.onProgress?.(p); };
     const onStreamUpdate = (t: string) => req.onText?.(t);

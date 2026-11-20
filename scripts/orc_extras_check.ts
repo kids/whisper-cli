@@ -135,6 +135,24 @@ check("bindChat records serving bot", getProfile("oc_bind").bot === "bot-b");
 check("binding persisted", JSON.parse(readFileSync(process.env.ORC_CHATS_PATH!, "utf8")).oc_bind.bot === "bot-b");
 check("hasOrcState false on fresh ORC_HOME", hasOrcState() === false && !existsSync(join(process.env.ORC_HOME!, "orc.db")));
 
+// --- oversized prompts (spawn E2BIG, combinator 11-20): file fallback + compact diff stat ---
+{
+  const { fitPromptArg, PROMPT_ARG_MAX } = await import("../src/orc/runner");
+  const { compactStat } = await import("../src/orc/worktree");
+  const files = Array.from({ length: 1838 }, (_, i) => ` data/snapshots/rescan/item_${String(i).padStart(5, "0")}_${"x".repeat(40)}.json | 1 +`);
+  const stat = [...files, " 1838 files changed, 1838 insertions(+)"].join("\n");
+  const big = `# orc 任务\n\n## 本任务相对基线的改动\n${stat}\n\n## 输出约定（必须遵守）\n[[pass]] 一句话`;
+  check("fixture really is over the arg limit", Buffer.byteLength(big) > 128 * 1024, String(Buffer.byteLength(big)));
+  const fit = fitPromptArg(big, "orc#26#review", join(tmp, "prompts"));
+  const path = /`([^`]+\.md)`/.exec(fit)?.[1] ?? "";
+  check("big prompt → short arg + full file", Buffer.byteLength(fit) <= PROMPT_ARG_MAX && existsSync(path) && readFileSync(path, "utf8") === big, String(Buffer.byteLength(fit)));
+  check("output contract stays inline", fit.includes("输出约定") && fit.includes("先用读文件工具"));
+  check("small prompt untouched", fitPromptArg("hi", "k") === "hi");
+  const c = compactStat(stat);
+  check("1838-line stat compacted", c.split("\n").length < 100 && c.length < 8000 && /data\/snapshots\/rescan\/\s+\d+ 个文件/.test(c) && /1838 files changed/.test(c), `${c.split("\n").length} lines`);
+  check("short stat untouched", compactStat(" a.py | 3 +\n 1 file changed") === " a.py | 3 +\n 1 file changed");
+}
+
 // --- notices: quoting a 「需要你决定」/ reminder message points at its task ---
 {
   const { setNotice, taskForCard } = await import("../src/orc/chat");
