@@ -154,7 +154,7 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     const clears = task.feedback.startsWith(`【${stage.id} 未通过】`);
     if (next >= task.preset.stages.length) {
       d.patch = { ...d.patch, stageIdx: next, status: "ready", loops, feedback: clears ? "" : task.feedback, progress: p.summary || "全部阶段通过" };
-      d.notifies.push({ taskId: task.id, kind: "ready", text: p.summary || "全部阶段通过，等待验收" });
+      d.notifies.push({ taskId: task.id, kind: "ready", text: p.summary || "全部阶段通过" });
       return d;
     }
     d.patch = { ...d.patch, stageIdx: next, status: "running", loops, feedback: clears ? "" : task.feedback, progress: `${stage.id} 通过` };

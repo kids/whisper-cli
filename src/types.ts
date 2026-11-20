@@ -164,6 +164,8 @@ export interface AiResult {
   images?: AgentImage[];
   /** Files produced / mentioned by the agent */
   files?: AgentFile[];
+  /** The run was killed by a timeout (hard = total cap, stale = no output); text may hold partial work */
+  timedOut?: "hard" | "stale";
 }
 
 export interface TokenUsage {

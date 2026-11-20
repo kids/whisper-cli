@@ -1,6 +1,6 @@
 // Offline checks for src/orc/route.ts (message → single agent / lead) and [[task]] parsing.
 //   npx tsx scripts/route_check.ts
-import { extractTaskOps, formatTaskHint, routeMessage, type RouteCtx, type RouteTask } from "../src/orc/route";
+import { extractTaskOps, formatTaskHint, parseSupersedes, routeMessage, timeoutHandoffOp, type RouteCtx, type RouteTask } from "../src/orc/route";
 
 let failed = 0;
 const check = (name: string, ok: boolean, detail?: unknown) => {
@@ -126,6 +126,23 @@ console.log(`route cases: ${ok}/${cases.length}`);
   check("lines stripped, fenced kept", r.text.startsWith("这件事需要") && r.text.includes("in code block") && !/修复 slugify/.test(r.text), r.text);
   const h = formatTaskHint();
   check("hint explains protocol", h.includes("[[task]]") && h.includes("loop") && h.includes("[[watch]]"));
+  check("hint: decide → hand off this turn, no prep work", /这一轮就写 \[\[task\]\]/.test(h) && /硬时限/.test(h));
+  check("hint: supersedes explained", h.includes("supersedes"));
+}
+
+// [[task]] supersedes + hard-timeout handoff
+{
+  const r = extractTaskOps('[[task]] {"goal":"做覆盖对比","supersedes":[2,"#3",2,"x"]}');
+  check("supersedes parsed, deduped, junk dropped", JSON.stringify(r.ops[0].supersedes) === "[2,3]", r.ops[0]);
+  check("supersedes absent → undefined", extractTaskOps('[[task]] {"goal":"g"}').ops[0].supersedes === undefined);
+  check("parseSupersedes scalar", JSON.stringify(parseSupersedes("#7")) === "[7]");
+  const partial = "⏱️ 任务超过 30 分钟 硬上限，已被终止。\n\n---\n\n好，我明白了。\n\n---\n\nXXX 生成成功了：62 条";
+  const op = timeoutHandoffOp("跑偏了，要的是覆盖对比", partial, "跑偏了，要的是覆盖对比，越多越好的那种对比方式", "[用户] 之前的话");
+  check("handoff: loop preset", op.preset === "loop");
+  check("handoff: goal has user text + progress, no timeout notice", op.goal!.includes("跑偏了，要的是覆盖对比") && op.goal!.includes("XXX 生成成功了：62 条") && !op.goal!.includes("⏱️") && op.goal!.includes("之前的对话"), op.goal);
+  check("handoff: title clipped", (op.title ?? "").length <= 20, op.title);
+  const long = timeoutHandoffOp("q", "x".repeat(10_000));
+  check("handoff: progress tail-clipped", long.goal!.length < 5000 && long.goal!.includes("…"), long.goal!.length);
 }
 
 console.log(failed ? `\n${failed} FAILED` : "\nall passed");

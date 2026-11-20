@@ -30,7 +30,7 @@ const PROGRESS_CHARS = 120;
 
 export const STATUS_WORD: Record<string, string> = {
   queued: "排队", running: "进行中", waiting: "等外部作业", waiting_children: "子任务在跑",
-  ready: "已完成待验收", blocked: "等人决定", failed: "失败", dropped: "已终止", done: "已完成",
+  ready: "已完成", blocked: "等人决定", failed: "失败", dropped: "已终止", done: "已完成",
 };
 
 /** The slice of OrcStore this module needs (duck-typed so tests can fake it) */
@@ -164,7 +164,7 @@ function factsFromAttempt(src: FactsSource | undefined, task: Task): TaskFacts {
     status: task.status,
     statusWord: STATUS_WORD[task.status] ?? task.status,
     origin: task.origin === "agent" ? "agent" : "human",
-    progress: squash(task.progress, 400),
+    progress: squash(task.status === "ready" ? task.progress.replace(/[，,]\s*等待验收$/, "") : task.progress, 400),
     updatedAt: task.updatedAt,
     branch: task.branch,
     worktree: task.worktree,
@@ -232,6 +232,7 @@ export function renderTaskFacts(f: TaskFacts, audience: "lead" | "single", detai
     return `${line}\n  ⚠️ 卡在${f.stage?.label ?? "这一步"}上等人决定：${acts}；`
       + `问到细节（为什么没过、做到哪）就照上面答，别答“看不到”${detail}`;
   }
+  if (f.status === "ready") return `${line}\n  已收工：不占资源，也不需要人验收或停掉；接着改就 submit 新任务${detail}`;
   return line;
 }
 

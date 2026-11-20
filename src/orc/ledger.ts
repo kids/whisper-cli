@@ -79,6 +79,8 @@ export interface Ledger {
   verbosity: Verbosity;
   seq: { E: number; C: number; K: number };
   step: number;
+  /** set by [[finish]]: what the task concluded (headline of the result notice / close-out card) */
+  outcome?: LoopOutcome;
 }
 
 const MAX_OBS = 30;
@@ -213,8 +215,47 @@ export type LoopAction =
   | { action: "review"; focus?: string }
   | { action: "wait"; watch?: Record<string, unknown>; keep?: boolean; heartbeat?: string; reason?: string }
   | { action: "ask"; question: string; why: AskWhy }
-  | { action: "finish"; summary: string }
+  | { action: "finish"; summary: string; outcome?: LoopOutcome }
   | { action: "abort"; reason: string };
+
+/**
+ * What a finished loop concluded. A negative result is a legitimate finish (the question got
+ * answered), but the headline must not read "结果可用" when the answer is "不成立".
+ */
+export type LoopOutcome = "achieved" | "negative" | "mixed";
+
+const OUTCOME_WORDS: [RegExp, LoopOutcome][] = [
+  [/^(mixed|partial|partly|部分成立|部分达成|部分达标|部分|有得有失)$/i, "mixed"],
+  [/^(negative|no|refuted|rejected|not[_ -]?achieved|failed|不成立|未成立|否定|否|未达成|未达标|没达标|不达标)$/i, "negative"],
+  [/^(achieved|positive|yes|done|success|成立|达成|达标|通过|肯定|是)$/i, "achieved"],
+];
+const OUTCOME_LINE = /^\s*(outcome|result|结论|结果)\s*[:=：]\s*(\S+?)[。.]?\s*$/i;
+
+/** `outcome=negative` as a [[finish]] line (stripped from the summary) */
+export function parseOutcome(body: string): { outcome?: LoopOutcome; summary: string } {
+  const lines = body.split(/\r?\n/);
+  for (let i = 0; i < Math.min(lines.length, 3); i++) {
+    const m = OUTCOME_LINE.exec(lines[i]);
+    const hit = m && OUTCOME_WORDS.find(([re]) => re.test(m[2]));
+    if (hit) return { outcome: hit[1], summary: [...lines.slice(0, i), ...lines.slice(i + 1)].join("\n").trim() };
+  }
+  return { summary: body };
+}
+
+const MIXED_RE = /部分成立|部分达成|部分达标|部分有效|部分可行|有得有失|喜忧参半/;
+const NEGATIVE_RE = /不成立|未成立|没有成立|不达标|未达标|没达标|未达成|没达成|没有达到|未达到|没达到|没有改善|未改善|无改善|没有提升|无提升|未提升|没有超过|未超过|被.{0,6}支配|证伪|否定|不可行|行不通|不显著/;
+
+/**
+ * Fallback when the supervisor gave no outcome: read only the conclusion — a line that says
+ * 结论 / conclusion, else the first non-empty line. Never guesses "achieved" (unknown stays unknown).
+ */
+export function inferOutcome(summary: string): LoopOutcome | undefined {
+  const lines = (summary || "").split(/\r?\n/).map((x) => x.replace(/[*_`#>]/g, "").trim()).filter(Boolean);
+  const head = lines.find((x) => /^(结论|总结|conclusion)\s*[:：]/i.test(x)) ?? lines[0] ?? "";
+  if (MIXED_RE.test(head)) return "mixed";
+  if (NEGATIVE_RE.test(head)) return "negative";
+  return undefined;
+}
 
 export const ACTION_LABEL: Record<LoopAction["action"], string> = {
   instruct: "下指令", replan: "重新安排", verify: "验证", review: "审查", wait: "等待", ask: "问人", finish: "完成", abort: "放弃",
@@ -334,7 +375,10 @@ export function parseSignal(text: string): LoopAction | undefined {
       const question = b.body.replace(/^why\s*[:=].*$/gim, "").trim();
       return question ? { action: "ask", question, why } : undefined;
     }
-    case "finish": return { action: "finish", summary: b.body };
+    case "finish": {
+      const { outcome, summary } = parseOutcome(b.body);
+      return { action: "finish", summary, outcome: outcome ?? inferOutcome(summary) };
+    }
     case "abort": return { action: "abort", reason: b.body };
   }
   return undefined;
@@ -497,7 +541,7 @@ const SIGNAL_HINT = `## 要做的事写成一行标记（不写 = 你还在想�
 - \`[[review]]\` 可选：换一个模型审当前改动，这一行后面写审查重点
 - \`[[wait]]\` 挂起等长作业，后面写 key=value：pid=123 / log=out/train.log / done=训练完成 / stale=30m / every=5m / timeout=2d / note=刚启动 Adam（群卡片用人话，勿只写 log 文件名）；巡检正常写 \`[[wait]]\` 再一行 keep=1，并写 reason=判断依据（会刷新卡片）
 - \`[[ask]]\` 只有不可逆、高成本或目标有歧义才用，第一行可写 why=irreversible
-- \`[[finish]]\` 结论
+- \`[[finish]]\` 结论；第一行写 outcome=achieved（目标达成）/ negative（结论是否定的：假设不成立、没达标）/ mixed（部分成立）
 - \`[[abort]]\` 为什么放弃（「我写不进去 / 沙箱拒绝」不算理由，那种情况写 \`[[instruct]]\`）
 
 正文随便写，不用 JSON，也没有格式要求。`;
@@ -537,7 +581,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
     "- 不信 worker 的自报：它说做完了，你自己看 diff、跑命令确认。",
     "- 长作业（训练、批处理）让 worker 后台跑并报 pid 和日志，然后 `[[wait]]`；等的时候盯着，跑偏了就 `[[instruct]]` 让它停掉改。",
     "- 能自己定的事别问人；只有不可逆（推送、部署、删数据、对外发消息）、高成本或目标本身有歧义才 `[[ask]]`。",
-    "- 收尾 `[[finish]]` + 一句话结论；放弃 `[[abort]]` + 原因和试过什么。",
+    "- 收尾 `[[finish]]` + 一句话结论，第一行照实写 outcome=achieved / negative / mixed——否定结论（假设不成立、没达标）也是有效收尾，群里会如实标出来；放弃 `[[abort]]` + 原因和试过什么。",
   ].join("\n"));
   return out.join("\n\n");
 }

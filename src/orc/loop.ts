@@ -677,10 +677,12 @@ export class LoopEngine {
         const rows = l.criteria.map((c) => `- ${c.id} ${c.text}`).join("\n") || "（没有列验收标准）";
         const evs = ev.length ? ev.map((e) => L.evidenceLine(e, l)).join("\n") : "（这一轮没有记录验证结果）";
         const stale = l.evidence.length && l.lastChangeSha !== l.evidence[l.evidence.length - 1]?.sha;
+        l.outcome = a.outcome;
+        const said = a.outcome === "negative" ? "完成（结论是否定的）" : a.outcome === "mixed" ? "完成（部分成立）" : "完成";
         return {
-          status: "ready", progress: "完成，等待验收", obs: `完成：${a.summary}`,
+          status: "ready", progress: said, obs: `完成：${a.summary}`,
           notifies: [{
-            taskId: id, kind: "ready",
+            taskId: id, kind: "ready", outcome: a.outcome,
             text: `${a.summary}\n\n**验收标准**\n${rows}\n\n**最近的验证**\n${evs}${stale ? "\n\n（注意：最后一次改动之后没有再记录验证结果）" : ""}\n\n分支 \`${task.branch}\`（${shortStat(wt.diffSince(wtp, task.baseRef, 0).stat) || "无改动"}）`,
           }],
           turn: "",

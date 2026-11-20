@@ -57,6 +57,22 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
   check("budget ask is the only code-raised question", L.budgetAsk(mk(), "轮数 60/60").code === "budget");
 }
 
+// ---- [[finish]] 结论：否定结论不能被标成「结果可用」 ------------------------------
+{
+  const f = (t: string) => L.parseSignal(t) as any;
+  const neg = f("[[finish]]\noutcome=negative\nMARGIN-GRPO 在本场景下不成立");
+  check("finish outcome=negative parsed + stripped", neg?.outcome === "negative" && neg.summary === "MARGIN-GRPO 在本场景下不成立", neg);
+  check("finish outcome=achieved", f("[[finish]]\noutcome: achieved\n全部达标")?.outcome === "achieved");
+  check("finish 结论=部分成立 → mixed", f("[[finish]]\n结论=部分成立\n两个起点只成立一个")?.outcome === "mixed");
+  // 监督者没写 outcome 时只看结论句：线上三条否定收尾（#31 #32 #35）
+  check("infer: 首行不成立", L.inferOutcome("MARGIN-GRPO 在本场景下不成立，按 K11 在机制验证阶段停止。\n\n- 测试 60 个全部通过") === "negative");
+  check("infer: 结论行优先于首行", L.inferOutcome("任务 #32 收尾，结果如下。\n\n**结论：Pareto 分解在支配率上不成立。**") === "negative");
+  check("infer: 没有改善", L.inferOutcome("按预设判据，签名分层优势估计没有改善与标签的差距：缩小量远低于门槛") === "negative");
+  check("infer: 部分成立 → mixed", L.inferOutcome("结论：部分成立，fm_s0 成立、fm_s1 不成立") === "mixed");
+  check("infer: 正面结论不猜 achieved", L.inferOutcome("add 实现并通过冒烟") === undefined);
+  check("infer: 正文里的否定词不影响首行", L.inferOutcome("新指标上线，覆盖率 44%→61%\n\n- 旧方案不成立的原因已记录") === undefined);
+}
+
 // ---- 不可逆操作：唯一保留的"看内容"规则 ---------------------------------------
 {
   check("irreversible: git push", /git push/.test(L.irreversibleHit("改完后 git push origin main")?.label ?? ""));
@@ -223,6 +239,20 @@ async function e2e() {
     check("A evidence recorded for both runs", l.evidence.map((e) => `${e.pass ? "+" : "-"}`).join("") === "-+", l.evidence.map((e) => [e.label, e.pass, e.sha]));
     const ready = notes.find((n) => n.kind === "ready");
     check("A finish lists criteria + evidence", /add\(2,3\) 等于 5/.test(ready?.text ?? "") && /最近的验证/.test(ready?.text ?? ""), ready?.text);
+    check("A positive finish has no negative outcome", ready?.outcome === undefined && l.outcome === undefined, [ready?.outcome, l.outcome]);
+    done();
+  }
+
+  // A2: 否定结论收尾 → 通知和账本都带 outcome=negative，进度如实写
+  {
+    const { repo, store, exec, notes, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "验证假设 H", repo, preset: loopPreset, criteria: ["给出成立与否"] });
+    exec.sup.set(t.id, [S({ action: "finish", summary: "outcome=negative\n假设 H 在本场景下不成立" })]);
+    await drive(() => store.getTask(t.id)!.status === "ready");
+    const ready = notes.find((n) => n.kind === "ready");
+    check("A2 negative finish → notify outcome", ready?.outcome === "negative" && /^假设 H 在本场景下不成立/.test(ready?.text ?? ""), ready);
+    check("A2 ledger keeps outcome", orc.loop.ledger(t.id)?.outcome === "negative");
+    check("A2 progress says negative", /否定/.test(store.getTask(t.id)!.progress), store.getTask(t.id)!.progress);
     done();
   }
 

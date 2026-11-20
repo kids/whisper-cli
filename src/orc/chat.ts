@@ -17,7 +17,7 @@ import { findJsonObjects } from "./output";
 import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
 import { OrcStore } from "./store";
-import { MODE_LABEL, type ChatMode, type RouteTask } from "./route";
+import { MODE_LABEL, parseSupersedes, type ChatMode, type RouteTask } from "./route";
 import type { CliName, PresetPatch, ResolvedPreset, Task, Verbosity } from "./types";
 import type { LoopRunEvent } from "./loop";
 import { TERMINAL } from "./types";
@@ -188,11 +188,28 @@ async function ensureCard(t: Task, im: ImClient): Promise<string | undefined> {
 /** Statuses that really end a task (blocked still waits for the human) */
 const ENDED: Task["status"][] = ["ready", "failed", "dropped"];
 
+/**
+ * A finished task's headline. Pipelines end on passing stages ("结果可用"); a loop ends on a
+ * conclusion, which may well be "不成立" — say what it concluded instead of always "可用".
+ */
+const OUTCOME_HEAD: Record<string, [string, string]> = {
+  achieved: ["✅", "目标达成"],
+  negative: ["🔻", "结论是否定的"],
+  mixed: ["🌗", "部分成立"],
+};
+export function readyHead(t: Task, outcome?: string, closing = false): string {
+  const [icon, word] = t.kind !== "loop" ? ["✅", "结果可用"] : OUTCOME_HEAD[outcome ?? ""] ?? ["🏁", ""];
+  const lead = closing ? "任务结束" : "完成";
+  if (t.kind !== "loop") return closing ? `${icon} ${lead} · ${word}` : `${icon} ${word}`;
+  return word ? `${icon} ${lead} · ${word}` : `${icon} ${lead}`;
+}
+
 function renderCloseout(t: Task, store: OrcStore): string {
   const all = store.listAttempts(t.id);
   const tok = all.reduce((s, a) => s + (a.tokens || 0), 0);
-  const rounds = t.kind === "loop" ? (store.getLedger<Ledger>(t.id)?.step ?? 0) : all.length;
-  const head = t.status === "ready" ? "✅ 任务结束 · 结果可用"
+  const ledger = t.kind === "loop" ? store.getLedger<Ledger>(t.id) : undefined;
+  const rounds = t.kind === "loop" ? (ledger?.step ?? 0) : all.length;
+  const head = t.status === "ready" ? readyHead(t, ledger?.outcome, true)
     : t.status === "dropped" ? "🛑 任务结束 · 已被终止"
     : "❌ 任务结束 · 没能做完";
   const meta = [`共 ${rounds} ${t.kind === "loop" ? "轮" : "次运行"}`, tok ? `${fmtTok(tok)} tokens` : "", `历时 ${fmtMin(Date.now() - t.createdAt)}`, t.branch ? `分支 \`${t.branch}\`` : ""].filter(Boolean);
@@ -314,7 +331,8 @@ export function getOrc(agents: AgentConfig[], bins: ExecutorBins): Orchestrator 
       }
       await refreshCard(t, true);
       await (syncChain.get(t.id) ?? Promise.resolve()); // the run's own card lands in the thread before the headline
-      const head = { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
+      const head = n.kind === "ready" ? readyHead(t, n.outcome)
+        : { ready: "✅ 结果可用", decision: "✋ 需要你决定", failed: "❌ 无法继续", info: "ℹ️", ask: "✋ 需要你决定", report: "📋 汇报", constraints: "📐 约束 / 验收标准变更" }[n.kind];
       await f.sendMarkdown(t.chatId, `**${head} · ${taskLabel(t)}**\n\n${n.text}`);
     },
     loop: {
@@ -421,7 +439,7 @@ export function activeTaskSummary(chatId: string, workspace?: string): string | 
   return [
     "【本群团队任务】",
     ...lines,
-    "说明：状态、卡点和评审结论以上面为准，回答“为什么没过/做到哪”要引用它，别说看不到；明细文件是只读事实，别改。用户没问就别报编号。",
+    "说明：状态、卡点和评审结论以上面为准，回答“为什么没过/做到哪”要引用它，别说看不到；明细文件是只读事实，别改。用户没问就别报编号。「已完成」的任务已经收工，不占资源，不需要验收或停掉，别催人处理；只有「等人决定」的才需要人回话。",
   ].join("\n");
 }
 
@@ -441,7 +459,7 @@ export function routeContext(chatId: string): { tasks: RouteTask[]; pendingPropo
 // ---- lead agent (intent → structured action; code executes) -----------------
 
 export type LeadAction =
-  | { action: "submit"; goal: string; title?: string; preset?: string; criteria?: string[]; constraints?: string[]; bar?: string }
+  | { action: "submit"; goal: string; title?: string; preset?: string; criteria?: string[]; constraints?: string[]; bar?: string; supersedes?: number[] }
   | { action: "attach"; task: number; text: string; urgent?: boolean }
   | { action: "answer"; task: number; option?: string; text?: string }
   | { action: "stop"; task: number }
@@ -513,6 +531,7 @@ export function buildLeadPrompt(c: {
     '- `[[confirm]]` / `[[cancel]]` —— 同意 / 拒绝「待用户确认的提议」',
     '- `{"action":"submit","title":"短标题，6~14 字","goal":"完整、可独立理解的任务目标（把上下文写进去）","preset":"可选","criteria":["可选：可检查的验收标准"],"constraints":["可选"],"bar":"评审口径：这份活该按什么标准判过不过"}` —— 用户要团队去做一件新事情；「把刚才这个交给团队」时从「最近对话」里总结目标、约束和已有结论',
     '- submit 的 bar 由你判断，别套固定模板：先想清楚这份东西是给谁用的。探索 / 一次性 / 备忘（可行性判断、摸底、给人参考）→ 评审只该拦「会让结论错」的问题，统计严苛度、风格、可维护性一律算建议；要进生产、要对外发布、别人要依赖它的代码 → 按工程标准全套卡。口径决定评审有多严，写偏了后面会来回消耗。',
+    '- submit 时看一眼本群任务：新任务接替了某个挂着没收尾的旧任务（等人决定 / 卡住 / 方向已被新任务取代），在 JSON 里加 `"supersedes":[旧任务号]`，代码会把旧任务关掉，别让它一直挂在后台。',
     '- `{"action":"config","patch":{"preset":"fix","roles":{"critic":{"cli":"claude"}},"enable":["design_review"],"disable":[],"maxLoops":{"review":2}},"reason":"…"}` —— 调整本群之后新任务的编排（需要用户确认）',
     '- `{"action":"config","task":12,"patch":{"roles":{"implementer":{"cli":"cursor","model":"auto"}}},"verbosity":"quiet|normal|verbose","reason":"…"}` —— 调整**进行中**任务的角色或播报，立即生效',
     '- `{"action":"announce","paragraphs":["要追加到群公告的规则，每段一句"],"reason":"…"}` —— 改本群的长期约束（人人可见）',
@@ -569,7 +588,7 @@ export function parseLeadAction(text: string): LeadAction | { error: string } {
   const strs = (v: any) => (Array.isArray(v) ? v.map(String).map((s: string) => s.trim()).filter(Boolean).slice(0, 12) : undefined);
   switch (a.action) {
     case "submit": return typeof a.goal === "string" && a.goal.trim()
-      ? { action: "submit", goal: a.goal.trim(), title: typeof a.title === "string" && a.title.trim() ? a.title.trim().slice(0, 40) : undefined, preset: a.preset || undefined, criteria: strs(a.criteria), constraints: strs(a.constraints), bar: typeof a.bar === "string" && a.bar.trim() ? a.bar.trim() : undefined }
+      ? { action: "submit", goal: a.goal.trim(), title: typeof a.title === "string" && a.title.trim() ? a.title.trim().slice(0, 40) : undefined, preset: a.preset || undefined, criteria: strs(a.criteria), constraints: strs(a.constraints), bar: typeof a.bar === "string" && a.bar.trim() ? a.bar.trim() : undefined, supersedes: parseSupersedes(a.supersedes) }
       : { error: "submit 缺少 goal" };
     case "attach": return num(a.task) && a.text ? { action: "attach", task: num(a.task)!, text: String(a.text), urgent: a.urgent === true } : { error: "attach 缺少 task/text" };
     case "answer": return num(a.task) && (a.option || a.text)

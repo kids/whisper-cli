@@ -19,6 +19,7 @@ import { applyMemoryOps } from "../memory";
 import { formatRecent, recordTurn } from "../recent";
 import { fallbackNote, loadPresets, loadRoles, presetSummary } from "./config";
 import { acceptable, stageName } from "./core";
+import { clip } from "./ledger";
 import {
   availableClis, buildLeadPrompt, describePresetChange, getOrc, getProfile, listPresetSummaries, parseLeadAction,
   renderCard, resolveChatPreset, setProfile, submitFromChat, bindChat, taskForCard, taskLabel, type ChatProfile, type LeadAction,
@@ -82,8 +83,34 @@ function switchMode(h: OrcChatHost, chatId: string, p: ChatProfile, want: ChatMo
 export async function submitTaskOp(h: OrcChatHost, chatId: string, op: TaskOp, sourceText: string): Promise<string> {
   if (op.error || !op.goal) return `⚠️ 没有转交团队：${op.error ?? "缺少目标"}`;
   orcOf(h);
-  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar, title: op.title, origin: "agent" }, "caller");
+  const r = await submit(h, chatId, op.goal, op.preset, { criteria: op.criteria, constraints: op.constraints, sourceText, bar: op.bar, title: op.title, origin: "agent" }, "caller", op.supersedes);
   return r.startsWith("❌") ? `⚠️ 没有转交团队：${r.replace(/^❌\s*/, "")}` : `🧭 ${r}`;
+}
+
+/** A top-level task untouched this long while waiting on a human is "hanging" (nudged on the next submit) */
+const STALE_TASK_MS = Number(process.env.ORC_STALE_TASK_DAYS || 3) * 86_400_000;
+const ENDED_STATUSES: Task["status"][] = ["ready", "failed", "dropped"];
+
+/**
+ * After a submit: close the tasks the new one replaces (`supersedes`), then name the
+ * chat's other long-idle tasks so they do not hang in the background unnoticed.
+ */
+export function tidyAfterSubmit(o: ReturnType<typeof orcOf>, chatId: string, newId: number, supersedes?: number[], now = Date.now()): string {
+  const out: string[] = [];
+  const closed: string[] = [];
+  for (const id of supersedes ?? []) {
+    const t = o.store.getTask(id);
+    if (!t || t.id === newId || t.chatId !== chatId || t.parentId || ENDED_STATUSES.includes(t.status)) continue;
+    if (o.stop(id)) closed.push(`「${clip(t.title, 24)}」`);
+  }
+  if (closed.length) out.push(`🧹 新任务接替了 ${closed.join("、")}，旧任务已关掉（分支和改动都还在）。`);
+  const stale = o.store.listTasks({ chatId, status: ["blocked", "waiting_children"], limit: 50 })
+    .filter((t) => !t.parentId && t.id !== newId && now - t.updatedAt > STALE_TASK_MS);
+  if (stale.length) {
+    const days = (t: Task) => Math.floor((now - t.updatedAt) / 86_400_000);
+    out.push(`📌 本群还挂着 ${stale.length} 个很久没动的团队任务：${stale.slice(0, 3).map((t) => `「${clip(t.title, 24)}」（${days(t)} 天没动）`).join("、")}${stale.length > 3 ? " 等" : ""}。不需要了就在它的卡片下回「停掉」。`);
+  }
+  return out.join("\n");
 }
 
 // Note: submit() posts the card itself; the receipt text goes into the card's thread
@@ -93,6 +120,7 @@ async function submit(
   h: OrcChatHost, chatId: string, goal: string, presetName?: string,
   extra: { criteria?: string[]; constraints?: string[]; sourceText?: string; bar?: string; title?: string; origin?: "human" | "agent" } = {},
   deliver: "thread" | "caller" = "thread",
+  supersedes?: number[],
 ): Promise<string> {
   const o = orcOf(h);
   const repo = repoRoot(h.workspaceFor(chatId));
@@ -110,7 +138,8 @@ async function submit(
   const { task: t, receiptInThread } = await submitFromChat(
     o, h.im, chatId, goal, repo, preset, extra, deliver === "thread" ? { receipt } : {},
   );
-  return receiptInThread ? "" : receipt(t);
+  const tidy = tidyAfterSubmit(o, chatId, t.id, supersedes);
+  return [receiptInThread ? "" : receipt(t), tidy].filter(Boolean).join("\n");
 }
 
 export async function handleOrcCommand(h: OrcChatHost, ev: ChatEvent): Promise<boolean> {
@@ -234,7 +263,11 @@ export async function runLeadTurn(h: OrcChatHost, ev: ChatEvent, why?: string): 
     userText: ev.text,
     presetLine,
     workspace: h.workspaceFor(chatId),
-    tasks: o.store.listTasks({ chatId, limit: 8 }),
+    // open tasks of any age + ones that ended recently (or the card this reply is under); old finished
+    // tasks only made the lead offer to 验收 / 停掉 things that need nothing
+    tasks: o.store.listTasks({ chatId, limit: 40 })
+      .filter((t) => t.id === threadTask || !["ready", "failed", "dropped"].includes(t.status) || Date.now() - t.updatedAt < 3 * 86_400_000)
+      .slice(0, 8),
     presets: [...loadPresets().keys()],
     roles: [...loadRoles().keys()],
     history: formatRecent(chatId), // the lead is stateless; this is its only conversational context
@@ -321,7 +354,7 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       return;
     }
     case "submit": {
-      const r = await submit(h, chatId, act.goal, act.preset, { criteria: act.criteria, constraints: act.constraints, sourceText: userText, bar: act.bar, title: act.title });
+      const r = await submit(h, chatId, act.goal, act.preset, { criteria: act.criteria, constraints: act.constraints, sourceText: userText, bar: act.bar, title: act.title }, "thread", act.supersedes);
       if (r) await say(`🧭 ${r}`);
       return;
     }

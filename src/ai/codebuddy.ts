@@ -411,6 +411,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     });
 
     const timedOut = wasTimedOut(stderr);
+    const to: AiResult["timedOut"] = timedOut ? (stderr.includes("[HARD TIMEOUT]") ? "hard" : "stale") : undefined;
     const partial = streamedText.trim();
 
     if (wasCancelled) {
@@ -424,7 +425,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     if (!stdout.trim()) {
       // A timeout is not a stale session — retrying would just burn another
       // full run. Report it instead of silently dropping the session.
-      if (timedOut) return { text: timeoutNotice(stderr) };
+      if (timedOut) return { text: timeoutNotice(stderr), timedOut: to };
       if (sid) {
         console.warn(`[codebuddy] session ${sid} stale, retrying`);
         sessions.delete(chatId);
@@ -552,7 +553,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     const finalText = usedMultiTurn ? fullTurnsText : resultText;
     if (finalText) {
       // killed by a timeout is still a timeout, however much it wrote before
-      return { text: timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n${finalText}` : finalText, model, usage, sessionId };
+      return { text: timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n${finalText}` : finalText, model, usage, sessionId, timedOut: to };
     }
 
     // Fallback 1: last assistant event in the parsed stream
@@ -560,7 +561,7 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
       const text = assistantTextOf(items[i]);
       if (text) {
         const notice = timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n` : "";
-        return { text: notice + text, model, usage, sessionId };
+        return { text: notice + text, model, usage, sessionId, timedOut: to };
       }
     }
 
@@ -568,11 +569,11 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     // prevents the `result` event from ever arriving.
     if (partial) {
       const notice = timedOut ? `${timeoutNotice(stderr)}\n\n---\n\n` : "";
-      return { text: notice + partial, model, usage, sessionId };
+      return { text: notice + partial, model, usage, sessionId, timedOut: to };
     }
 
     if (timedOut) {
-      return { text: timeoutNotice(stderr), model, usage, sessionId };
+      return { text: timeoutNotice(stderr), model, usage, sessionId, timedOut: to };
     }
 
     // Non-resume fatal error (no session to drop): surface the CLI's message

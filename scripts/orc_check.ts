@@ -562,6 +562,90 @@ async function e2e() {
     check("G no extra decision messages", notes.filter((n) => n.kind === "decision").length === 1);
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
+  // G2: stopping a parent also ends its blocked children (they used to hang as "blocked" forever)
+  {
+    const { dir, repo, store, exec, orc } = setup();
+    exec.plan = '{"spec":"two parts","subtasks":[{"title":"part A","spec":"A"},{"title":"part B","spec":"B","deps":[0]}]}';
+    exec.alwaysRevise.add(2);
+    const t = orc.submit({ goal: "big", repo, preset: devPreset });
+    const tick = () => (orc as any).tick();
+    for (let i = 0; i < 3000 && store.getTask(2)?.status !== "blocked"; i++) { await tick(); await sleep(5); }
+    check("G2 child is blocked first", store.getTask(2)!.status === "blocked");
+    orc.stop(t.id);
+    await orc.runUntilIdle(5);
+    check("G2 parent stop drops blocked child", store.getTask(2)!.status === "dropped", store.getTask(2)!.status);
+    check("G2 no child left open", store.listTasks({ parentId: t.id }).every((c) => ["dropped", "failed", "ready"].includes(c.status)), store.listTasks({ parentId: t.id }).map((c) => c.status));
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // T: a new submit closes the tasks it supersedes and names long-idle ones
+  {
+    const { dir, repo, store, orc } = setup();
+    const { tidyAfterSubmit } = await import("../src/orc/commands");
+    const chat = "oc_tidy";
+    const old = orc.submit({ goal: "old", repo, preset: devPreset, chatId: chat });
+    const idle = orc.submit({ goal: "idle", repo, preset: devPreset, chatId: chat, title: "很久没动的旧任务" });
+    const other = orc.submit({ goal: "other chat", repo, preset: devPreset, chatId: "oc_other" });
+    for (const x of [old, idle, other]) store.updateTask(x.id, { status: "blocked" });
+    const fresh = orc.submit({ goal: "new", repo, preset: devPreset, chatId: chat });
+    const later = Date.now() + 5 * 86_400_000;
+    const note = tidyAfterSubmit(orc, chat, fresh.id, [old.id, other.id, fresh.id], later);
+    check("T superseded task dropped", store.getTask(old.id)!.status === "dropped");
+    check("T other chat's task untouched", store.getTask(other.id)!.status === "blocked");
+    check("T note says what was closed + what still hangs", /接替了/.test(note) && /很久没动的旧任务/.test(note) && /天没动/.test(note), note);
+    check("T fresh-only chat → no note", tidyAfterSubmit(orc, "oc_empty", fresh.id, undefined, later) === "");
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // W: sweep — orphans dropped; tasks waiting on a human get one reminder, then auto-close after grace
+  {
+    const { dir, repo, store, orc } = setup();
+    const D = 86_400_000;
+    const ready = orc.submit({ goal: "done one", repo, preset: devPreset, chatId: "oc_w" });
+    store.updateTask(ready.id, { status: "ready" });
+    const waiting = orc.submit({ goal: "waits", repo, preset: devPreset, chatId: "oc_w", title: "等人决定的任务" });
+    store.updateTask(waiting.id, { status: "blocked", progress: "评审退回 3 次" });
+    const parent = orc.submit({ goal: "parent", repo, preset: devPreset, chatId: "oc_w" });
+    store.updateTask(parent.id, { status: "dropped" });
+    const orphan = store.createTask({ title: "orphan", goal: "x", repo, baseRef: "HEAD", preset: devPreset, chatId: "oc_w", kind: "pipeline", bar: "", parentId: parent.id } as any);
+    store.updateTask(orphan.id, { status: "queued" });
+    const t0 = Date.now();
+    const notifies = () => store.pendingEffects().filter((e) => e.kind === "notify").map((e) => e.payload as NotifyPayload);
+
+    const r0 = orc.sweep(t0);
+    check("W orphan child dropped", store.getTask(orphan.id)!.status === "dropped" && r0.orphans === 1, store.getTask(orphan.id));
+    check("W nothing reminded before a day", r0.reminded === 0 && notifies().length === 0);
+    const r1 = orc.sweep(t0 + 1.5 * D);
+    const n1 = notifies().filter((n) => n.taskId === waiting.id);
+    check("W one reminder after a day", r1.reminded === 1 && n1.length === 1 && n1[0].kind === "decision" && /评审退回 3 次/.test(n1[0].text) && /再试一次/.test(n1[0].text), n1);
+    check("W ready task never reminded", notifies().every((n) => n.taskId !== ready.id));
+    check("W reminder not repeated", orc.sweep(t0 + 3 * D).reminded === 0);
+    check("W not closed before 7 days", store.getTask(waiting.id)!.status === "blocked");
+    const r2 = orc.sweep(t0 + 8 * D);
+    check("W auto-closed after 7 days + grace", r2.expired === 1 && store.getTask(waiting.id)!.status === "dropped" && /自动关掉/.test(store.getTask(waiting.id)!.progress), store.getTask(waiting.id));
+    check("W close notice says how to resume", notifies().some((n) => n.taskId === waiting.id && n.kind === "info" && /再试一次/.test(n.text)));
+    check("W ready task untouched", store.getTask(ready.id)!.status === "ready");
+
+    // a human touching the task after the reminder resets the clock: no auto-close without a new reminder
+    const w2 = orc.submit({ goal: "waits 2", repo, preset: devPreset, chatId: "oc_w" });
+    store.updateTask(w2.id, { status: "blocked" });
+    const t1 = Date.now();
+    orc.sweep(t1 + 2 * D);
+    const late = t1 + 2 * D + 1000;
+    store.updateTask(w2.id, { progress: "人回了一句" });
+    (store as any).db.prepare("UPDATE tasks SET updated_at=? WHERE id=?").run(late, w2.id);
+    check("W touched after reminder → not closed", orc.sweep(late + 8 * D).expired === 0 && store.getTask(w2.id)!.status === "blocked");
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // H: finished-task headlines follow what a loop concluded; lead submit carries supersedes
+  {
+    const { readyHead } = await import("../src/orc/chat");
+    const loop = { kind: "loop" } as Task, pipe = { kind: "pipeline" } as Task;
+    check("H pipeline keeps 结果可用", readyHead(pipe) === "✅ 结果可用" && readyHead(pipe, undefined, true) === "✅ 任务结束 · 结果可用");
+    check("H loop negative", readyHead(loop, "negative") === "🔻 完成 · 结论是否定的" && readyHead(loop, "negative", true) === "🔻 任务结束 · 结论是否定的");
+    check("H loop achieved / mixed", readyHead(loop, "achieved") === "✅ 完成 · 目标达成" && readyHead(loop, "mixed") === "🌗 完成 · 部分成立");
+    check("H loop unknown is neutral, never 结果可用", readyHead(loop) === "🏁 完成" && readyHead(loop, undefined, true) === "🏁 任务结束");
+    const a = parseLeadAction('{"action":"submit","goal":"g","supersedes":[2]}') as any;
+    check("H lead submit supersedes", JSON.stringify(a.supersedes) === "[2]", a);
+  }
   // D: stop a running task
   {
     const { dir, repo, store, exec, orc } = setup();

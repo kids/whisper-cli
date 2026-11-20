@@ -75,8 +75,8 @@ import {
 import { repoRoot } from "./orc/worktree";
 import { handleOrcCommand, runLeadTurn, submitTaskOp, type OrcChatHost } from "./orc/commands";
 import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, routeContext, stopChatTasks, taskForCard } from "./orc/chat";
-import { extractTaskOps, formatTaskHint, routeMessage } from "./orc/route";
-import { flushRecent, recordTurn } from "./recent";
+import { extractTaskOps, formatTaskHint, routeMessage, timeoutHandoffOp } from "./orc/route";
+import { flushRecent, formatRecent, recordTurn } from "./recent";
 import { extractSendOps, formatSendHint, resolveOutgoing, sendRoots } from "./outgoing";
 import {
   addWatch, buildReportPrompt, buildWakePrompt, cancelWatch, describeSpec, extractWatchOps, formatWatchContext, getWatch,
@@ -1270,6 +1270,18 @@ export class AgentRunner {
         result = { ...result, text: tops.text };
         for (const op of tops.ops) taskNotes.push(await submitTaskOp(this.orcHost(), chatId, op, ev.text));
       }
+    }
+
+    // Killed by the hard cap mid-work: one turn was not enough → hand the rest to a team instead of dropping it
+    if (
+      !isReview && !isWakeLike && result.timedOut === "hard" && !taskNotes.length
+      && process.env.WHISPER_TIMEOUT_HANDOFF !== "0" && isChatKey(chatId)
+      && getProfile(chatId).mode !== "single" && repoRoot(workspace)
+    ) {
+      const op = timeoutHandoffOp(ev.text || "", result.text || "", titleFromPrompt(ev.text || ""), formatRecent(chatId, 4));
+      const note = await submitTaskOp(this.orcHost(), chatId, op, ev.text || "");
+      console.log(`[${this.label}] hard timeout → team handoff chat=${chatId.slice(0, 10)}: ${note.split("\n")[0]}`);
+      taskNotes.push(note.startsWith("🧭") ? `⏱️ 这件事一轮做不完，已自动转交团队接着做。\n${note}` : note);
     }
 
     // `[[image]]` / `[[file]]` lines (+ bare image paths) → attachments sent by code (src/outgoing.ts)

@@ -8,7 +8,7 @@
 //            enqueues the next effects.
 // Runs independently of the per-chat message queue (002 §2.2).
 // =============================================================================
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { parseBrief, renderAutoNote, renderBrief } from "./brief";
@@ -98,7 +98,8 @@ export class Orchestrator {
     this.store.tx(() => {
       this.store.cancelPendingLaunches(taskId);
       for (const child of this.store.listTasks({ parentId: taskId })) {
-        if (!TERMINAL.includes(child.status)) this.stop(child.id);
+        // blocked children wait on the human too: stopping the parent must end them, or they hang forever
+        if (!TERMINAL.includes(child.status) || child.status === "blocked") this.stop(child.id);
       }
       if (stoppable) this.store.updateTask(taskId, { status: "dropped", progress: "已被用户终止" });
     });
@@ -196,10 +197,13 @@ export class Orchestrator {
 
   // ---- tick ---------------------------------------------------------------
 
+  private lastSweep = 0;
+
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      if (Date.now() - this.lastSweep >= SWEEP_EVERY_MS) { this.lastSweep = Date.now(); this.sweep(); }
       for (const e of this.store.dueEffects()) {
         if (e.kind === "notify") await this.runNotify(e);
         else if (e.kind === "launch") this.tryLaunch(e);
@@ -624,7 +628,98 @@ export class Orchestrator {
     const t = this.store.getTask(taskId);
     if (t) try { this.opts.onProgress?.(t); } catch { /* sink errors must not break scheduling */ }
   }
+
+  // ---- sweep: tasks nobody is looking at ------------------------------------
+
+  private sweepPath = () => resolve(this.opts.orcHome, "sweep.json");
+  private loadSweep(): { reminded: Record<string, number> } {
+    try { return JSON.parse(readFileSync(this.sweepPath(), "utf8")); } catch { return { reminded: {} }; }
+  }
+
+  /**
+   * A task waiting on a human is invisible once its message scrolls away. Every few minutes:
+   *   - a child still open under an ended / missing parent → dropped (nothing will ever launch it)
+   *   - a top-level task idle ≥ REMIND days waiting on a human → one reminder in its chat
+   *   - still idle ≥ EXPIRE days and reminded ≥ GRACE days ago → closed (branch kept; 「再试一次」 resumes)
+   * Idle = no update on the task or any of its children. Any human action resets the clock.
+   */
+  sweep(now = Date.now()): { orphans: number; reminded: number; expired: number } {
+    const out = { orphans: 0, reminded: 0, expired: 0 };
+    const ENDED = ["ready", "failed", "dropped"];
+    const open = this.store.listTasks({ status: ["queued", "running", "waiting", "waiting_children", "blocked"], limit: 500 });
+    for (const c of open.filter((t) => t.parentId)) {
+      const p = this.store.getTask(c.parentId!);
+      if (p && !ENDED.includes(p.status)) continue;
+      this.store.tx(() => {
+        this.store.cancelPendingLaunches(c.id);
+        this.store.updateTask(c.id, { status: "dropped", progress: "父任务已结束，不再执行" });
+      });
+      this.emitProgress(c.id);
+      out.orphans++;
+    }
+
+    const state = this.loadSweep();
+    const descendants = (id: number, depth = 0): Task[] => depth > 3 ? [] : this.store.listTasks({ parentId: id }).flatMap((c) => [c, ...descendants(c.id, depth + 1)]);
+    const days = (ms: number) => Math.max(1, Math.floor(ms / DAY_MS));
+    let dirty = false;
+    for (const t of open.filter((x) => !x.parentId && x.chatId && (x.status === "blocked" || x.status === "waiting_children"))) {
+      const cur = this.store.getTask(t.id);
+      if (!cur || !["blocked", "waiting_children"].includes(cur.status)) continue;
+      const kids = descendants(t.id);
+      const last = Math.max(cur.updatedAt, ...kids.map((k) => k.updatedAt));
+      const idle = now - last;
+      const reminded = state.reminded[t.id];
+      const fresh = reminded !== undefined && reminded > last; // the reminder is about the current wait
+      const stuck = kids.filter((k) => k.status === "blocked");
+      const why = (stuck.length ? stuck : [cur]).slice(0, 2).map((k) => `- ${k.id === cur.id ? "" : `${k.title}：`}${clipText(k.progress, 160)}`).join("\n");
+
+      if (fresh && idle >= EXPIRE_MS && now - reminded >= GRACE_MS) {
+        this.stop(t.id);
+        this.store.updateTask(t.id, { progress: `等你决定 ${days(idle)} 天没人回复，已自动关掉` });
+        this.store.addEffect("notify", {
+          taskId: t.id, kind: "info",
+          text: `等你决定已经 ${days(idle)} 天没人回复，已自动关掉。${cur.branch ? `分支 \`${cur.branch}\` 和改动都还在，` : ""}想接着做就在它的卡片下说「再试一次」。`,
+        } satisfies NotifyPayload);
+        delete state.reminded[t.id]; dirty = true;
+        this.emitProgress(t.id);
+        out.expired++;
+        continue;
+      }
+      if (!fresh && idle >= REMIND_MS) {
+        this.store.addEffect("notify", {
+          taskId: t.id, kind: "decision",
+          text: [
+            `这个团队任务停下来等你决定，已经 ${days(idle)} 天没动了：`,
+            why,
+            "",
+            `在它的卡片下回复：「再试一次」接着做，或「停掉」不要了。${days(EXPIRE_MS)} 天没人理会就自动关掉（至少在这条提醒 ${days(GRACE_MS)} 天之后），分支和改动都会保留。`,
+          ].join("\n"),
+        } satisfies NotifyPayload);
+        state.reminded[t.id] = now; dirty = true;
+        out.reminded++;
+      }
+    }
+    for (const id of Object.keys(state.reminded)) {
+      const t = this.store.getTask(Number(id));
+      if (!t || ENDED.includes(t.status)) { delete state.reminded[id]; dirty = true; }
+    }
+    if (dirty) {
+      writeFileSync(this.sweepPath() + ".tmp", JSON.stringify(state));
+      renameSync(this.sweepPath() + ".tmp", this.sweepPath());
+    }
+    if (out.orphans || out.reminded || out.expired) console.log(`[orc] sweep: ${out.orphans} orphaned children dropped, ${out.reminded} reminders, ${out.expired} auto-closed`);
+    return out;
+  }
 }
+
+const DAY_MS = 86_400_000;
+const SWEEP_EVERY_MS = Number(process.env.ORC_SWEEP_MIN || 10) * 60_000;
+/** Waiting on a human this long → one reminder in the chat */
+const REMIND_MS = Number(process.env.ORC_REMIND_DAYS || 1) * DAY_MS;
+/** Waiting this long (and reminded at least GRACE ago) → auto-closed; 0 disables */
+const EXPIRE_MS = Number(process.env.ORC_EXPIRE_DAYS ?? 7) * DAY_MS || Infinity;
+const GRACE_MS = Number(process.env.ORC_EXPIRE_GRACE_DAYS || 2) * DAY_MS;
+const clipText = (s: string, n: number) => { const t = (s || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
 
 /** A readable name when nobody supplied one: first clause, without the "在 … 工作区内" preamble */
 export function shortTitle(goal: string): string {

@@ -215,4 +215,6 @@ export interface NotifyPayload {
   text: string;
   /** loop "turn": the round it summarises (its thread card gets finalised with the text) */
   round?: number;
+  /** loop "ready": what the task concluded — picks the headline (see OUTCOME_HEAD in chat.ts) */
+  outcome?: "achieved" | "negative" | "mixed";
 }
