@@ -74,6 +74,19 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
   check("budget: exhausted line", L.budgetState(mk({ limits: { maxSteps: 1, maxWorkerRuns: 1, maxActiveHours: 1 } })).exhausted === undefined);
 }
 
+// ---- 监督者因只读想放弃：识别 -------------------------------------------------
+{
+  const r = L.readonlyAbort;
+  check("readonly abort: task #12 原话", r("Round 21 未执行：当前 supervisor 会话与 worker 子会话都是硬只读，所有写路径均被 sandbox 拒绝"));
+  check("readonly abort: Operation not permitted", r("touch out/x: Operation not permitted，无法继续"));
+  check("readonly abort: read-only mode", r("write tool → Error: [sandbox: file access denied under read-only mode]"));
+  check("readonly abort: 请给可写 session", r("请提供一个可写的 session 再继续"));
+  check("readonly abort: 没有写权限", r("我没有写权限，放弃"));
+  check("readonly abort: 正常放弃不算", !r("目标在当前数据上不可达：三种口径都跑过，test 全为负，继续迭代没有意义"));
+  check("readonly abort: 只读取证不算", !r("只读取证后确认数据源已下线，无法继续"));
+  check("readonly abort: prompt 提醒", /不要用你 CLI 自带的子 agent/.test(L.buildSupervisorPrompt(mk(), { taskId: 1, title: "t", worktree: "/w", branch: "b", diffStat: "", worker: "w", reason: "start", canWait: false, fresh: true })));
+}
+
 // ---- engine end-to-end (scripted CLIs) -----------------------------------------
 type Reply = string | ((req: RunRequest) => string | Promise<string>);
 interface Call { taskId: number; role: string; req: RunRequest }
@@ -488,6 +501,42 @@ async function e2e() {
     exec.sup.set(t.id, [S({ action: "abort", reason: "r" })]);
     await drive(() => store.getTask(t.id)!.status === "failed");
     check("H then continues on its own", store.listSteps(t.id).some((s: any) => s.accepted));
+    done();
+  }
+
+  // J: 监督者因只读沙箱想放弃 → 驳回、开新会话提醒、改派 worker；连续超过上限才放行
+  {
+    const { repo, store, exec, notes, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "补提交复现输入", repo, preset: loopPreset, criteria: ["提交完成"] });
+    const id = t.id;
+    exec.worker.set(id, () => { writeFileSync(join(store.getTask(id)!.worktree!, "inputs.txt"), "pinned\n"); return "已提交 inputs.txt"; });
+    const deny = "当前 supervisor 会话与 worker 子会话都是硬只读，所有写路径均被 sandbox 拒绝（Operation not permitted），请提供可写 session";
+    exec.sup.set(id, [
+      S({ action: "abort", reason: deny }),
+      (req) => {
+        check("J rejected round restarts supervisor fresh", !req.resumeSessionId, req.resumeSessionId);
+        check("J supervisor is told to instruct the worker", /写成一条 \[\[instruct\]\] 交给 worker/.test(req.prompt));
+        return S({ action: "instruct", text: "把 inputs.txt 写好并提交" });
+      },
+      S({ action: "finish", summary: "worker 已提交" }),
+    ]);
+    await drive(() => ["ready", "failed"].includes(store.getTask(id)!.status));
+    const steps = store.listSteps(id);
+    check("J task not failed", store.getTask(id)!.status === "ready", store.getTask(id)!.status);
+    check("J abort recorded as rejected", steps[0] && !steps[0].accepted && /只读放弃已驳回/.test(steps[0].verdict), steps.map((s: any) => [s.accepted, s.verdict]));
+    check("J worker did the write", exec.of(id, "worker").length === 1);
+    check("J counter reset after a real action", (orc.loop.ledger(id)!.guard.readonlyAborts ?? 0) === 0, orc.loop.ledger(id)!.guard);
+    check("J nobody was asked", asks(notes).length === 0, notes.map((n) => n.kind));
+    done();
+  }
+  {
+    const { repo, store, exec, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "x", repo, preset: loopPreset, criteria: ["c"] });
+    const deny = "[[abort]]\n写不进去：Operation not permitted";
+    exec.sup.set(t.id, [deny, deny, deny]);
+    await drive(() => store.getTask(t.id)!.status === "failed");
+    const steps = store.listSteps(t.id);
+    check("J2 abort passes after the cap", store.getTask(t.id)!.status === "failed" && steps.length === L.MAX_READONLY_ABORTS + 1 && steps.at(-1)!.accepted, steps.map((s: any) => [s.accepted, s.verdict]));
     done();
   }
 }

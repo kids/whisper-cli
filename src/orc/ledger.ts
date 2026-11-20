@@ -70,7 +70,8 @@ export interface Ledger {
   workerEpoch: number;
   budget: { steps: number; workerRuns: number; activeMs: number; tokens: number; warned: boolean };
   limits: LoopBudget;
-  guard: { infraErrors: number };
+  /** readonlyAborts: 监督者因"自己写不进去"想放弃、被驳回的次数（见 readonlyAbort） */
+  guard: { infraErrors: number; readonlyAborts?: number };
   /** HEAD after the latest commit seen */
   head: string;
   /** HEAD after the latest change to the code (worker / recovered / human commit) */
@@ -178,6 +179,7 @@ export function extendBudget(l: Ledger, factor = 1.5): void {
 
 export function resetGuards(l: Ledger): void {
   l.guard.infraErrors = 0;
+  l.guard.readonlyAborts = 0;
 }
 
 /**
@@ -426,6 +428,34 @@ export function irreversibleHit(text: string): IrreversibleHit | undefined {
   return undefined;
 }
 
+// ---- 监督者"写不进去就放弃" ---------------------------------------------------
+//
+// 监督者按设计是只读的（沙箱拒绝写 = 预期）。弱一点的模型会把该交给 worker 的活
+// 自己干、或派给自己 CLI 的子 agent（继承只读），被拒后 [[abort]]「请给可写 session」。
+// 这不是放弃的理由：写操作应写成 [[instruct]] 交给有写权限的 worker。
+
+const WRITE_DENIED = new RegExp([
+  "operation not permitted", "permission denied", "\\bEACCES\\b", "\\bEPERM\\b",
+  "read-only mode", "sandbox", "沙箱",
+  "硬只读", "只读(?:的)?\\s*(?:会话|session|模式|权限|preset)",
+  "(?:没有|无|缺少?)\\s*写权限", "不可写", "无法(?:写入|写盘|提交|编辑|修改文件)",
+  "可写的?\\s*(?:session|会话)", "sandbox_permissions",
+].join("|"), "i");
+
+/** 监督者的 [[abort]] 理由是不是"我（或我的子 agent）写不进去" */
+export function readonlyAbort(reason: string): boolean {
+  return WRITE_DENIED.test(reason);
+}
+
+/** 同一任务最多驳回几次这类 abort；之后放行，避免死循环（预算也会兜底） */
+export const MAX_READONLY_ABORTS = 2;
+
+export const READONLY_ABORT_NOTE = [
+  "上一轮的 [[abort]] 没有执行：理由是写操作被沙箱拒绝，但这是设计如此，不是任务失败。",
+  "你（监督者）是只读的，你在自己 CLI 里开的子 agent 也继承只读；写文件、git add/commit、重跑脚本都不该你来做。",
+  "把要做的步骤原样写成一条 [[instruct]] 交给 worker——worker 有完整写权限，就是为这个准备的。",
+].join("\n");
+
 // ---- prompts ------------------------------------------------------------------
 
 const clip = (t: string, n: number) => (t.length > n ? t.slice(0, n) + "…" : t);
@@ -468,7 +498,7 @@ const SIGNAL_HINT = `## 要做的事写成一行标记（不写 = 你还在想�
 - \`[[wait]]\` 挂起等长作业，后面写 key=value：pid=123 / log=out/train.log / done=训练完成 / stale=30m / every=5m / timeout=2d / note=刚启动 Adam（群卡片用人话，勿只写 log 文件名）；巡检正常写 \`[[wait]]\` 再一行 keep=1，并写 reason=判断依据（会刷新卡片）
 - \`[[ask]]\` 只有不可逆、高成本或目标有歧义才用，第一行可写 why=irreversible
 - \`[[finish]]\` 结论
-- \`[[abort]]\` 为什么放弃
+- \`[[abort]]\` 为什么放弃（「我写不进去 / 沙箱拒绝」不算理由，那种情况写 \`[[instruct]]\`）
 
 正文随便写，不用 JSON，也没有格式要求。`;
 
@@ -482,7 +512,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
       c.waiting ? `正在等待：${c.waiting}` : "",
       `## 自上一轮以来\n${recent.length ? recent.map((o) => `- [第 ${o.step} 轮 · ${o.kind}] ${clip(o.text, 800)}`).join("\n") : "（没有新情况）"}`,
       l.pendingAsk ? `待人回答：${l.pendingAsk.question}` : "",
-      `## 现在\n按你的判断继续：给 worker 写 \`[[instruct]]\`、自己跑 \`[[verify]]\`、\`[[review]]\`、\`[[wait]]\`、\`[[finish]]\`、\`[[abort]]\`；只有不可逆或高成本才 \`[[ask]]\`。人这句话如果改了目标 / 验收 / 口径，先写 \`[[replan]]\` 再继续。`,
+      `## 现在\n按你的判断继续：给 worker 写 \`[[instruct]]\`、自己跑 \`[[verify]]\`、\`[[review]]\`、\`[[wait]]\`、\`[[finish]]\`、\`[[abort]]\`；只有不可逆或高成本才 \`[[ask]]\`。人这句话如果改了目标 / 验收 / 口径，先写 \`[[replan]]\` 再继续。你是只读的：要改文件 / 提交 / 重跑就写 \`[[instruct]]\` 交给 worker，别自己或派子 agent 去写。`,
       `预算：${b.line}`,
     ].filter(Boolean).join("\n\n");
   }
@@ -503,6 +533,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
   out.push(SIGNAL_HINT);
   out.push([
     `## 怎么干（你自己判断，代码不检查）`,
+    "- 你在只读沙箱里，写被拒是预期：改文件、git add/commit、重跑脚本、写产物，一律写成 `[[instruct]]` 交给 worker（它有完整写权限）。不要自己动手，也不要用你 CLI 自带的子 agent / task 工具去写——它们继承你的只读权限。写不进去从来不是 `[[abort]]` 的理由。",
     "- 不信 worker 的自报：它说做完了，你自己看 diff、跑命令确认。",
     "- 长作业（训练、批处理）让 worker 后台跑并报 pid 和日志，然后 `[[wait]]`；等的时候盯着，跑偏了就 `[[instruct]]` 让它停掉改。",
     "- 能自己定的事别问人；只有不可逆（推送、部署、删数据、对外发消息）、高成本或目标本身有歧义才 `[[ask]]`。",

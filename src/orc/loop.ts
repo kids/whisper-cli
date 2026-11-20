@@ -452,6 +452,22 @@ export class LoopEngine {
       return;
     }
 
+    // 监督者因"自己写不进去"想放弃：它本来就只读，写活该交给 worker。驳回并提醒，连续超过上限才放行
+    if (a.action === "abort" && L.readonlyAbort(a.reason) && (l.guard.readonlyAborts ?? 0) < L.MAX_READONLY_ABORTS) {
+      l.guard.readonlyAborts = (l.guard.readonlyAborts ?? 0) + 1;
+      L.observe(l, n, "system", L.READONLY_ABORT_NOTE);
+      l.step = n;
+      // 续接的会话会带着"我写不进去"的思路，换新会话让它按提醒重新判断
+      l.sup = { sessionId: undefined, turns: 0 };
+      this.store.addStep({ taskId: task.id, n, reason: p.reason, action: a, accepted: false, verdict: `只读放弃已驳回（${l.guard.readonlyAborts}/${L.MAX_READONLY_ABORTS}）：写操作应交给 worker`, observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
+      const next = wasWaiting && l.waitWatch && l.heartbeatS
+        ? [{ reason: "heartbeat", delayMs: l.heartbeatS * 1000, ref: l.waitWatch }]
+        : [{ reason: "next" }];
+      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 监督者因只读想放弃，已驳回，改派 worker`, notifies, next });
+      return;
+    }
+    if (a.action !== "abort") l.guard.readonlyAborts = 0;
+
     // 巡检正常（keep）不消耗这一轮
     if (a.action === "wait" && a.keep) l.budget.steps--;
 
