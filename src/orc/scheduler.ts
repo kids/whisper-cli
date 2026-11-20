@@ -111,6 +111,27 @@ export class Orchestrator {
     return true;
   }
 
+  /**
+   * Human 「继续 / 再试一次」 on any task, whatever its shape: a loop question is answered, a stopped
+   * loop resumes, a blocked pipeline re-runs its stage, and a parent waiting on children re-runs the
+   * children that are stuck. Returns the titles that were set going (empty = nothing to continue).
+   */
+  continueTask(taskId: number, note?: string, prefer?: CliName): string[] {
+    const task = this.store.getTask(taskId);
+    if (!task) return [];
+    if (task.kind === "loop") {
+      const l = this.loop.ledger(taskId);
+      if (task.status === "blocked" && l?.pendingAsk) { this.loop.answer(taskId, undefined, note || "继续", note || "继续", prefer); return [task.title]; }
+      return this.loop.resume(taskId, note, prefer) ? [task.title] : [];
+    }
+    if (task.status === "waiting_children") {
+      return this.store.listTasks({ parentId: taskId })
+        .filter((c) => ["blocked", "failed", "waiting_children"].includes(c.status))
+        .flatMap((c) => this.continueTask(c.id, note, prefer));
+    }
+    return this.retry(taskId, note, prefer) ? [task.title] : [];
+  }
+
   /** Resume a blocked/failed task at its current stage with fresh loop budget */
   retry(taskId: number, note?: string, prefer?: CliName): boolean {
     const task = this.store.getTask(taskId);

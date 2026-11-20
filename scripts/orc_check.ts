@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyPatch, fallbackNote, loadPresets, loadRoles, resolvePreset } from "../src/orc/config";
-import { acceptable, decideAccept, decideAfterAttempt, decideParent, depsGate } from "../src/orc/core";
+import { acceptable, decideAccept, decideAfterAttempt, decideParent, depsGate, interruptedOnly } from "../src/orc/core";
 import { parseBrief, renderAutoNote, renderBrief } from "../src/orc/brief";
 import { findJsonObjects, formatFeedback, parseRoleOutput } from "../src/orc/output";
 import type { Executor, RunRequest, RunResult } from "../src/orc/runner";
@@ -177,6 +177,16 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("still reworks below the cap when nothing new appears", d.patch.stageIdx === idx("impl") && !d.brief, d);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { review: 6 } }), parsed("verdict", "[[revise]] bad\n[[major]] x"), { cap: 6 });
   check("cap reached → escalate", d.brief?.mode === "escalate" && d.brief.rounds === 7, d.brief);
+
+  // combinator 11-18: impl "blocked" only because it was cut off ("请回复「继续」") → continued by code, no human
+  const cut = "长时抓取尚未跑完；我因工具轮询被判定为循环而中断。请回复「继续」，我会接着完成 build_cards";
+  const ic = { kind: "parsed" as const, parsed: { kind: "impl", pass: false, summary: cut, notes: [], body: "" } as any };
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), ic, { progressed: true });
+  check("interrupted impl → resumed, not blocked", d.patch.status !== "blocked" && d.launches[0]?.resume === true && /不用等人说「继续」/.test(d.launches[0].note ?? "") && !d.notifies.some((n) => n.kind === "decision"), d);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl"), loops: { "stall:impl": 2 } }), ic, { progressed: false });
+  check("interrupted 3× with no progress → failed (runaway guard)", d.patch.status === "failed", d.patch);
+  check("real blocker still blocks", decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), { kind: "parsed", parsed: { kind: "impl", pass: false, summary: "需要你提供 HN 的 API token 才能继续", notes: [], body: "" } as any }).patch.status === "blocked");
+  check("interruptedOnly: decision ≠ interruption", !interruptedOnly("要用 A 方案还是 B 方案，需要你决定") && interruptedOnly("被中断了，请回复继续"));
 
   // Wording drift is not "new problems": fewer majors means the work is converging
   const prev7: any = parseRoleOutput("verdict", issuesText("第一轮", [
@@ -636,6 +646,21 @@ async function e2e() {
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
   // H: finished-task headlines follow what a loop concluded; lead submit carries supersedes
+  // C: 「继续」 on a parent waiting on a blocked child re-runs the child (lead used to answer "不是监督循环任务")
+  {
+    const { dir, repo, store, exec, orc } = setup();
+    exec.plan = '{"spec":"two parts","subtasks":[{"title":"part A","spec":"A"},{"title":"part B","spec":"B","deps":[0]}]}';
+    exec.alwaysRevise.add(2);
+    const t = orc.submit({ goal: "big", repo, preset: devPreset, chatId: "oc_c" });
+    const tick = () => (orc as any).tick();
+    for (let i = 0; i < 3000 && store.getTask(2)?.status !== "blocked"; i++) { await tick(); await sleep(5); }
+    check("C child blocked, parent waiting", store.getTask(2)!.status === "blocked" && store.getTask(t.id)!.status === "waiting_children");
+    const went = orc.continueTask(t.id, "继续，抓数据用代理池");
+    check("C continue on parent → stuck child re-runs", went.join() === "part A" && store.getTask(2)!.status === "running", { went, s: store.getTask(2)!.status });
+    check("C nothing stuck → nothing to continue", orc.continueTask(t.id).length === 0);
+    await orc.stop(t.id);
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
   // X: a bare 「停掉」 must not stop the running task when another one was just reminded (11-20 incident)
   {
     const { dir, repo, store, orc } = setup();

@@ -10,7 +10,6 @@ import { formatMemory, joinInstructions } from "../memory";
 import { recordTurn } from "../recent";
 import { renderWatchCard, updateWatch } from "../watch";
 import { AGENT_CARDS_ON, AgentCards, fmtMin, fmtTok } from "./agent-cards";
-import { acceptable } from "./core";
 import { applyPatch, loadPresets, loadRoles, presetSummary, resolvePreset } from "./config";
 import { clip, type Ledger , markerBlocks } from "./ledger";
 import { renderTaskFacts, taskFacts, writeTaskFacts } from "./facts";
@@ -465,19 +464,28 @@ export function activeTaskSummary(chatId: string, workspace?: string): string | 
   return [
     "【本群团队任务】",
     ...lines,
-    "说明：状态、卡点和评审结论以上面为准，回答“为什么没过/做到哪”要引用它，别说看不到；明细文件是只读事实，别改。用户没问就别报编号。「已完成」的任务已经收工，不占资源，不需要验收或停掉，别催人处理；只有「等人决定」的才需要人回话。",
+    "说明：状态、卡点和评审结论以上面为准，回答“为什么没过/做到哪”要引用它，别说看不到；明细文件是只读事实，别改。用户没问就别报编号。「已完成」的任务已经收工，不占资源，不需要验收或停掉，别催人处理；只有「等人决定」的才需要人回话。团队任务卡住时不要自己接手去做它的活（会和团队重复，也会撞单轮时限）：告诉用户说「继续团队任务」就能让它接着跑。",
   ].join("\n");
 }
+
+/** A blocked pipeline older than this no longer pulls every chat message to the lead (the sweep reminds instead) */
+const ASKING_FRESH_MS = 3 * 86_400_000;
 
 /** What the router needs about this chat: recent tasks (+ open questions) and a pending proposal */
 export function routeContext(chatId: string): { tasks: RouteTask[]; pendingProposal: boolean } {
   const pendingProposal = !!loadProfiles()[chatId]?.pending;
   if (!orc) return { tasks: [], pendingProposal };
   const store = orc.store;
+  const now = Date.now();
+  // a pipeline stuck anywhere (itself, or a planner-split child) is waiting for 再试一次 / 接受 / 放弃
+  const stuckPipeline = (t: Task, depth = 0): boolean => t.kind !== "loop" && (
+    t.status === "blocked"
+    || (t.status === "waiting_children" && depth < 3 && store.listTasks({ parentId: t.id }).some((c) => stuckPipeline(c, depth + 1))));
   const tasks = store.listTasks({ chatId, limit: 10 }).filter((t) => !t.parentId).map((t) => ({
     id: t.id, title: t.title, status: t.status, updatedAt: t.updatedAt,
-    // waiting for a human: a loop question, or a pipeline stuck on review / test (再试一次 / 接受 / 放弃)
-    asking: t.status === "blocked" && (t.kind === "loop" ? !!store.getLedger<Ledger>(t.id)?.pendingAsk : !!acceptable(t)),
+    asking: t.kind === "loop"
+      ? t.status === "blocked" && !!store.getLedger<Ledger>(t.id)?.pendingAsk
+      : now - t.updatedAt < ASKING_FRESH_MS && stuckPipeline(t),
   }));
   return { tasks, pendingProposal };
 }

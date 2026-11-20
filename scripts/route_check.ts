@@ -132,6 +132,13 @@ console.log(`route cases: ${ok}/${cases.length}`);
 
 // [[task]] supersedes + hard-timeout handoff
 {
+  // combinator 11-19: 「团队任务继续执行」 went to the single agent, which can't unblock a team task
+  const r = (s: string, c: RouteCtx = busy) => routeMessage(s, c).to;
+  check("团队任务继续执行 → lead", r("团队任务继续执行，抓数据用代理池") === "lead");
+  check("继续团队任务 → lead", r("继续团队任务：接着抓数据", none) === "lead");
+  check("question about team still single", r("现在团队任务正常在跑了？", none) === "single");
+}
+{
   const r = extractTaskOps('[[task]] {"goal":"做覆盖对比","supersedes":[2,"#3",2,"x"]}');
   check("supersedes parsed, deduped, junk dropped", JSON.stringify(r.ops[0].supersedes) === "[2,3]", r.ops[0]);
   check("supersedes absent → undefined", extractTaskOps('[[task]] {"goal":"g"}').ops[0].supersedes === undefined);

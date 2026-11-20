@@ -69,6 +69,19 @@ export const CONTINUE_CAP = 20;
 
 const empty = (): Decision => ({ patch: {}, launches: [], notifies: [], children: [] });
 
+/**
+ * An implementer "blocked" whose only reason is being cut off (CLI loop detection, timeout, turn
+ * limit) and asking to be told 「继续」. Real blockers (missing access, a choice for the human)
+ * do not match: they name a decision or a missing resource, not an interruption.
+ */
+export function interruptedOnly(summary: string): boolean {
+  const s = summary || "";
+  const cutOff = /被.{0,10}(中断|打断|终止|判定为循环)|判定为(死)?循环|中途(停|断)|interrupted|cut off|loop detect/i.test(s)
+    || /(请|可以|麻烦)?回复\s*[「"“]?\s*继续/.test(s);
+  const needsHuman = /(需要|请)(你|人|用户)?(决定|确认|选择|提供|授权|批准)|权限|密钥|token|账号|无法访问|拒绝访问|二选一/i.test(s.replace(/(请|可以|麻烦)?回复\s*[「"“]?\s*继续[」"”]?/g, ""));
+  return cutOff && !needsHuman;
+}
+
 export interface DecideCtx {
   /** the previous failed verdict/test of the same stage — used to see whether the problem set is shrinking */
   prev?: ParsedOutput;
@@ -98,14 +111,17 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     return d;
   }
 
-  if (outcome.kind === "run_error" || outcome.kind === "unparseable") {
+  // "blocked" that only says "I got cut off, tell me to continue" is an unfinished run, not a decision
+  const selfStopped = outcome.kind === "parsed" && outcome.parsed.kind === "impl" && !outcome.parsed.pass && interruptedOnly(outcome.parsed.summary);
+
+  if (outcome.kind === "run_error" || outcome.kind === "unparseable" || selfStopped) {
     const k = `stall:${stage.id}`;
     loops[k] = ctx.progressed ? 0 : (loops[k] ?? 0) + 1;
     const total = bump(`cont:${stage.id}`);
     const name = stageName(stage.id);
     if (loops[k] >= STALL_LIMIT || total >= CONTINUE_CAP) {
       const what = loops[k] >= STALL_LIMIT
-        ? `连续 ${loops[k]} 次${outcome.kind === "run_error" ? `运行失败（${outcome.error.slice(0, 200)}）` : "停下时没给结论"}，期间没有任何新改动`
+        ? `连续 ${loops[k]} 次${outcome.kind === "run_error" ? `运行失败（${outcome.error.slice(0, 200)}）` : selfStopped ? "中途被打断" : "停下时没给结论"}，期间没有任何新改动`
         : `已续跑 ${total} 次仍没收尾`;
       d.patch = { status: "failed", loops, progress: `${name}${what}` };
       d.notifies.push({
@@ -118,9 +134,11 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     const kind = task.preset.roles[stage.role]?.output;
     const why = outcome.kind === "unparseable"
       ? "上一轮你停下时还没写结论行。"
-      : outcome.timedOut
-        ? "上一轮运行到了时长上限被终止。耗时长的步骤放后台跑、结果落盘。"
-        : `上一轮运行异常退出：${outcome.error.slice(0, 300)}。`;
+      : outcome.kind === "parsed"
+        ? `上一轮你中途停了（${outcome.parsed.summary.slice(0, 200)}）。不用等人说「继续」，现在就接着做；长作业放后台跑、看日志文件，别高频轮询。`
+        : outcome.timedOut
+          ? "上一轮运行到了时长上限被终止。耗时长的步骤放后台跑、结果落盘。"
+          : `上一轮运行异常退出：${outcome.error.slice(0, 300)}。`;
     d.patch = { loops, progress: `${name}还没收尾，接着跑` };
     d.launches.push({
       taskId: task.id,

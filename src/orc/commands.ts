@@ -395,7 +395,11 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
       return;
     }
     case "stop": await say(own(act.task) && o.stop(act.task) ? `🛑 「${name(act.task)}」已终止` : `「${name(act.task)}」无法终止`); return;
-    case "retry": await say(own(act.task) && o.retry(act.task, act.note, ownCli(h)) ? `🔁 「${name(act.task)}」已重新排队` : `「${name(act.task)}」当前状态不能重试`); return;
+    case "retry": {
+      const went = own(act.task) ? o.continueTask(act.task, act.note, ownCli(h)) : [];
+      await say(went.length ? `🔁 ${went.map((x) => `「${x}」`).join("、")}接着跑了` : `「${name(act.task)}」当前状态不能重试`);
+      return;
+    }
     case "accept": {
       const t = own(act.task) ? o.store.getTask(act.task) : undefined;
       const st = t && acceptable(t);
@@ -411,6 +415,13 @@ export async function executeLeadAction(h: OrcChatHost, chatId: string, act: Lea
     }
     case "answer": {
       if (!own(act.task)) { await say("本群没有这个任务"); return; }
+      const t = o.store.getTask(act.task)!;
+      // a pipeline (or a parent waiting on children) has no question to answer: 「继续」 means re-run what is stuck
+      if (t.kind !== "loop" || !o.loop.ledger(t.id)?.pendingAsk) {
+        const went = o.continueTask(act.task, [act.option, act.text].filter(Boolean).join(" ") || userText, ownCli(h));
+        await say(went.length ? `🔁 ${went.map((x) => `「${x}」`).join("、")}接着跑了` : `「${t.title}」现在没有卡住等人的地方`);
+        return;
+      }
       await say(o.loop.answer(act.task, act.option, act.text, userText, ownCli(h)));
       return;
     }
