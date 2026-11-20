@@ -569,6 +569,20 @@ async function e2e() {
     check("J2 abort passes after the cap", store.getTask(t.id)!.status === "failed" && steps.length === L.MAX_READONLY_ABORTS + 1 && steps.at(-1)!.accepted, steps.map((s: any) => [s.accepted, s.verdict]));
     done();
   }
+
+  // K: 被停掉的任务「再试一次」要真的接着跑（commit 曾因 dropped 直接返回，retry 报成功却什么都没做）
+  {
+    const { repo, store, exec, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "x", repo, preset: loopPreset, criteria: ["c"] });
+    exec.sup.set(t.id, [S({ action: "finish", summary: "接着做完了" })]);
+    orc.stop(t.id);
+    check("K stopped", store.getTask(t.id)!.status === "dropped");
+    check("K retry accepted", orc.retry(t.id, "误停了，接着做"));
+    check("K retry lifts dropped + queues a round", store.getTask(t.id)!.status === "running" && store.pendingEffects().some((e) => e.kind === "loop" && (e.payload as any).taskId === t.id), store.getTask(t.id));
+    await drive(() => store.getTask(t.id)!.status === "ready");
+    check("K resumed task runs to the end", store.getTask(t.id)!.status === "ready", store.getTask(t.id));
+    done();
+  }
 }
 
 e2e()

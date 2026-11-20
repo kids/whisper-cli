@@ -253,6 +253,8 @@ export class LoopEngine {
     l.pendingAsk = undefined;
     if (note) L.noteHuman(l, note);
     L.observe(l, l.step + 1, "human", `人工重试${note ? "：" + note : ""}`);
+    // commit() ignores dropped tasks (a late run must not revive a stopped one): lift it first, or retry is a silent no-op
+    if (task.status === "dropped") this.store.updateTask(taskId, { status: "running" });
     this.commit(task, l, { status: "running", progress: "人工重试", next: [{ reason: "resume" }] });
     return true;
   }
