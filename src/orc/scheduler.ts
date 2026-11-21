@@ -349,11 +349,17 @@ export class Orchestrator {
   private failLaunch(e: Effect, task: Task, err: unknown): void {
     const msg = (err as Error)?.message ?? String(err);
     console.error(`[orc] task #${task.id} launch failed:`, msg);
+    const merge = err instanceof wt.MergeConflictError ? err.conflict : undefined;
     this.store.tx(() => {
       const fresh = this.store.getTask(task.id)!;
-      this.applyDecision(fresh, decideAfterAttempt(fresh, { kind: "run_error", error: msg, timedOut: false }));
+      // A merge conflict is deterministic: hand it to a human instead of burning the stall budget.
+      const outcome: Outcome = merge
+        ? { kind: "merge_conflict", branch: merge.branch, files: merge.files, detail: merge.detail }
+        : { kind: "run_error", error: msg, timedOut: false };
+      this.applyDecision(fresh, decideAfterAttempt(fresh, outcome));
       this.store.markEffect(e.id, "done", { error: msg });
     });
+    this.emitProgress(task.id);
   }
 
   // ---- one attempt --------------------------------------------------------
@@ -363,17 +369,24 @@ export class Orchestrator {
     return resolve(this.opts.orcHome, "notes", `${key}.md`);
   }
 
-  /** Create the task worktree on first use (shared with the loop engine) */
+  /**
+   * Create or reuse the task worktree (shared with the loop engine). Dependency merges run on every
+   * launch and are idempotent: a retry after a human resolves the conflict must pick up the new commit
+   * instead of short-circuiting on the existing directory.
+   */
   prepareWorktree(task: Task): Task {
-    if (task.worktree && existsSync(task.worktree)) return task;
-    const path = wt.worktreePath(this.opts.orcHome, task.repo, task.title, task.id);
-    const branch = wt.branchName(task.title, task.id);
+    const existing = task.worktree && existsSync(task.worktree) ? task.worktree : undefined;
+    const path = existing ?? wt.worktreePath(this.opts.orcHome, task.repo, task.title, task.id);
+    const branch = task.branch || wt.branchName(task.title, task.id);
     const depBranches = task.deps.map((id) => this.store.getTask(id)?.branch).filter((b): b is string => !!b);
     const base = depBranches[0] ? wt.headSha(task.repo, depBranches[0]) : task.baseRef;
     wt.ensureWorktree(task.repo, path, branch, base);
-    const conflict = wt.mergeBranches(path, depBranches.slice(1));
-    if (conflict) throw new Error(conflict);
-    this.store.updateTask(task.id, { worktree: path, branch, baseRef: depBranches.length ? base : task.baseRef });
+    // Record it before merging: even a conflict leaves a real branch a human can inspect and fix.
+    this.store.updateTask(task.id, existing
+      ? { worktree: path, branch }
+      : { worktree: path, branch, baseRef: depBranches.length ? base : task.baseRef });
+    const conflict = wt.mergeBranches(path, depBranches);
+    if (conflict) throw new wt.MergeConflictError(conflict);
     return this.store.getTask(task.id)!;
   }
 

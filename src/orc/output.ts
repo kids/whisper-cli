@@ -13,7 +13,13 @@
 // =============================================================================
 import type { OutputKind } from "./types";
 
-export interface PlanSubtask { title: string; spec: string; deps: number[] }
+export interface PlanSubtask {
+  title: string;
+  spec: string;
+  deps: number[];
+  /** files this subtask intends to touch; used to keep overlapping siblings serial */
+  files: string[];
+}
 export interface Issue { severity: "major" | "minor"; file?: string; line?: number; desc: string }
 
 export interface ParsedOutput {
@@ -145,6 +151,7 @@ function parseJsonReply(kind: OutputKind, text: string): ParsedOutput | { error:
             title: s.title.trim(),
             spec: str(s.spec).trim() || s.title.trim(),
             deps: Array.isArray(s.deps) ? s.deps.map(Number).filter((n: number) => Number.isInteger(n)) : [],
+            files: Array.isArray(s.files) ? s.files.map((f: any) => str(f).trim()).filter(Boolean) : [],
           }))
       : [];
     // deps are indices into subtasks; drop forward/self/out-of-range refs (keeps the DAG acyclic)

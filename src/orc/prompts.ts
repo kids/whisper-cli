@@ -13,9 +13,11 @@ const CONCL_TAG: Partial<Record<OutputKind, string>> = { impl: "done", verdict: 
 const ROLE_HAS_CONCLUSION = new Set<OutputKind>(Object.keys(CONCL_TAG) as OutputKind[]);
 
 export const CONTRACT: Record<OutputKind, string> = {
-  plan: `{"spec": "可验收的规格：要做什么、不做什么、验收标准", "subtasks": [{"title": "…", "spec": "…", "deps": [0]}], "summary": "一句话", "notes": ["值得团队记住的发现/决策"]}
+  plan: `{"spec": "可验收的规格：要做什么、不做什么、验收标准", "subtasks": [{"title": "…", "spec": "…", "deps": [0], "files": ["path/to/file"]}], "summary": "一句话", "notes": ["值得团队记住的发现/决策"]}
 - 只有当工作确实可以并行、且每块能独立验收时才拆 subtasks（2～5 个）；否则 subtasks 给空数组 []。
-- deps 是本数组里**排在前面**的子任务下标。`,
+- deps 是本数组里**排在前面**的子任务下标。
+- 每个子任务必须写 "files"：它计划修改或新建的文件路径（目录写到目录）。**并行子任务的 files 不能有交集**；同一文件只能有一个 owner，别的子任务要改它就通过 deps 排到它后面，不能并行。
+- 共享文档（README、*_REPORT.md、EXPERIMENT_LOG.md、CHANGELOG.md 等）尤其如此：要么只让一个子任务写，要么各写各的小节并指定唯一 owner 合并；禁止两个并行子任务改同一段。`,
   impl: `最后**单独一行**写结论（这是唯一判定依据，不要放进代码块）：
 [[done]] 改了什么、怎么验证的
 或
@@ -95,6 +97,9 @@ export function buildStagePrompt(c: PromptContext): string {
   out.push(`## 规格\n${task.spec || "（尚无规格）"}`);
   out.push(`## 工作区\n当前目录是本任务专用的 git worktree（分支 \`${task.branch}\`，基线 \`${task.baseRef.slice(0, 12)}\`）。代码改动只在这里工作。` +
     `\n**产物落盘**：仓库忽略的 \`tmp/\` 已软链到主仓库 \`tmp/orc/${slug}/\`，数据、日志、中间结果直接写 \`tmp/...\` 就会落在主仓库；不要把大文件写进 git 跟踪目录，也不要留在 worktree 里。`);
+  if (role.output === "impl") {
+    out.push(`## 依赖与共享文件\n- 依赖分支已由 orc 合并进当前分支；先 \`git log --oneline -8\` 确认，不要再自己 merge 一遍。\n- 改共享文档（README、*_REPORT.md、EXPERIMENT_LOG.md、CHANGELOG.md 等）只在自己的小节追加，不要重写别人段落。若发现依赖分支改过同一段、两边结论无法两全，用 [[blocked]] 写清文件和两边内容，不要自行删改对方结论。`);
+  }
 
   if (c.history.length) {
     out.push(`## 之前阶段的结论\n` + c.history.map(historyLine).join("\n"));

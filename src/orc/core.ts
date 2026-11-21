@@ -38,6 +38,8 @@ export type Outcome =
   | { kind: "parsed"; parsed: ParsedOutput }
   | { kind: "unparseable"; error: string }
   | { kind: "run_error"; error: string; timedOut: boolean }
+  /** dependency branch merge hit a content conflict: deterministic, never retried as a model fault */
+  | { kind: "merge_conflict"; branch: string; files: string[]; detail: string }
   | { kind: "cancelled" };
 
 export interface TaskPatch {
@@ -68,6 +70,31 @@ export const STALL_LIMIT = 3;
 export const CONTINUE_CAP = 20;
 
 const empty = (): Decision => ({ patch: {}, launches: [], notifies: [], children: [] });
+
+const normPath = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+const pathOverlap = (a: string, b: string): boolean => {
+  const x = normPath(a), y = normPath(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+};
+
+/**
+ * Planner declares each subtask's files. If two siblings that could run in parallel touch the same
+ * path, make the later one depend on the earlier one, so the worktree merge has nothing to resolve.
+ * Deps only point backwards, so this cannot create a cycle.
+ */
+export function serializeOverlapping(subtasks: PlanSubtask[]): PlanSubtask[] {
+  const kids = subtasks.map((s) => ({ ...s, deps: [...s.deps], files: [...(s.files ?? [])] }));
+  for (let i = 1; i < kids.length; i++) {
+    for (let j = 0; j < i; j++) {
+      if (kids[i].deps.includes(j)) continue;
+      if (!kids[i].files.some((f) => kids[j].files.some((g) => pathOverlap(f, g)))) continue;
+      kids[i].deps.push(j);
+    }
+    kids[i].deps = [...new Set(kids[i].deps)].sort((a, b) => a - b);
+  }
+  return kids;
+}
 
 /**
  * An implementer "blocked" whose only reason is being cut off (CLI loop detection, timeout, turn
@@ -109,6 +136,15 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     d.patch = { status: "dropped", progress: "已被用户终止" };
     d.notifies.push({ taskId: task.id, kind: "info", text: "任务已终止" });
     return d;
+  }
+
+  // A content conflict is a planning/dependency problem, not a transient failure. Retrying merges the
+  // same commits onto the same base and fails the same way, so stop at once and hand over the file list.
+  if (outcome.kind === "merge_conflict") {
+    const files = outcome.files.length
+      ? outcome.files.join("、")
+      : `（git 没有列出冲突文件：${outcome.detail.slice(0, 200) || "无输出"}）`;
+    return block(`依赖分支 \`${outcome.branch}\` 合并冲突：${files}。这是两边改了同一处的确定性冲突，不是模型或 whisper 故障；已停止自动重试。解掉冲突后说「重试」会从这里继续。`);
   }
 
   // "blocked" that only says "I got cut off, tell me to continue" is an unfinished run, not a decision
@@ -161,7 +197,7 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     d.patch.spec = p.spec;
     if ((p.subtasks?.length ?? 0) >= 2) {
       d.patch = { ...d.patch, status: "waiting_children", loops, progress: `已拆成 ${p.subtasks!.length} 个子任务` };
-      d.children = p.subtasks!;
+      d.children = serializeOverlapping(p.subtasks!);
       return d;
     }
   }

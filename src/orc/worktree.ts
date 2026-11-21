@@ -104,14 +104,50 @@ export function ensureWorktree(repo: string, path: string, branch: string, base:
   ensureArtifactLink(repo, path);
 }
 
-/** Merge extra dependency branches into the worktree; returns conflict message or undefined */
-export function mergeBranches(wt: string, branches: string[]): string | undefined {
+export interface MergeConflict {
+  branch: string;
+  /** files git left with conflict markers (empty when the failure was not a content conflict) */
+  files: string[];
+  /** git's own output, both streams, so the card is never空 again */
+  detail: string;
+}
+
+/** A dependency merge that cannot be resolved automatically. Deterministic: retrying is pointless. */
+export class MergeConflictError extends Error {
+  constructor(readonly conflict: MergeConflict) {
+    super(`合并依赖分支 ${conflict.branch} 冲突${conflict.files.length ? `（${conflict.files.join("、")}）` : ""}`);
+    this.name = "MergeConflictError";
+  }
+}
+
+function isAncestor(cwd: string, ref: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", ref, "HEAD"], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Merge dependency branches into the worktree. Already-merged branches are skipped (idempotent:
+ * a retry after a human resolved the conflict must not fail on the same tree again).
+ * Returns the conflict, or undefined when every branch is in.
+ */
+export function mergeBranches(wt: string, branches: string[]): MergeConflict | undefined {
   for (const b of branches) {
+    if (isAncestor(wt, b)) continue;
     try {
       execFileSync("git", [...IDENT, "merge", "--no-edit", "-q", b], { cwd: wt, stdio: ["ignore", "pipe", "pipe"] });
     } catch (e: any) {
+      // git writes CONFLICT lines to stdout; stderr is usually empty. Read both.
+      const out = (e.stdout?.toString() || "").trim();
+      const err = (e.stderr?.toString() || "").trim();
+      const detail = [out, err].filter(Boolean).join("\n").slice(0, 1000);
+      const files = git(wt, ["diff", "--name-only", "--diff-filter=U"], { allowFail: true })
+        .split("\n").map((s) => s.trim()).filter(Boolean);
       git(wt, ["merge", "--abort"], { allowFail: true });
-      return `合并依赖分支 ${b} 冲突：${(e.stderr?.toString() || "").slice(0, 300)}`;
+      return { branch: b, files, detail };
     }
   }
   return undefined;
