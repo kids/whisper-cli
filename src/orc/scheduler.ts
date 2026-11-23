@@ -8,7 +8,7 @@
 //            enqueues the next effects.
 // Runs independently of the per-chat message queue (002 §2.2).
 // =============================================================================
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { parseBrief, renderAutoNote, renderBrief } from "./brief";
@@ -34,6 +34,14 @@ export type NotifySink = (task: Task, n: NotifyPayload) => Promise<void>;
  * MAX_WORKER_TURNS; this is the pipeline equivalent. 0 disables rotation.
  */
 const MAX_SESSION_TURNS = Number(process.env.ORC_SESSION_TURNS || 6);
+
+/**
+ * Cap on the per-task working-state file that is fed back into every prompt.
+ * Large enough for a real handover (current position, decisions, open items),
+ * small enough that re-sending it each round is cheap. Older lines are dropped
+ * from the front, since the state is rewritten rather than appended.
+ */
+const STATE_MAX_CHARS = Number(process.env.ORC_STATE_CHARS || 4000);
 
 export interface OrchestratorOptions {
   orcHome: string;
@@ -388,6 +396,27 @@ export class Orchestrator {
   }
 
   /**
+   * Per-task working state — the file a fresh session reads instead of
+   * re-deriving everything. The shared `<repo>.md` notes stay as an append-only
+   * log across tasks, but they are useless as handover material: #38 wrote 6
+   * lines into a file where #7 had 41, so its own state was pushed out of the
+   * 40-line window every time. This file belongs to one task only, is capped so
+   * it cannot grow without bound, and is rewritten (not appended) each round so
+   * the newest state wins.
+   */
+  private statePath(task: Task): string {
+    return resolve(this.opts.orcHome, "notes", `task-${task.id}.md`);
+  }
+
+  /** Read the task's working state, trimmed to a size that fits a prompt. */
+  private readState(task: Task): string {
+    const p = this.statePath(task);
+    if (!existsSync(p)) return "";
+    const raw = readFileSync(p, "utf8").trim();
+    return raw.length > STATE_MAX_CHARS ? raw.slice(-STATE_MAX_CHARS) : raw;
+  }
+
+  /**
    * Create or reuse the task worktree (shared with the loop engine). Dependency merges run on every
    * launch and are idempotent: a retry after a human resolves the conflict must pick up the new commit
    * instead of short-circuiting on the existing directory.
@@ -446,7 +475,12 @@ export class Orchestrator {
     const notesPath = this.notesPath(task);
     const notesTail = existsSync(notesPath) ? readFileSync(notesPath, "utf8").split("\n").slice(-40).join("\n").trim() : "";
     const inbox = task.inbox;
-    const prompt = buildStagePrompt({ task, stage, role, launch, history, diff, notesPath, notesTail, inbox });
+    const statePath = this.statePath(task);
+    const prevState = this.readState(task);
+    const prompt = buildStagePrompt({
+      task, stage, role, launch, history, diff, notesPath, notesTail, inbox,
+      statePath, prevState, freshSession: !resumeSessionId,
+    });
     const instructions = await this.opts.instructionsFor?.(task);
 
     const attempt = this.store.tx(() => {
@@ -460,6 +494,9 @@ export class Orchestrator {
     const handle = { attemptId: attempt.id, taskId: task.id, role: role.name, cli: role.cli, sessionKey, cancelled: false, slot };
     this.running.set(attempt.id, handle);
     this.emitProgress(task.id);
+    // Track whether this round actually rewrote the handover doc, so we can fall
+    // back to a generated one when the model skipped it.
+    const stateMtime = existsSync(statePath) ? statSync(statePath).mtimeMs : 0;
 
     const artifactDir = resolve(this.opts.orcHome, "tasks", String(task.id));
     mkdirSync(artifactDir, { recursive: true });
@@ -561,7 +598,23 @@ export class Orchestrator {
       this.store.markEffect(e.id, "done");
     });
     if (parsed?.notes?.length) {
-      appendFileSync(this.notesPath(task), parsed.notes.map((x: string) => `- [#${task.id} ${stage.id}/${role.name}] ${x}`).join("\n") + "\n");
+      // Models sometimes echo the prefix back inside the note body, producing
+      // "[#1 research/researcher] [#1 research/researcher] ..." — strip it.
+      const tag = `[#${task.id} ${stage.id}/${role.name}]`;
+      const clean = parsed.notes
+        .map((x: string) => x.replace(/^(\s*\[#[^\]]*\]\s*)+/, "").trim())
+        .filter(Boolean);
+      if (clean.length) {
+        appendFileSync(this.notesPath(task), clean.map((x: string) => `- ${tag} ${x}`).join("\n") + "\n");
+      }
+    }
+    // Fallback handover: if the round did not rewrite the state file, write a
+    // minimal one ourselves. A stale or missing handover is what forces the next
+    // session to re-read the whole repo, so a thin one beats none.
+    const wroteState = existsSync(statePath) && statSync(statePath).mtimeMs > stateMtime;
+    if (!wroteState && parsed?.notes?.length) {
+      const stamp = `## 当前进度\n- ${stage.id}/${role.name} 于 ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC 收尾（本轮未改写状态文件，以下是自动生成的摘要）\n\n## 已定的决策\n${parsed.notes.map((x: string) => `- ${x}`).join("\n")}`;
+      writeFileSync(statePath, stamp.slice(0, STATE_MAX_CHARS));
     }
     this.emitProgress(task.id);
     if (brief) await this.writeBrief(task.id, brief);

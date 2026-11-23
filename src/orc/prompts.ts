@@ -79,6 +79,12 @@ export interface PromptContext {
   notesPath: string;
   notesTail: string;
   inbox: string[];
+  /** this task's own working-state file — the handover doc a new session starts from */
+  statePath?: string;
+  /** contents of that file (already trimmed by the caller) */
+  prevState?: string;
+  /** true when this attempt starts a session with no history to lean on */
+  freshSession?: boolean;
 }
 
 export function buildStagePrompt(c: PromptContext): string {
@@ -113,6 +119,19 @@ export function buildStagePrompt(c: PromptContext): string {
     out.push(`## 本任务相对基线的改动\n提交：\n\`\`\`\n${c.diff.log || "(无提交)"}\n\`\`\`\n统计：\n\`\`\`\n${c.diff.stat || "(无改动)"}\n\`\`\``);
     if (c.diff.diff) out.push(`\`\`\`diff\n${c.diff.diff}\n\`\`\``);
   }
+  // Task working state: the handover doc. This is what keeps knowledge out of
+  // the conversation — a fresh session (or a rotated one) reads it instead of
+  // re-reading the repo to rebuild context, which is where the token blowups
+  // came from (#38 re-read an 84K module all afternoon).
+  if (c.statePath) {
+    const head = c.freshSession
+      ? `## 本任务状态文件（新会话，先读它）\n这是接手本任务的交接说明，上一轮不在你的会话里。**先按它了解进度，不要为了重建上下文把大文件整份重读**；只有它没覆盖到的地方，才用 grep/局部读取去核实。`
+      : `## 本任务状态文件\n上一轮结束时写下的进度、决策和待办。以它为准继续，不要凭记忆重推。`;
+    out.push(
+      `${head}\n路径：\`${c.statePath}\`（本轮结束前改写它，见「输出约定」）` +
+      (c.prevState ? `\n\n${c.prevState}` : `\n（还没有内容：这是本任务的第一次，写完这一轮就把当前进度、已定的决策、还没做的事写进去。）`),
+    );
+  }
   out.push(`## 团队共享笔记\n路径：\`${c.notesPath}\`（只读参考；要新增笔记就写 \`[[note]] 一句话\`，orc 会追加进去）` +
     (c.notesTail ? `\n最近内容：\n${c.notesTail}` : ""));
 
@@ -120,6 +139,8 @@ export function buildStagePrompt(c: PromptContext): string {
   out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
   out.push(`## 输出约定（必须遵守）\n这一轮回复结束就等于交付：后台作业要等它跑完、结果落盘再收尾，不要以「继续」「等它跑完」结束。\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}${
     ROLE_HAS_CONCLUSION.has(role.output) ? `\n- 自检：回复发出前看最后一行是不是上面的标记行。**整条回复以结论行开头的那一行结尾**——不写这句话，本轮会被判为没收尾、白跑一次。别的任何写法（「完成了」「已修复」、或者在段落里夹一句 [[${CONCL_TAG[role.output]}]]）都不算。` : ""
+  }${
+    c.statePath ? `\n- 收尾前**改写状态文件** \`${c.statePath}\`（覆盖写，不是追加）。它是下一轮和下一个接手的角色唯一的交接物，控制在 4000 字内，只写这几节：\n  \`\`\`\n  ## 当前进度\n  做到哪一步、哪一步没做完（一到三行）\n  ## 已定的决策\n  - 决定 + 为什么（只写会影响后续判断的，不要抄代码）\n  ## 待办\n  - 还没做的事，按顺序\n  ## 已否决\n  - 试过但不行的做法 + 原因（避免下一轮重复踩）\n  ## 关键位置\n  文件:行号 —— 一眼要看哪里\n  \`\`\`\n  写状态文件优先于在回复里长篇复述；上下文里说过的结论，这里没写就等于丢了。` : ""
   }`);
   return out.join("\n\n");
 }
