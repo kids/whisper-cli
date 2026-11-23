@@ -27,6 +27,14 @@ import * as wt from "./worktree";
 
 export type NotifySink = (task: Task, n: NotifyPayload) => Promise<void>;
 
+/**
+ * How many rounds a resumed role may run in one session before rotating to a
+ * fresh one. A resumed session re-sends its full history each round, so a long
+ * running session costs quadratically. Loop workers already rotate via
+ * MAX_WORKER_TURNS; this is the pipeline equivalent. 0 disables rotation.
+ */
+const MAX_SESSION_TURNS = Number(process.env.ORC_SESSION_TURNS || 6);
+
 export interface OrchestratorOptions {
   orcHome: string;
   notify: NotifySink;
@@ -178,9 +186,16 @@ export class Orchestrator {
     const stage = task.preset.stages[Math.min(task.stageIdx, task.preset.stages.length - 1)];
     const loops = { ...task.loops };
     for (const k of Object.keys(loops)) if (k === stage.id || k.endsWith(`:${stage.id}`)) delete loops[k];
+    // 前置任务没完成时不要先写 running：否则依赖门一直等，任务会以“运行中”假活（#29）
+    const deps = task.deps.map((id) => this.store.getTask(id)).filter(Boolean) as Task[];
+    const gate = deps.length ? depsGate(deps) : "go";
+    const queued = gate !== "go";
+    const progress = gate === "wait"
+      ? `等前置任务：${deps.filter((d) => d.status !== "ready").map((d) => `#${d.id} ${d.title}`).join("、")}`
+      : queued ? gate : "人工重试";
     this.store.tx(() => {
       if (task.parentId) this.store.updateTask(task.parentId, { progress: `子任务「${task.title}」重试中` });
-      this.store.updateTask(taskId, { status: "running", loops, stageIdx: task.preset.stages.indexOf(stage), progress: "人工重试" });
+      this.store.updateTask(taskId, { status: queued ? "queued" : "running", loops, stageIdx: task.preset.stages.indexOf(stage), progress });
       this.store.addEffect("launch", { taskId, stageIdx: task.preset.stages.indexOf(stage), note } satisfies LaunchPayload);
     });
     return true;
@@ -303,9 +318,12 @@ export class Orchestrator {
       const deps = task.deps.map((id) => this.store.getTask(id)!).filter(Boolean);
       const gate = depsGate(deps);
       if (gate === "wait") {
-        // a blocked dependency waits for a human: poll slowly
+        // a blocked dependency waits for a human: poll slowly; the task itself is queued, not running
         const slow = deps.some((t) => t.status === "blocked");
+        const waiting = deps.filter((t) => t.status !== "ready").map((t) => `#${t.id} ${t.title}`);
+        this.store.updateTask(task.id, { status: "queued", progress: `等前置任务：${waiting.join("、").slice(0, 160)}` });
         this.store.markEffect(e.id, "pending", { nextAt: Date.now() + (slow ? 15_000 : 3000) });
+        this.emitProgress(task.id);
         return;
       }
       if (gate !== "go") {
@@ -396,10 +414,24 @@ export class Orchestrator {
     const role = task.preset.roles[stage.role];
     const prior = this.store.listAttempts(task.id);
     const n = prior.filter((a) => a.stageId === stage.id).length + 1;
-    const sessionKey = role.resume ? `orc:${task.id}#${role.name}` : `orc:${task.id}#${role.name}:${stage.id}:${n}`;
-    const resumeSessionId = role.resume
+    // A resumed session replays its whole history on every turn, so cost grows
+    // with the square of the round count: #26's implementer ran 14 rounds in one
+    // session and burned 191M tokens (74% of that task). Rotate to a fresh session
+    // once a role has had MAX_SESSION_TURNS rounds; the worktree diff and the
+    // prompt carry the context forward, so nothing is lost.
+    let sessionKey = role.resume ? `orc:${task.id}#${role.name}` : `orc:${task.id}#${role.name}:${stage.id}:${n}`;
+    let resumeSessionId = role.resume
       ? this.store.lastSessionId(sessionKey)
       : launch.resume ? [...prior].reverse().find((a) => a.stageId === stage.id && a.sessionId)?.sessionId ?? undefined : undefined;
+    if (role.resume && MAX_SESSION_TURNS > 0) {
+      const used = prior.filter((a) => a.sessionKey === sessionKey && a.sessionId).length;
+      const rot = Math.floor(used / MAX_SESSION_TURNS);
+      if (rot > 0) {
+        // distinct key per rotation, so lastSessionId() cannot hand back the old one
+        sessionKey = `orc:${task.id}#${role.name}:r${rot}`;
+        resumeSessionId = this.store.lastSessionId(sessionKey);
+      }
+    }
 
     // Latest passing attempt of each earlier stage → history
     const history: Attempt[] = [];
@@ -494,7 +526,7 @@ export class Orchestrator {
         // finished attempts keep only the commit as their progress line (agent card / task card show it)
         progress: sha ? `提交 ${sha.slice(0, 7)}` : "",
       });
-      const fresh = this.store.getTask(task.id)!;
+      let fresh = this.store.getTask(task.id)!;
       if (interrupted) {
         this.store.addEffect("launch", { taskId: task.id, stageIdx: launch.stageIdx, note: "你被人中途打断，请先阅读「新增输入」再继续。" } satisfies LaunchPayload);
       } else if (fresh.status === "dropped") {
@@ -503,7 +535,25 @@ export class Orchestrator {
         // 人中途改了口径：按新的安排从指定阶段重跑，不再按原来的流程推进
       } else {
         const prevParsed = [...prior].reverse().find((a) => a.stageId === stage.id && a.parsed && a.id !== attempt.id)?.parsed ?? undefined;
+        // 超时但有新提交：不是模型卡死，是活没干完。把这一环的单轮上限放宽一次，避免同样的 90 分钟再切一遍。
+        let extendedMin: number | undefined;
+        if (outcome.kind === "run_error" && outcome.timedOut && sha) {
+          const key = `timeout:${stage.id}`;
+          const used = fresh.loops[key] ?? 0;
+          if (used < 1 && role.hardTimeoutMin < 180) {
+            const preset = structuredClone(fresh.preset);
+            const nextMin = Math.min(180, Math.max(role.hardTimeoutMin + 30, Math.ceil(role.hardTimeoutMin * 1.5)));
+            preset.roles[stage.role].hardTimeoutMin = nextMin;
+            this.store.updateTask(fresh.id, { preset, loops: { ...fresh.loops, [key]: used + 1 } });
+            fresh = this.store.getTask(fresh.id)!;
+            extendedMin = nextMin;
+          }
+        }
         const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed, progressed: !!sha });
+        if (extendedMin) {
+          d.notifies.push({ taskId: task.id, kind: "info", text: `**${task.title}：这一轮超时，但已有新提交**\n已把 ${role.name} 的单轮上限从 ${role.hardTimeoutMin} 分钟放宽到 ${extendedMin} 分钟，接着做；长作业仍应 \`setsid nohup\` 放后台。` });
+          if (d.launches[0]) d.launches[0].note = `上一轮到了时长上限被终止，但已有新提交；本轮上限已放宽到 ${extendedMin} 分钟。先看工作区和后台作业，已完成的不要重做；长作业先 setsid nohup 放后台并报 pid/日志，做完给 [[done]]。`;
+        }
         if (violation) d.notifies.push({ taskId: task.id, kind: "info", text: `${role.name} 是只读角色，但工作区有改动，已提交保留（不回滚）：\n${violation.slice(0, 500)}` });
         this.applyDecision(fresh, d);
         brief = d.brief;
@@ -653,7 +703,7 @@ export class Orchestrator {
   private applyDecision(task: Task, d: Decision): void {
     this.store.updateTask(task.id, d.patch as Partial<Task>);
     if (d.patch.status && ["ready", "failed", "dropped"].includes(d.patch.status)) this.reap(task.id);
-    for (const l of d.launches) this.store.addEffect("launch", l);
+    for (const l of d.launches) this.store.addEffect("launch", l, l.delayMs ?? 0);
     for (const n of d.notifies) {
       // a child waiting on a human: say what else is held up by it
       if (n.kind === "decision" && task.parentId) {
@@ -714,8 +764,8 @@ export class Orchestrator {
    *   - still idle ≥ EXPIRE days and reminded ≥ GRACE days ago → closed (branch kept; 「再试一次」 resumes)
    * Idle = no update on the task or any of its children. Any human action resets the clock.
    */
-  sweep(now = Date.now()): { orphans: number; reminded: number; expired: number } {
-    const out = { orphans: 0, reminded: 0, expired: 0 };
+  sweep(now = Date.now()): { orphans: number; reminded: number; expired: number; stalled: number } {
+    const out = { orphans: 0, reminded: 0, expired: 0, stalled: 0 };
     const ENDED = ["ready", "failed", "dropped"];
     const open = this.store.listTasks({ status: ["queued", "running", "waiting", "waiting_children", "blocked"], limit: 500 });
     for (const c of open.filter((t) => t.parentId)) {
@@ -728,6 +778,25 @@ export class Orchestrator {
       this.emitProgress(c.id);
       this.reap(c.id);
       out.orphans++;
+    }
+
+    // 假 running：状态说在跑，但没有任何活跃 attempt / 启动 effect（#29 曾这样挂了 3 天）。
+    // 只处理 pipeline：loop 靠 ledger 心跳，另有判断。不自动重跑，避免重复改同一处。
+    const busy = this.store.pendingEffects();
+    for (const t of open.filter((x) => x.kind !== "loop" && x.status === "running")) {
+      if (now - t.updatedAt < STALLED_RUN_MS) continue;
+      if (this.store.listAttempts(t.id).some((a) => a.endedAt == null)) continue;
+      if (busy.some((e) => (e.kind === "launch" || e.kind === "loop") && e.payload?.taskId === t.id)) continue;
+      this.store.tx(() => {
+        this.store.updateTask(t.id, { status: "failed", progress: "运行失联：没有活跃的执行进程，已停止自动推进" });
+        this.store.addEffect("notify", {
+          taskId: t.id, kind: "failed",
+          text: `**${t.title}**\n\n这一轮没有活跃的执行进程，任务已停止（不会自动重跑，避免重复改动）。${t.branch ? `分支 \`${t.branch}\` 和改动都还在。` : ""}说「再试一次」从这里继续。`,
+        } satisfies NotifyPayload);
+      });
+      this.emitProgress(t.id);
+      this.reap(t.id);
+      out.stalled++;
     }
 
     const state = this.loadSweep();
@@ -779,7 +848,7 @@ export class Orchestrator {
       writeFileSync(this.sweepPath() + ".tmp", JSON.stringify(state));
       renameSync(this.sweepPath() + ".tmp", this.sweepPath());
     }
-    if (out.orphans || out.reminded || out.expired) console.log(`[orc] sweep: ${out.orphans} orphaned children dropped, ${out.reminded} reminders, ${out.expired} auto-closed`);
+    if (out.orphans || out.reminded || out.expired || out.stalled) console.log(`[orc] sweep: ${out.orphans} orphaned children dropped, ${out.stalled} stalled runs stopped, ${out.reminded} reminders, ${out.expired} auto-closed`);
     return out;
   }
 }
@@ -787,6 +856,8 @@ export class Orchestrator {
 const DAY_MS = 86_400_000;
 const REAP_AFTER_STOP_MS = 8000;
 const SWEEP_EVERY_MS = Number(process.env.ORC_SWEEP_MIN || 10) * 60_000;
+/** 状态是 running 但这么久没有 attempt / effect → 判定假运行 */
+const STALLED_RUN_MS = Number(process.env.ORC_STALLED_RUN_MIN || 30) * 60_000;
 /** Waiting on a human this long → one reminder in the chat */
 const REMIND_MS = Number(process.env.ORC_REMIND_DAYS || 1) * DAY_MS;
 /** Waiting this long (and reminded at least GRACE ago) → auto-closed; 0 disables */

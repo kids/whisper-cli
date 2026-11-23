@@ -267,15 +267,23 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
   const staleMs = opts.staleTimeoutMs ?? STALE_TIMEOUT_MS;
   const timeoutNotice = (stderr: string) => timeoutNoticeFor(stderr, hardMs, staleMs);
 
-  // Reasoning effort / auto-compact window, passed straight to the CLI.
-  // Per-agent config wins; the plain env vars cover every codebuddy agent at once.
+  // Reasoning effort, passed straight to the CLI. Per-agent config wins; the
+  // plain env var covers every codebuddy agent at once.
   const EFFORT_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
   const effortRaw = (config.effort || process.env.CODEBUDDY_EFFORT || "").trim().toLowerCase();
   const effort = EFFORT_LEVELS.has(effortRaw) ? effortRaw : undefined;
   if (effortRaw && !effort) console.warn(`[codebuddy] ignoring invalid effort "${effortRaw}"`);
+  // `--autocompact` was removed from the CLI (it now errors with "unknown option"),
+  // so pressing it through would break every run. Keeping the config key but
+  // ignoring it would silently promise compression that never happens, so warn
+  // once instead: context control now lives in session rotation (ORC_SESSION_TURNS).
   const compactRaw = (config.autocompact || process.env.CODEBUDDY_AUTOCOMPACT || "").trim().toLowerCase();
-  const autocompact = compactRaw === "auto" || /^\d+[km]?$/.test(compactRaw) ? compactRaw : undefined;
-  if (compactRaw && !autocompact) console.warn(`[codebuddy] ignoring invalid autocompact "${compactRaw}"`);
+  if (compactRaw) {
+    console.warn(
+      `[codebuddy] AUTOCOMPACT="${compactRaw}" is ignored: this CLI no longer supports --autocompact. ` +
+      `Use ORC_SESSION_TURNS to cap how many rounds a resumed session runs.`,
+    );
+  }
 
   async function attempt(resume: boolean): Promise<AiResult | null> {
     const sid = resume && opts.resumeSession !== false ? sessions.get(chatId) : undefined;
@@ -287,11 +295,10 @@ export function runCodebuddy(opts: RunCodebuddyOptions): Promise<AiResult> {
     if (sid) args.push("-r", sid);
     if (opts.model) args.push("--model", opts.model);
     if (effort) args.push("--effort", effort);
-    if (autocompact) args.push("--autocompact", autocompact);
     if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
     if (opts.disallowedTools?.length) args.push("--disallowedTools", opts.disallowedTools.join(","));
 
-    console.log(`[codebuddy] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"} model=${opts.model || "default"}${effort ? ` effort=${effort}` : ""}${autocompact ? ` autocompact=${autocompact}` : ""}`);
+    console.log(`[codebuddy] spawn chat=${chatId.slice(0, 8)} session=${sid?.slice(0, 8) || "(new)"} model=${opts.model || "default"}${effort ? ` effort=${effort}` : ""}`);
 
     const { stdout, stderr, wasCancelled, streamedText } = await new Promise<{
       stdout: string; stderr: string; wasCancelled: boolean; streamedText: string;

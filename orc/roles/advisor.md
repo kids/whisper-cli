@@ -1,7 +1,7 @@
 ---
 description: 任务卡住时写一份给人看的决策说明：现在到哪一步、卡在哪、有哪几条路、各自代价
 cli: codebuddy
-model: claude-sonnet-5.5
+model: deepseek-v4.1-flash-ioa
 output: brief
 isolation: readonly
 hard_timeout_min: 12

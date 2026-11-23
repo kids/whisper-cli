@@ -1,7 +1,7 @@
 ---
 description: 监督循环的决策者：每轮读任务账本，选一个动作交给代码执行；只读，不亲自改代码
 cli: codebuddy
-model: claude-sonnet-5.5
+model: deepseek-v4.1-flash-ioa
 output: action
 isolation: readonly
 hard_timeout_min: 15

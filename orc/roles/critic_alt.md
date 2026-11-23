@@ -1,7 +1,7 @@
 ---
 description: 第二评审者（与 critic 使用不同的 CLI/模型，用于交叉评审）
 cli: codebuddy
-model: claude-opus-5.5
+model: deepseek-v4.1-flash-ioa
 output: verdict
 isolation: readonly
 hard_timeout_min: 30

@@ -87,7 +87,7 @@ import {
 import { loadAllAgents } from "./config";
 
 /** orc lead agent model per bot CLI when ORC_LEAD_MODEL is unset (others: the CLI's own default) */
-const LEAD_DEFAULT_MODEL: Partial<Record<AgentConfig["aiCli"], string>> = { codebuddy: "claude-sonnet-5.5", cursor: "auto" };
+const LEAD_DEFAULT_MODEL: Partial<Record<AgentConfig["aiCli"], string>> = { codebuddy: "deepseek-v4.1-flash-ioa", cursor: "auto" };
 
 /** Tools denied to read-only runs (orc lead agent); Bash too, since it can write */
 const READ_ONLY_DENY = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
