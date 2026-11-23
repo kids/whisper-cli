@@ -18,6 +18,7 @@ import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
 import { OrcStore } from "./store";
 import { MODE_LABEL, parseSupersedes, type ChatMode, type RouteTask } from "./route";
+import { renderTrace } from "./trace";
 import type { CliName, PresetPatch, ResolvedPreset, Task, Verbosity } from "./types";
 import type { LoopRunEvent } from "./loop";
 import { TERMINAL } from "./types";
@@ -175,7 +176,16 @@ export function taskLabel(t: Task): string {
 export function renderCard(t: Task, _store?: OrcStore, _threaded = false): string {
   const head = taskLabel(t);
   const body = (t.progress || "").trim();
-  return body ? `${head}\n${clip(body, 500)}` : head;
+  const base = body ? `${head}\n${clip(body, 500)}` : head;
+  if (!_store || t.kind === "loop") return base;
+  // Every round ends with a track record, so a manager can review the shape of the run
+  // (retries, where the tokens went, why something stopped) without opening anything.
+  // Never let rendering break the card: a bad trace just means no trace.
+  try {
+    return `${base}\n\n${renderTrace({ task: t, attempts: _store.listAttempts(t.id), statePath: resolve(ORC_HOME, "notes", `task-${t.id}.md`) })}`;
+  } catch {
+    return base;
+  }
 }
 
 /** Walk up to the task the human submitted (planner-split children hang off it) */
