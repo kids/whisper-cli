@@ -1,0 +1,16 @@
+name: explore
+description: 探索：同一目标拆成 A/B 两条互不相同的路并行做，各自给结论（走通或精确的走不通），再由人挑一条
+# A/B 探索。提交时会展开成两个独立的候选任务（A、B），并行跑同一套阶段。
+# 候选阶段里 review / test 降级为 advisory：探索允许「这条路不行」作为结论，
+# 用交付级的门禁去卡它，只会把还没做完的路判死。挑哪一条由人决定。
+explore: true
+roles:
+  planner:     { count: 1 }
+  implementer: { count: 2 }
+  critic:      { count: 1 }
+  tester:      { count: 1 }
+stages:
+  - { id: plan,   role: planner }
+  - { id: impl,   role: implementer }
+  - { id: review, role: critic }
+  - { id: test,   role: tester }

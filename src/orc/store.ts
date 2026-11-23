@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   feedback TEXT NOT NULL DEFAULT '', inbox TEXT NOT NULL DEFAULT '[]',
   chat_id TEXT, progress TEXT NOT NULL DEFAULT '',
   origin TEXT NOT NULL DEFAULT 'human',
+  ab TEXT NOT NULL DEFAULT '[]', candidate TEXT NOT NULL DEFAULT '',
+  candidate_idx INTEGER NOT NULL DEFAULT 0, candidate_of INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS attempts (
@@ -60,6 +62,7 @@ function rowToTask(r: any): Task {
     preset, stageIdx: r.stage_idx, status: r.status,
     loops: j(r.loops, {}), deps: j(r.deps, []), feedback: r.feedback, inbox: j(r.inbox, []),
     chatId: r.chat_id ?? null, progress: r.progress, origin: r.origin === "agent" ? "agent" : "human", replan: r.replan ?? "",
+    ab: j(r.ab, []), candidate: r.candidate || undefined, candidateIdx: r.candidate_idx ?? 0, candidateOf: r.candidate_of ?? undefined,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -84,6 +87,7 @@ const TASK_COLS: Record<string, string> = {
   title: "title", spec: "spec", branch: "branch", worktree: "worktree", stageIdx: "stage_idx",
   status: "status", loops: "loops", deps: "deps", feedback: "feedback", inbox: "inbox",
   chatId: "chat_id", progress: "progress", baseRef: "base_ref", preset: "preset", replan: "replan",
+  ab: "ab", candidate: "candidate", candidateIdx: "candidate_idx", candidateOf: "candidate_of",
 };
 const ATTEMPT_COLS: Record<string, string> = {
   sessionId: "session_id", status: "status", output: "output", parsed: "parsed", error: "error",
@@ -106,6 +110,11 @@ export class OrcStore {
     if (!cols.includes("origin")) this.db.exec("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'human'");
     // 人中途改口径时，advisor 给出的"从哪个阶段重跑"，等当前这一步跑完再生效
     if (!cols.includes("replan")) this.db.exec("ALTER TABLE tasks ADD COLUMN replan TEXT NOT NULL DEFAULT ''");
+    // A/B 探索：父任务记下候选键（A、B），子任务记自己是哪一条
+    if (!cols.includes("ab")) this.db.exec("ALTER TABLE tasks ADD COLUMN ab TEXT NOT NULL DEFAULT '[]'");
+    if (!cols.includes("candidate")) this.db.exec("ALTER TABLE tasks ADD COLUMN candidate TEXT NOT NULL DEFAULT ''");
+    if (!cols.includes("candidate_idx")) this.db.exec("ALTER TABLE tasks ADD COLUMN candidate_idx INTEGER NOT NULL DEFAULT 0");
+    if (!cols.includes("candidate_of")) this.db.exec("ALTER TABLE tasks ADD COLUMN candidate_of INTEGER");
   }
 
   /** Run fn in one transaction (nested calls join the outer one) */
@@ -132,14 +141,16 @@ export class OrcStore {
     parentId?: number | null; title: string; goal: string; spec?: string; repo: string; baseRef: string;
     preset: ResolvedPreset; stageIdx?: number; deps?: number[]; chatId?: string | null; status?: Task["status"];
     kind?: Task["kind"]; bar?: string; origin?: "human" | "agent";
+    ab?: string[] | null; candidate?: string; candidateIdx?: number; candidateOf?: number;
   }): Task {
     const now = Date.now();
     const r = this.db.prepare(
-      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,bar,origin,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO tasks (parent_id,title,goal,spec,repo,base_ref,preset,stage_idx,status,deps,chat_id,kind,bar,origin,ab,candidate,candidate_idx,candidate_of,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       t.parentId ?? null, t.title, t.goal, t.spec ?? "", t.repo, t.baseRef, JSON.stringify(t.preset),
-      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", t.bar ?? "", t.origin ?? "human", now, now,
+      t.stageIdx ?? 0, t.status ?? "queued", JSON.stringify(t.deps ?? []), t.chatId ?? null, t.kind ?? "pipeline", t.bar ?? "", t.origin ?? "human",
+      JSON.stringify(t.ab ?? []), t.candidate ?? "", t.candidateIdx ?? 0, t.candidateOf ?? null, now, now,
     );
     return this.getTask(Number(r.lastInsertRowid))!;
   }

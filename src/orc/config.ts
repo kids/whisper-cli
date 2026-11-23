@@ -96,6 +96,7 @@ export function parsePresetYaml(src: string): PresetDef {
     stages,
     enabled: Array.isArray(y.enabled) ? y.enabled.map(String) : [],
     loop,
+    explore: y.explore === true,
   };
 }
 
@@ -220,7 +221,7 @@ export function resolvePreset(
     }
   });
   if (errs.length) throw new Error(`invalid preset "${def.name}":\n- ${errs.join("\n- ")}`);
-  return { name: def.name, version: opts.version ?? 1, kind: "pipeline", roles: resolvedRoles, stages, ...(fallbacks.length ? { fallbacks } : {}) };
+  return { name: def.name, version: opts.version ?? 1, kind: "pipeline", roles: resolvedRoles, stages, ...(fallbacks.length ? { fallbacks } : {}), ...(def.explore ? { explore: true } : {}) };
 }
 
 /** 「本机没有 codebuddy：critic、implementer 改用 codex（默认模型）」; "" when nothing fell back */

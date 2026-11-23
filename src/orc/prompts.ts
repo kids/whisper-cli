@@ -86,6 +86,8 @@ export interface PromptContext {
   prevState?: string;
   /** true when this attempt starts a session with no history to lean on */
   freshSession?: boolean;
+  /** A/B exploration: which candidate this task is, out of how many */
+  candidate?: { key: string; index: number; total: number; siblings: string[] };
 }
 
 export function buildStagePrompt(c: PromptContext): string {
@@ -98,6 +100,21 @@ export function buildStagePrompt(c: PromptContext): string {
     out.push(`> ⚠️ 恢复运行：上一次运行被中断（进程重启）。在重复任何对外操作（提交、推送、发消息、改远端）之前，先检查工作区、git 历史和远端状态，确认哪些已经做过。`);
   }
   if (c.launch.note) out.push(`> ⚠️ ${c.launch.note}`);
+  // A/B exploration. Two candidates run on the same goal in parallel and a human picks
+  // one, so each must be an honest, independent attempt: peeking at the sibling's branch
+  // or hedging toward "the safe option" destroys the only thing the comparison buys.
+  if (c.candidate) {
+    const names = c.candidate.siblings.map((s) => s).join("、");
+    const n = c.candidate.index + 1;
+    const t = c.candidate.total;
+    const route = task.spec || task.goal;
+    const push = [];
+    push.push("## 这是探索中的一条路（" + c.candidate.key + "，第 " + n + "/" + t + " 条）");
+    push.push("同一个目标另有 " + c.candidate.siblings.length + " 条互不相同的方案在并行做（" + names + "）。先把这一条路认真做成，不要为了「保险」做成中间态；也不要去看、去合并、去参考别的方案的分支——它们的价值就在于彼此独立，最后要由人对比着挑。");
+    push.push("- 这条路的做法：" + route);
+    push.push("- 允许失败：如果这条路走不通，**走不通本身就是这轮的产出**，要说清是「方法本身不行」还是「细节没到位」。可以失败，不可以含糊。");
+    out.push(push.join("\n"));
+  }
 
   out.push(`## 目标\n${task.goal}`);
   if (task.parentId) out.push(`（这是父任务 #${task.parentId} 拆出的子任务：${task.title}）`);
@@ -139,11 +156,20 @@ export function buildStagePrompt(c: PromptContext): string {
 
   out.push(`## 角色说明\n${role.prompt}`);
   out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
-  out.push(`## 输出约定（必须遵守）\n这一轮回复结束就等于交付：后台作业要等它跑完、结果落盘再收尾，不要以「继续」「等它跑完」结束。\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}${
-    ROLE_HAS_CONCLUSION.has(role.output) ? `\n- 自检：回复发出前看最后一行是不是上面的标记行。**整条回复以结论行开头的那一行结尾**——不写这句话，本轮会被判为没收尾、白跑一次。别的任何写法（「完成了」「已修复」、或者在段落里夹一句 [[${CONCL_TAG[role.output]}]]）都不算。` : ""
-  }${
-    c.statePath ? `\n- 收尾前**改写状态文件** \`${c.statePath}\`（覆盖写，不是追加）。它是下一轮和下一个接手的角色唯一的交接物，控制在 4000 字内，只写这几节：\n  \`\`\`\n  ## 当前进度\n  做到哪一步、哪一步没做完（一到三行）\n  ## 已定的决策\n  - 决定 + 为什么（只写会影响后续判断的，不要抄代码）\n  ## 待办\n  - 还没做的事，按顺序\n  ## 已否决\n  - 先标失败类型：[方法错] / [细节没到位] / [环境问题]\n  - 只有 [方法错] 才算这条路不通；[细节没到位] 要写清楚差在哪一步、下次补什么就能再试，不要写「这条路不行」\n  ## 关键位置\n  文件:行号 —— 一眼要看哪里\n  \`\`\`\n  写状态文件优先于在回复里长篇复述；上下文里说过的结论，这里没写就等于丢了。` : ""
-  }`);
+  const concl = ROLE_HAS_CONCLUSION.has(role.output)
+    ? `\n- 自检：回复发出前看最后一行是不是上面的标记行。**整条回复以结论行开头的那一行结尾**——不写这句话，本轮会被判为没收尾、白跑一次。别的任何写法（「完成了」「已修复」、或者在段落里夹一句 [[${CONCL_TAG[role.output]}]]）都不算。`
+    : "";
+  const FENCE = String.fromCharCode(96).repeat(3);
+  const stateRule = c.statePath
+    ? "\n- 收尾前**改写状态文件** `" + c.statePath + "`（覆盖写，不是追加）。它是下一轮和下一个接手的角色唯一的交接物，控制在 4000 字内，只写这几节：\n  " + FENCE +
+      "\n  ## 当前进度\n  做到哪一步、哪一步没做完（一到三行）" +
+      "\n  ## 已定的决策\n  - 决定 + 为什么（只写会影响后续判断的，不要抄代码）" +
+      "\n  ## 待办\n  - 还没做的事，按顺序" +
+      "\n  ## 已否决\n  - 先标失败类型：[方法错] / [细节没到位] / [环境问题]\n  - 只有 [方法错] 才算这条路不通；[细节没到位] 要写清楚差在哪一步、下次补什么就能再试，不要写「这条路不行」" +
+      "\n  ## 关键位置\n  文件:行号 —— 一眼要看哪里\n  " + FENCE +
+      "\n  写状态文件优先于在回复里长篇复述；上下文里说过的结论，这里没写就等于丢了。"
+    : "";
+  out.push(`## 输出约定（必须遵守）\n这一轮回复结束就等于交付：后台作业要等它跑完、结果落盘再收尾，不要以「继续」「等它跑完」结束。\n你的**最后一条回复**要给出结论，格式：\n${CONTRACT[role.output]}${concl}${stateRule}`);
   return out.join("\n\n");
 }
 
@@ -170,8 +196,7 @@ export function buildBriefPrompt(c: {
   out.push(`# orc 任务 #${task.id} · 决策说明 · 你的角色：${role.name}`);
   out.push(c.mode === "arbitrate"
     ? `## 为什么找你\n「${c.stageName}」第 ${c.rounds ?? "?"} 轮又没过，而且这次挑出来的问题跟上一轮不一样——是**每轮都在换新问题**，说明可能不是工作没做到位，而是评审的尺子跟任务的定位对不上。\n先判断：按这份任务的**评审口径**（见下），剩下这些问题里有哪些真的会让结论站不住？哪些只是更进一步的严谨性、按口径不该阻塞？\n- 如果按口径剩下的都不影响结论：auto 设 continue_with_known_issues，把不修的逐条写进 known_issues（人能看到）。\n- 如果确实还有影响结论的问题：auto 用 none，把剩下的路写清楚交给人决定。`
-    : `## 为什么找你\n「${c.stageName}」这个环节已经退回几轮，还是没过。你要给人写一份说明，让他看完就能决定：接着改、换个做法、缩小范围，还是不做了。说不清就说明你没看清现场——先读文件、看提交和测试结果，再写。
-写的时候分开三种情况，别混成一句「反复失败」：**方法本身不行**、**方法对但某个细节一直没做到位**、**环境或资源不行**。后两种都还有救——要写清楚差的是哪一点、补上之后怎么再试一次，只把真正做不通的路判死。`);
+    : `## 为什么找你\n「${c.stageName}」这个环节已经退回几轮，还是没过。你要给人写一份说明，让他看完就能决定：接着改、换个做法、缩小范围，还是不做了。说不清就说明你没看清现场——先读文件、看提交和测试结果，再写。\n写的时候分开三种情况，别混成一句「反复失败」：**方法本身不行**、**方法对但某个细节一直没做到位**、**环境或资源不行**。后两种都还有救——要写清楚差的是哪一点、补上之后怎么再试一次，只把真正做不通的路判死。`);
   out.push(`## 这份任务的评审口径（主 agent 按任务性质定的）\n${c.task.bar || "（没写特别口径）按「目标是否达成、结论是否站得住」把关；更进一步的严谨性属于建议。"}`);
   out.push(`## 任务目标\n${task.goal}`);
   out.push(`## 规格（验收标准在这里面）\n${task.spec || "（没有单独写规格）"}`);

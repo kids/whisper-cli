@@ -150,6 +150,19 @@ function stateBlock(task: Task, statePath?: string): string[] {
 }
 
 /**
+ * One round of a loop task. A loop has no stages, so the per-stage timeline has
+ * nothing to group by — the per-round record is the track record. Same purpose:
+ * a human reads the shape (cost growth, repeated failures) without opening logs.
+ */
+export function renderRunLine(c: { n: number; label: string; tokens?: number; error?: string; durationMs?: number }): string {
+  const bad = !!c.error;
+  const sym = bad ? (/超时|timed? ?out/i.test(c.error!) ? "◌" : "✗") : "•";
+  const why = bad ? ` · ${clipText(flat(c.error!), 100)}` : "";
+  const dur = c.durationMs ? ` · ${fmtDuration(c.durationMs)}` : "";
+  return `第 ${c.n} 轮 ${sym} ${c.label}${c.tokens ? ` · ${fmtTok(c.tokens)} tok` : ""}${dur}${why}`;
+}
+
+/**
  * The block a human reads after each round. Returns "" when there is nothing
  * worth showing (no attempts yet), so callers can append it unconditionally.
  */

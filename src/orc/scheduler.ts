@@ -97,10 +97,28 @@ export class Orchestrator {
     const baseRef = wt.headSha(root);
     const kind = input.preset.kind === "loop" ? "loop" : "pipeline";
     return this.store.tx(() => {
+      // A/B exploration: the submitted task becomes the comparison seat. Each candidate is a
+      // child that edits the repo freely (worktree preset, no review gate on the way); the
+      // parent only exists to hold them and to decide which one the human should take.
+      const ab = abPlan(input.preset);
       const task = this.store.createTask({
         title: input.title || shortTitle(input.goal), goal: input.goal, repo: root, baseRef,
         preset: input.preset, chatId: input.chatId ?? null, kind, bar: input.bar ?? "", origin: input.origin,
+        ab: ab ? ab.keys : null,
       });
+      if (ab) {
+        for (const [i, key] of ab.keys.entries()) {
+          const child = this.store.createTask({
+            parentId: task.id, title: `${task.title} · ${key}`, goal: input.goal, repo: root, baseRef,
+            preset: ab.candidate, chatId: input.chatId ?? null, bar: input.bar ?? "", origin: input.origin,
+            candidate: key, candidateIdx: i, candidateOf: task.id,
+          });
+          // The spec is where the two paths differ; the human's words live on the parent.
+          this.store.updateTask(child.id, { spec: `【${key}】这条路的做法见任务卡；与另一条并行、彼此独立。` });
+          this.store.addEffect("launch", { taskId: child.id, stageIdx: 0 } satisfies LaunchPayload);
+        }
+        return task;
+      }
       if (kind === "loop") this.loop.init(task, input);
       else this.store.addEffect("launch", { taskId: task.id, stageIdx: 0 } satisfies LaunchPayload);
       return task;
@@ -480,6 +498,9 @@ export class Orchestrator {
     const prompt = buildStagePrompt({
       task, stage, role, launch, history, diff, notesPath, notesTail, inbox,
       statePath, prevState, freshSession: !resumeSessionId,
+      candidate: task.candidate
+        ? { key: task.candidate, index: task.candidateIdx ?? 0, total: this.store.getTask(task.candidateOf!)?.ab?.length ?? 2, siblings: (this.store.getTask(task.candidateOf!)?.ab ?? []).filter((k) => k !== task.candidate) }
+        : undefined,
     });
     const instructions = await this.opts.instructionsFor?.(task);
 
@@ -789,11 +810,15 @@ export class Orchestrator {
     const after = this.store.getTask(task.id)!;
     if (after.parentId && TERMINAL.includes(after.status)) {
       const parent = this.store.getTask(after.parentId);
-      if (parent && parent.status === "waiting_children") {
-        const pd = decideParent(parent, this.store.listTasks({ parentId: parent.id }));
-        if (pd) this.applyDecision(parent, pd);
-        else if (after.status === "blocked") this.store.updateTask(parent.id, { progress: `等你决定 ${after.title}` });
-        if (pd || after.status === "blocked") this.emitProgress(parent.id);
+      // A/B seat: its children are created up front, so it never passes through the
+      // planner's "已拆成 N 个子任务" transition that sets waiting_children. Settle it
+      // whenever its last candidate lands, whatever its status says.
+      const waitable = parent && (parent.status === "waiting_children" || parent.ab?.length);
+      if (waitable) {
+        const pd = decideParent(parent!, this.store.listTasks({ parentId: parent!.id }));
+        if (pd) this.applyDecision(parent!, pd);
+        else if (after.status === "blocked") this.store.updateTask(parent!.id, { progress: `等你决定 ${after.title}` });
+        if (pd || after.status === "blocked") this.emitProgress(parent!.id);
       }
     }
   }
@@ -917,6 +942,27 @@ const REMIND_MS = Number(process.env.ORC_REMIND_DAYS || 1) * DAY_MS;
 const EXPIRE_MS = Number(process.env.ORC_EXPIRE_DAYS ?? 7) * DAY_MS || Infinity;
 const GRACE_MS = Number(process.env.ORC_EXPIRE_GRACE_DAYS || 2) * DAY_MS;
 const clipText = (s: string, n: number) => { const t = (s || "").replace(/\s+/g, " ").trim(); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
+
+/**
+ * What an exploration preset expands into. Two candidates, not more: the point is to compare
+ * two genuinely different routes, and every extra one costs a full pipeline. Candidates run a
+ * worktree preset with its review/test gates removed — in exploration a negative result is a
+ * deliverable, and a gate that blocks on "not good enough" would kill a route precisely because
+ * it is incomplete rather than wrong.
+ */
+function abPlan(preset: ResolvedPreset): { keys: string[]; candidate: ResolvedPreset } | null {
+  if (!preset.explore) return null;
+  const candidate: ResolvedPreset = {
+    ...structuredClone(preset),
+    explore: false,
+    stages: preset.stages.map((s) => ({
+      ...s,
+      onFail: undefined,
+      advisory: s.role === "critic" || s.role === "tester" ? true : s.advisory,
+    })),
+  };
+  return { keys: ["A", "B"], candidate };
+}
 
 /** A readable name when nobody supplied one: first clause, without the "在 … 工作区内" preamble */
 export function shortTitle(goal: string): string {

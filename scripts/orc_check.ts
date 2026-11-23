@@ -782,6 +782,34 @@ async function e2e() {
     check("Y2 retry waits in queue, not running", after.status === "queued" && /等前置任务/.test(after.progress), after);
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
+
+  // AB: explore expands into two independent candidates and hands the choice to the human
+  {
+    const { dir, repo, store, exec, notes, orc } = setup();
+    const explorePreset = resolvePreset(presets.get("explore")!, roles);
+    const t = orc.submit({ goal: "try two routes", repo, preset: explorePreset });
+    const kids = store.listTasks({ parentId: t.id });
+    check("AB submit creates two candidates", kids.length === 2 && store.getTask(t.id)!.ab?.join("") === "AB", kids.map((k) => k.candidate));
+    check("AB candidates carry their key and seat", kids.every((k) => k.candidate && k.candidateOf === t.id), kids.map((k) => [k.candidate, k.candidateOf]));
+    check("AB candidate preset is not itself an explore seat", kids.every((k) => !k.preset.explore));
+    check("AB candidate gates demoted to advisory",
+      kids[0].preset.stages.every((s) => !s.onFail) && kids[0].preset.stages.filter((s) => s.advisory).length === 2,
+      kids[0].preset.stages.map((s) => `${s.id}:${s.advisory ? "adv" : "-"}:${s.onFail ?? ""}`));
+
+    await orc.runUntilIdle(10);
+    await orc.runUntilIdle(10);
+    const after = store.getTask(t.id)!;
+    check("AB parent waits for the human, not for an advisor", after.status === "blocked", after.status);
+    const decision = notes.filter((n) => n.taskId === t.id && n.kind === "decision");
+    check("AB decision names both routes and does not pick one",
+      decision.length === 1 && /\\*\\*A\\*\\*/.test(decision[0].text) && /\\*\\*B\\*\\*/.test(decision[0].text) && /挑一条/.test(decision[0].text),
+      decision.map((d) => d.text?.slice(0, 80)));
+    check("AB each candidate actually ran", exec.calls.some((c) => kids.some((k) => k.id === c.taskId)));
+    const prompt = exec.calls.find((c) => c.taskId === kids[0].id)!.prompt;
+    check("AB prompt marks the candidate and forbids reusing the sibling", new RegExp(`探索中的一条路（${kids[0].candidate}，第 ${(kids[0].candidateIdx ?? 0) + 1}\\/2 条）`).test(prompt) && /不要去看、去合并/.test(prompt), prompt.slice(0, 200));
+    check("AB prompt says a dead end is itself the result", /走不通本身就是这轮的产出/.test(prompt));
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 e2e()

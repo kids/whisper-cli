@@ -57,6 +57,8 @@ export interface PresetDef {
   /** Optional stage ids switched on */
   enabled?: string[];
   loop?: LoopConfig;
+  /** A/B exploration preset: submit expands it into two candidates (see ResolvedPreset.explore) */
+  explore?: boolean;
 }
 
 export type Verbosity = "quiet" | "normal" | "verbose";
@@ -103,6 +105,12 @@ export interface ResolvedPreset {
   loop?: LoopConfig;
   /** Roles whose default CLI was not configured and ran on another one (config.ts resolvePreset) */
   fallbacks?: { role: string; from: string; to: string }[];
+  /**
+   * A/B exploration: submit expands this into two independent candidate tasks and a human
+   * picks one. The candidates run the same stages with the review/test gates demoted to
+   * advisory, because in exploration an unfinished or failed route is itself the result.
+   */
+  explore?: boolean;
 }
 
 export type TaskStatus =
@@ -145,6 +153,12 @@ export interface Task {
   inbox: string[];
   chatId: string | null;
   progress: string;
+  /** A/B seat: the candidate keys its children explore (A, B). Empty for a normal task. */
+  ab?: string[];
+  /** This task is candidate `candidate` of the exploration task `candidateOf` */
+  candidate?: string;
+  candidateIdx?: number;
+  candidateOf?: number;
   createdAt: number;
   updatedAt: number;
 }

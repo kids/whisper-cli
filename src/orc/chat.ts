@@ -18,7 +18,7 @@ import { CliExecutor, type ExecutorBins } from "./runner";
 import { Orchestrator } from "./scheduler";
 import { OrcStore } from "./store";
 import { MODE_LABEL, parseSupersedes, type ChatMode, type RouteTask } from "./route";
-import { renderTrace } from "./trace";
+import { renderRunLine, renderTrace } from "./trace";
 import type { CliName, PresetPatch, ResolvedPreset, Task, Verbosity } from "./types";
 import type { LoopRunEvent } from "./loop";
 import { TERMINAL } from "./types";
@@ -313,6 +313,14 @@ function syncAgentCards(t: Task): Promise<void> {
 }
 
 function loopRunCard(t: Task, ev: LoopRunEvent): void {
+  // Each finished round leaves a trace line in the task's thread, failures with the
+  // reason: the human asked to be able to review the run after every round.
+  if (ev.phase === "end" && t.chatId) {
+    const f = clientFor(t.chatId);
+    const cardId = cardMap().get(t.id);
+    const line = renderRunLine({ n: ev.n, label: ev.label, tokens: ev.tokens, error: ev.error, durationMs: ev.durationMs });
+    if (f && cardId && f.replyInThread) void f.replyInThread(cardId, line).catch(() => {});
+  }
   if (!threadCards(t)) return;
   const im = clientFor(t.chatId)!;
   const root = rootCardOf(t);

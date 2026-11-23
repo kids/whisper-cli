@@ -59,6 +59,8 @@ export interface LoopRunEvent {
   line?: string;
   tokens?: number;
   error?: string;
+  /** wall time of this round, so the human can see which ones dragged */
+  durationMs?: number;
 }
 
 const FINAL: TaskStatus[] = ["ready", "failed", "dropped"];
@@ -832,6 +834,7 @@ export class LoopEngine {
       try { this.opts.onRun?.(task, { taskId: task.id, n: o.n, label: o.label, model, ...ev }); } catch { /* cards are best-effort */ }
     };
     onRun({ phase: "start" });
+    const roundStart = Date.now();
     let last = 0;
     const progress = (line: string) => {
       const now = Date.now();
@@ -856,7 +859,7 @@ export class LoopEngine {
       this.running.delete(task.id);
     }
     writeFileSync(resolve(dir, `${base}.output.md`), res.text || res.error || "");
-    onRun({ phase: "end", tokens: res.tokens, error: res.error || (res.timedOut ? "超时" : undefined) });
+    onRun({ phase: "end", tokens: res.tokens, error: res.error || (res.timedOut ? "超时" : undefined), durationMs: Date.now() - roundStart });
     const cancelled = h.cancelled || (res.cancelled && !h.interrupted);
     return { ...res, cancelled, interrupted: h.interrupted };
   }

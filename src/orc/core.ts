@@ -341,6 +341,9 @@ const norm = (t: any) => String(t ?? "").toLowerCase().replace(/[\s`'"“”()�
  */
 export function decideParent(parent: Task, children: Task[]): Decision | null {
   if (!children.length || !children.every((c) => TERMINAL.includes(c.status))) return null;
+  // A/B seat: every candidate settling means the comparison is ready. This is a human
+  // decision by design — an advisor that picks for you makes the second path pointless.
+  if (parent.ab?.length) return decideAB(parent, children);
   const d = empty();
   const blocked = children.filter((c) => c.status === "blocked");
   if (blocked.length) {
@@ -362,6 +365,35 @@ export function decideParent(parent: Task, children: Task[]): Decision | null {
   const text = `全部 ${children.length} 个子任务已通过：\n` + children.map((c) => `- ${c.title} → \`${c.branch}\``).join("\n");
   d.patch = { status: "ready", stageIdx: parent.preset.stages.length, progress: "子任务全部通过" };
   d.notifies.push({ taskId: parent.id, kind: "ready", text });
+  return d;
+}
+
+/**
+ * A/B seat: each candidate produced a result or a precise "this route does not work".
+ * The parent hands the human both (route, outcome, cost, branch) and goes blocked —
+ * choosing is the human's call, and a recommendation would anchor it.
+ */
+function decideAB(parent: Task, children: Task[]): Decision {
+  const d = empty();
+  const line = (c: Task) => {
+    const key = c.candidate ?? "?";
+    const failed = c.status !== "ready";
+    const route = (c.spec || "").replace(/\s+/g, " ").trim();
+    const what = failed
+      ? `没走通 · ${c.progress || "没有留下说明"}`
+      : `走通 · ${c.progress || "已完成"}`;
+    return `**${key}**${route ? `（${route.slice(0, 80)}）` : ""}\n  - 结果：${what}\n  - 分支：\`${c.branch ?? "-"}\`${failed ? "\n  - 注意：没走通本身也是结果，先看它是方法不行还是细节没到位" : ""}`;
+  };
+  d.patch = { status: "blocked", progress: `两条路都跑完了，等你挑一条（${children.map((c) => c.candidate).join(" / ")}）` };
+  d.notifies.push({
+    taskId: parent.id,
+    kind: "decision",
+    text: [
+      `**${parent.title}：两条路都跑完了，挑一条**`,
+      children.map(line).join("\n\n"),
+      `挑中的直接说「要 ${children[0]?.candidate ?? "A"}」就行；两条都不满意也可以说「都不行」或补充要求重来。没被挑中的分支会保留，不会被删。`,
+    ].join("\n\n"),
+  });
   return d;
 }
 
