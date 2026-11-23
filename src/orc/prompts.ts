@@ -134,6 +134,7 @@ export function buildStagePrompt(c: PromptContext): string {
   }
   out.push(`## 团队共享笔记\n路径：\`${c.notesPath}\`（只读参考；要新增笔记就写 \`[[note]] 一句话\`，orc 会追加进去）` +
     (c.notesTail ? `\n最近内容：\n${c.notesTail}` : ""));
+  out.push(`## 怎么读代码（省上下文）\n上下文里放的每一段源码，后面每一轮都要重新付一次费。要定位一个行为，先用 \`grep -n\` 拿到文件:行号，再只读那一段（Read 的 offset/limit，或 \`sed -n 'a,bp'\`）。\n- 超过约 500 行的文件不要整份读；确实需要通读时，先读目录/函数签名（\`grep -n "^\\(export \\)\\?\\(function\\|class\\|const .*=>\\)"\`）再按段读。\n- 报告、日志、CSV 一律先 \`wc -l\` / \`head\` / \`grep\` 定位，不要整份吐进上下文；需要反复用的中间结果落盘到 \`tmp/\`，下一轮从文件读结论而不是重新算一遍。\n- 已经确认过的结论写进状态文件，不要每轮重新推导；同一份大文件在一轮里读了一次以上，说明该把结论记下来了。`);
 
   out.push(`## 角色说明\n${role.prompt}`);
   out.push(`## 进展汇报\n工作较久时，可以单独输出一行 \`[[progress]] 一句话进展\`，会原样写到任务卡上（卡片没有别的状态壳）。`);
