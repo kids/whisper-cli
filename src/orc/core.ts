@@ -69,6 +69,10 @@ export const STALL_LIMIT = 3;
 /** Runaway guard: continuations of one stage in total, even when each one commits something */
 export const CONTINUE_CAP = 20;
 
+/** 实现者 block 时，先分清是“环境缺东西”还是“口径/测试断言冲突”，不要一律推给人 */
+const ENV_BLOCK = /(缺数据|数据[^\n]{0,12}(为空|空的|缺失|丢失|没有)|data\s*\/[^\n]{0,12}(为空|空|不存在)|OOM|out of memory|内存不足|显存不足|磁盘[^\n]{0,8}(满|不足)|空间不足|permission denied|EACCES|ENOENT|no such file|网络不通|无法访问|代理不可用|GPU[^\n]{0,8}(不可用|没有|不足))/i;
+const SPEC_CONFLICT = /(断言[^\n]{0,40}(冲突|不符|失败|==|写死|硬编码|读数)|硬编码[^\n]{0,30}(测试|断言)|测试[^\n]{0,20}(写死|硬编码)|与[^\n]{0,16}(冻结)?口径[^\n]{0,10}(冲突|不一致)|规格[^\n]{0,16}冲突|口径[^\n]{0,12}(冲突|不一致))/i;
+
 const empty = (): Decision => ({ patch: {}, launches: [], notifies: [], children: [] });
 
 const normPath = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
@@ -203,7 +207,41 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
   }
 
   if (p.kind === "impl" && !p.pass) {
-    return block(`${stage.id} 无法继续：${p.summary || "（未说明原因）"}`);
+    const why = p.summary || "（未说明原因）";
+    const flat = why.replace(/\s+/g, " ");
+    // 环境缺东西：先挂起定时检查，不叫人；连续 3 次还没恢复才交给人
+    if (ENV_BLOCK.test(flat)) {
+      const key = `env:${stage.id}`;
+      const n = (loops[key] ?? 0) + 1;
+      loops[key] = n;
+      if (n <= 3) {
+        d.patch = { ...d.patch, status: "waiting", loops, progress: `等环境：${clipLine(why, 80)}（第 ${n}/3 次检查）` };
+        d.launches.push({
+          taskId: task.id, stageIdx: task.stageIdx, resume: true, delayMs: 10 * 60_000,
+          note: `上一轮因为环境缺失停下：${clipLine(why, 400)}。先只检查环境是否恢复，不要重复已完成的；恢复了再继续，仍然缺就照原样 [[blocked]] 说明。`,
+        });
+        d.notifies.push({ taskId: task.id, kind: "info", text: `**${task.title}：先等环境，不用你处理**\n${clipLine(why, 300)}\n每 10 分钟自动检查一次（第 ${n}/3 次）。` });
+        return d;
+      }
+      return block(`缺环境，已检查 3 次仍未恢复：${why}`);
+    }
+    // 测试断言 / 口径冲突：这是技术选择，先让实现者按冻结口径修一次，不推给人
+    if (SPEC_CONFLICT.test(why)) {
+      const key = `spec:${stage.id}`;
+      const n = (loops[key] ?? 0) + 1;
+      loops[key] = n;
+      if (n <= 1) {
+        d.patch = { ...d.patch, status: "running", loops, progress: "口径冲突：已让实现者按冻结口径修正后继续" };
+        d.launches.push({
+          taskId: task.id, stageIdx: task.stageIdx, resume: true,
+          note: `这是测试断言/规格口径冲突，不是缺资源，也不是要人拍板：以任务书和冻结口径为准修正测试或实现，改完给 [[done]]；只有确实要改目标/验收才 [[blocked]]。原因：${clipLine(why, 400)}`,
+        });
+        d.notifies.push({ taskId: task.id, kind: "info", text: `**${task.title}：按冻结口径继续**\n${clipLine(why, 300)}\n已让实现者先修口径冲突，不把技术选择推给人。` });
+        return d;
+      }
+      return block(`口径冲突，已让实现者按冻结口径修过一次仍未过：${why}`);
+    }
+    return block(`${stage.id} 无法继续：${why}`);
   }
 
   if (p.pass || stage.advisory) {

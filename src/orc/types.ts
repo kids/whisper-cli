@@ -204,6 +204,8 @@ export interface LaunchPayload {
   note?: string;
   /** Continue the stage's previous session (the role stopped without finishing) */
   resume?: boolean;
+  /** Delay before the launch effect becomes due (environment retry, backoff) */
+  delayMs?: number;
 }
 
 /** ready/decision/failed/info: pipeline + loop finals; turn/report/ask/constraints: loop rounds (002 IM visibility) */

@@ -55,6 +55,18 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
   check("empty marker body → undefined", p("[[instruct]]\n") === undefined);
   check("unknown marker ignored", p("[[dance]]\n跳个舞") === undefined);
   check("budget ask is the only code-raised question", L.budgetAsk(mk(), "轮数 60/60").code === "budget");
+
+  // 解析详情：wait 写坏要说清楚；纯定时等待要能执行；instruct 同轮的取证/等待下一轮再写
+  const pd = (t: string) => L.parseSignalDetailed(t);
+  const badWait = pd("[[wait]]\nreason=训练还没完，完成标志 xxx.log 出现 ALL DONE");
+  check("wait without target → explicit problem", !badWait.action && /缺少监控目标/.test(badWait.problem ?? ""), badWait);
+  const timer: any = pd("[[wait]]\nevery=10m\nreason=等训练");
+  check("bare wait every=10m → timer wait", timer.action?.action === "wait" && timer.action.timerS === 600, timer);
+  const tolerant: any = pd("[[instruct]]\n写 add.js\n[[wait]]\nlog=out/x.log");
+  check("instruct + wait → instruct first, wait deferred", tolerant.action?.action === "instruct" && tolerant.ignored?.join() === "wait", tolerant);
+  const ambiguous: any = pd("[[verify]]\nls\n[[finish]]\n做完了");
+  check("verify + finish still ambiguous", !ambiguous.action && /动作标记/.test(ambiguous.problem ?? ""), ambiguous);
+  check("strict parseSignal keeps old behavior", p("[[instruct]]\nx\n[[wait]]\npid=1") === undefined);
 }
 
 // ---- [[finish]] 结论：否定结论不能被标成「结果可用」 ------------------------------
@@ -463,6 +475,63 @@ async function e2e() {
     check("E no-action rounds are not errors", steps.slice(0, 2).every((s: any) => s.accepted && !s.action && /没有动作/.test(s.verdict)), steps.map((s: any) => s.verdict));
     check("E thoughts are kept in the ledger", l.observations.some((o) => o.kind === "thought"));
     check("E nobody was asked", asks(notes).length === 0, notes.map((n) => n.kind));
+    done();
+  }
+
+  // E2: 连续无动作不空转；第 3 轮换新会话，第 4 轮必须给动作
+  {
+    const { repo, store, exec, notes, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "x", repo, preset: loopPreset, criteria: ["c"] });
+    const id = t.id;
+    exec.sup.set(id, [
+      "我再想想。",
+      "还是再想想。",
+      "继续想。",
+      S({ action: "finish", summary: "想清楚了" }),
+    ]);
+    await drive(() => store.getTask(id)!.status === "ready");
+    const steps = store.listSteps(id);
+    const sups = exec.of(id, "supervisor");
+    check("E2 three no-action rounds are recorded", steps.slice(0, 3).every((s: any) => !s.action && /没有动作/.test(s.verdict)), steps.map((s: any) => s.verdict));
+    check("E2 no-action rounds explain themselves", orc.loop.ledger(id)!.observations.some((o) => /没有可执行动作/.test(o.text)), orc.loop.ledger(id)!.observations.map((o) => o.text.slice(0, 60)));
+    check("E2 third round rotates the supervisor session", sups[2]?.req.resumeSessionId !== undefined && sups[3]?.req.resumeSessionId === undefined, sups.map((s) => s.req.resumeSessionId));
+    check("E2 guard stops the spin after three rounds", sups.length === 4 && store.getTask(id)!.status === "ready", { calls: sups.length, status: store.getTask(id)!.status });
+    check("E2 nobody was asked", asks(notes).length === 0, notes.map((n) => n.kind));
+    done();
+  }
+
+  // M: instruct + wait 同轮 → 先派工，不丢整轮
+  {
+    const { repo, store, exec, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "写文件", repo, preset: loopPreset, criteria: ["c"] });
+    const id = t.id;
+    exec.worker.set(id, () => "[[done]] 写好了");
+    exec.sup.set(id, [
+      "我看一下。\n\n[[instruct]]\n写 x.txt\n\n[[wait]]\nlog=out/x.log",
+      S({ action: "finish", summary: "完成" }),
+    ]);
+    await drive(() => store.getTask(id)!.status === "ready");
+    const l = orc.loop.ledger(id)!;
+    const steps = store.listSteps(id);
+    check("M instruct+wait executes the instruct", steps[0]?.action?.action === "instruct" && exec.of(id, "worker").length === 1, steps.map((s: any) => s.action));
+    check("M ignored wait is reported, not silently dropped", steps[0]?.verdict !== "多标记忽略" && l.observations.some((o) => /\[\[wait\]\]/.test(o.text)), l.observations.map((o) => o.text.slice(0, 60)));
+    done();
+  }
+
+  // N: 只有 every= 的 wait 真的定时挂起，不再当“没有动作”
+  {
+    const { repo, store, exec, orc, drive, done } = setup();
+    const t = orc.submit({ goal: "等训练", repo, preset: loopPreset, criteria: ["c"] });
+    const id = t.id;
+    exec.sup.set(id, [
+      S({ action: "wait", watch: { every: "10m" }, reason: "训练还没完" }),
+      S({ action: "finish", summary: "到了" }),
+    ]);
+    await drive(() => store.getTask(id)!.status === "waiting");
+    const l = orc.loop.ledger(id)!;
+    const pending = store.pendingLoopEffects(id);
+    check("N timer wait parks without a watch", store.getTask(id)!.status === "waiting" && l.waitWatch === undefined, store.getTask(id));
+    check("N timer wait schedules a delayed round", pending.some((e) => e.payload.reason === "next" && e.nextAt > Date.now() + 9 * 60_000), pending.map((e) => [e.payload.reason, e.nextAt]));
     done();
   }
 

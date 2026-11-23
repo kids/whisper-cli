@@ -431,10 +431,11 @@ export class LoopEngine {
     l.guard.infraErrors = 0;
     l.budget.activeMs += Date.now() - t0;
     const markers = L.listActionMarkers(res.text);
-    const a = L.parseSignal(res.text);
+    const parsed = L.parseSignalDetailed(res.text);
+    const a = parsed.action;
 
-    // 同轮多个标记：全部不执行并说清楚（旧逻辑 last-wins 会静默丢掉前面的 instruct）
-    if (markers.length > 1) {
+    // 同一轮多个标记：仍拒绝没有 instruct 的组合；只有一个 instruct + 取证/等待时先派工
+    if (markers.length > 1 && !a) {
       const names = markers.join("+");
       L.observe(l, n, "system", `本轮写了 ${markers.length} 个标记（${names}），协议只允许一个，已全部忽略。下一轮只留一个：要派工只写 [[instruct]]，取证留到下一轮再 [[verify]]。不要据此认定「平台未派工」。`);
       l.step = n;
@@ -442,19 +443,36 @@ export class LoopEngine {
       this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 多标记已忽略，请只留一个`, notifies, next: [{ reason: "next" }] });
       return;
     }
+    if (parsed.ignored?.length) {
+      L.observe(l, n, "system", `本轮同时写了 ${markers.join("+")}；已先执行 [[instruct]] 派工，${parsed.ignored.map((x) => `[[${x}]]`).join("、")} 下一轮再单独写（等 worker 回报后再取证/等待）。`);
+    }
 
-    // 没写动作标记 = 它还在想：不报错、不计数、不问人，下一轮接着来（预算兜底）
+    // 没有可执行动作：说清楚原因；连续多轮强制换做法，不再静默重问
     if (!a) {
-      L.observe(l, n, "thought", clip(stripSignals(res.text), 1500) || "（这一轮没有输出）");
+      const problem = parsed.problem;
+      l.guard.noAction = (l.guard.noAction ?? 0) + 1;
+      const count = l.guard.noAction;
+      const nudge = count === 1
+        ? `本轮没有可执行动作：${problem ?? "没有写任何动作标记"}。下一轮只写一个能执行的标记（instruct / verify / wait / finish / abort）。`
+        : count === 2
+          ? `连续 2 轮没有可执行动作：${problem ?? "没有写任何动作标记"}。下一轮必须从 instruct / verify / wait / finish / abort 里选一个；目标已完成就 finish，卡住就 abort 并写原因，不要再只写分析。`
+          : `连续 ${count} 轮没有可执行动作，已换新会话重新判断。`;
+      if (!problem) L.observe(l, n, "thought", clip(stripSignals(res.text), 1500) || nudge);
+      L.observe(l, n, "system", nudge);
+      if (count >= 3) {
+        l.sup = { sessionId: undefined, turns: 0 };
+        l.guard.noAction = 0;
+      }
       l.step = n;
-      this.store.addStep({ taskId: task.id, n, reason: p.reason, action: null, accepted: true, verdict: "没有动作，继续", observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
+      this.store.addStep({ taskId: task.id, n, reason: p.reason, action: null, accepted: !problem, verdict: problem ? `没有动作：${clip(problem, 120)}` : "没有动作，继续", observation: "", raw: res.text, tokens: res.tokens, startedAt: t0 });
       // 仍挂在监控上时绝不能只排 next——waiting 会 skip next，心跳就此断档（卡片停更）
       const next = wasWaiting && l.waitWatch && l.heartbeatS
         ? [{ reason: "heartbeat", delayMs: l.heartbeatS * 1000, ref: l.waitWatch }]
         : [{ reason: "next" }];
-      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 监督者在看现场`, notifies, next });
+      this.commit(task, l, { status: wasWaiting ? "waiting" : "running", progress: `第 ${n} 轮 · 没有可执行动作（${count}/3）`, notifies, next });
       return;
     }
+    l.guard.noAction = 0;
 
     // 监督者因"自己写不进去"想放弃：它本来就只读，写活该交给 worker。驳回并提醒，连续超过上限才放行
     if (a.action === "abort" && L.readonlyAbort(a.reason) && (l.guard.readonlyAborts ?? 0) < L.MAX_READONLY_ABORTS) {
@@ -648,6 +666,19 @@ export class LoopEngine {
           }
           // healthy patrol: card progress only, no group message
           return { status: "waiting", progress: `第 ${n} 轮 · 巡检正常，继续等待监控 #${wid}${why}`, obs: `巡检后继续等待监控 #${wid}${why}`, notifies: [], next: hb ? [{ reason: "heartbeat", delayMs: hb * 1000, ref: wid }] : [], turn: "" };
+        }
+        // 只有 every= 的纯定时等待：没有监控目标，但至少按约定时间叫醒一次，不再静默空转
+        if (a.timerS) {
+          const sec = Math.max(60, a.timerS);
+          const why = a.reason ? `：${clip(a.reason, 120)}` : "";
+          return {
+            status: "waiting",
+            progress: `第 ${n} 轮 · 定时重查（${Math.round(sec / 60)} 分钟后）${why}`,
+            obs: `没有监控目标，按纯定时重查挂起 ${Math.round(sec / 60)} 分钟${why}。下一轮如果还要等，优先写 pid= / log= / done= 让监控代替轮询，省 token。`,
+            notifies: [],
+            next: [{ reason: "next", delayMs: sec * 1000 }],
+            turn: "",
+          };
         }
         const watchRaw: Record<string, unknown> = { ...(a.watch ?? {}) };
         const noteFromWatch = typeof watchRaw.note === "string" ? String(watchRaw.note).trim() : "";

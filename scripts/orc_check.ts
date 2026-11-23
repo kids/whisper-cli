@@ -240,6 +240,12 @@ const parsed = (kind: any, text: string) => ({ kind: "parsed" as const, parsed: 
   check("committing forever without a conclusion still hits the runaway cap", d.patch.status === "failed" && /续跑 20 次/.test(d.notifies[0].text));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), { kind: "run_error", error: "x", timedOut: true });
   check("timeout → continue with resume", d.launches[0]?.resume === true && /时长上限/.test(d.launches[0]?.note ?? ""));
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), parsed("impl", "[[blocked]] data/ 仍为空，宿主机 OOM，无法实测"));
+  check("impl blocked by missing data → wait, no human decision", d.patch.status === "waiting" && d.launches[0]?.delayMs === 600_000 && d.notifies.every((n) => n.kind !== "decision"), d);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), parsed("impl", "[[blocked]] 测试断言 general==424 与冻结口径冲突"));
+  check("impl blocked by test/spec conflict → keep going, no human decision", d.patch.status === "running" && d.launches[0]?.resume === true && d.notifies.every((n) => n.kind !== "decision"), d);
+  d = decideAfterAttempt(mkTask({ stageIdx: idx("impl"), loops: { "env:impl": 3 } }), parsed("impl", "[[blocked]] data/ 为空，OOM"));
+  check("env retry cap → decision", d.patch.status === "blocked" && d.notifies.some((n) => n.kind === "decision"), d);
   d = decideAfterAttempt(mkTask({ stageIdx: idx("review"), loops: { "stall:review": 1 } }), parsed("verdict", "[[approve]] 可以"));
   check("conclusion clears the stall count", !("stall:review" in d.patch.loops!));
   d = decideAfterAttempt(mkTask({ stageIdx: idx("impl") }), parsed("impl", "[[blocked]] need creds"));
@@ -375,6 +381,7 @@ class FakeExec implements Executor {
   stopped = new Set<string>();
   plan = '{"spec":"写 feature.txt","subtasks":[],"summary":"plan ok","notes":["用 txt 存特性"]}';
   implDelay = 20;
+  timeoutOnce = 0;
   hang = false;
   alwaysRevise = new Set<number>();
   testerStops = 0;
@@ -391,6 +398,11 @@ class FakeExec implements Executor {
       if (role === "planner") return this.ok(this.plan);
       if (role === "advisor") return this.ok(this.replanReply || "只是补充，不影响已完成的阶段。");
       if (role === "implementer") {
+        if (this.timeoutOnce > 0) {
+          this.timeoutOnce--;
+          writeFileSync(join(req.cwd, `timeout-${taskId}.txt`), "progress\n");
+          return { text: "", tokens: 10, timedOut: true, cancelled: false, error: "⏱️ 任务超过 90 分钟 硬上限，已被终止。" };
+        }
         if (this.hang) { while (!this.stopped.has(req.sessionKey)) await sleep(10); return { text: "🛑 任务已被用户终止。", tokens: 0, timedOut: false, cancelled: true }; }
         await sleep(this.implDelay);
         mkdirSync(join(req.cwd, "pkg", "__pycache__"), { recursive: true });
@@ -673,7 +685,7 @@ async function e2e() {
     store.updateTask(t.id, { status: "failed", progress: "子任务没有全部完成（0/2）" });
     const went = orc.continueTask(t.id, "继续团队任务");
     check("C2 failed child re-runs", went.join() === "part A" && store.getTask(2)!.status === "running", { went, s: store.getTask(2)!.status });
-    check("C2 skipped sibling re-queued", store.getTask(3)!.status === "running", store.getTask(3)!.status);
+    check("C2 skipped sibling re-queued", store.getTask(3)!.status === "queued" && /等前置任务/.test(store.getTask(3)!.progress), { st: store.getTask(3)!.status, p: store.getTask(3)!.progress });
     check("C2 parent waits on children again", store.getTask(t.id)!.status === "waiting_children", store.getTask(t.id)!.status);
     await orc.stop(t.id);
     store.close(); rmSync(dir, { recursive: true, force: true });
@@ -733,6 +745,41 @@ async function e2e() {
     check("E recover counts", r.attempts === 1 && r.effects === 1, r);
     check("E effect re-queued with recover flag", eff.status === "pending" && eff.payload.recover === true);
     check("E attempt interrupted", store.listAttempts(task.id)[0].status === "interrupted");
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // T: 超时但有新提交 → 该角色单轮上限自动放宽一次，不再用同样的 90 分钟重切
+  {
+    const { dir, repo, store, exec, notes, orc } = setup();
+    exec.timeoutOnce = 1;
+    const t = orc.submit({ goal: "long task", repo, preset: devPreset });
+    await orc.runUntilIdle(10);
+    const impls = exec.calls.filter((c) => c.taskId === t.id && c.role === "implementer");
+    check("T task completes after one timeout", store.getTask(t.id)!.status === "ready", store.getTask(t.id));
+    check("T first attempt keeps 90m", impls[0]?.hardTimeoutMs === 90 * 60_000, impls.map((c) => c.hardTimeoutMs));
+    check("T retry gets a longer limit", (impls[1]?.hardTimeoutMs ?? 0) > 90 * 60_000, impls.map((c) => c.hardTimeoutMs));
+    check("T user is told, not asked", notes.some((n) => /放宽到/.test(n.text)) && !notes.some((n) => n.kind === "decision"), notes.map((n) => n.kind));
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // Y: 状态 running 但没有 attempt/effect → sweep 判失联，不留僵尸
+  {
+    const { dir, repo, store, notes, orc } = setup();
+    const baseRef = git(repo, "rev-parse", "HEAD");
+    const t = store.createTask({ title: "zombie", goal: "g", repo, baseRef, preset: devPreset, status: "running", chatId: "oc_z" });
+    const out = orc.sweep(Date.now() + 2 * 3600_000);
+    check("Y zombie detected", out.stalled === 1 && store.getTask(t.id)!.status === "failed", { out, task: store.getTask(t.id) });
+    await orc.tick();
+    check("Y zombie tells the chat", notes.some((n) => n.taskId === t.id && n.kind === "failed"), notes);
+    store.close(); rmSync(dir, { recursive: true, force: true });
+  }
+  // Y2: 重试一个前置任务还被 blocked 卡住的子任务 → 排队，不是假 running
+  {
+    const { dir, repo, store, orc } = setup();
+    const baseRef = git(repo, "rev-parse", "HEAD");
+    const dep = store.createTask({ title: "dep", goal: "g", repo, baseRef, preset: devPreset, status: "blocked", chatId: "oc_y" });
+    const child = store.createTask({ title: "child", goal: "g", repo, baseRef, preset: devPreset, status: "blocked", chatId: "oc_y", deps: [dep.id] });
+    check("Y2 retry accepted", orc.retry(child.id, "再试一次"));
+    const after = store.getTask(child.id)!;
+    check("Y2 retry waits in queue, not running", after.status === "queued" && /等前置任务/.test(after.progress), after);
     store.close(); rmSync(dir, { recursive: true, force: true });
   }
 }

@@ -71,7 +71,7 @@ export interface Ledger {
   budget: { steps: number; workerRuns: number; activeMs: number; tokens: number; warned: boolean };
   limits: LoopBudget;
   /** readonlyAborts: 监督者因"自己写不进去"想放弃、被驳回的次数（见 readonlyAbort） */
-  guard: { infraErrors: number; readonlyAborts?: number };
+  guard: { infraErrors: number; readonlyAborts?: number; noAction?: number };
   /** HEAD after the latest commit seen */
   head: string;
   /** HEAD after the latest change to the code (worker / recovered / human commit) */
@@ -182,6 +182,7 @@ export function extendBudget(l: Ledger, factor = 1.5): void {
 export function resetGuards(l: Ledger): void {
   l.guard.infraErrors = 0;
   l.guard.readonlyAborts = 0;
+  l.guard.noAction = 0;
 }
 
 /**
@@ -213,7 +214,7 @@ export type LoopAction =
   | { action: "replan"; change: ChangeSet }
   | { action: "verify"; checks: VerifyCheck[] }
   | { action: "review"; focus?: string }
-  | { action: "wait"; watch?: Record<string, unknown>; keep?: boolean; heartbeat?: string; reason?: string }
+  | { action: "wait"; watch?: Record<string, unknown>; keep?: boolean; heartbeat?: string; reason?: string; timerS?: number }
   | { action: "ask"; question: string; why: AskWhy }
   | { action: "finish"; summary: string; outcome?: LoopOutcome }
   | { action: "abort"; reason: string };
@@ -333,15 +334,8 @@ export function listActionMarkers(text: string): string[] {
   return markerBlocks(text).filter((b) => LOOP_ACTIONS.has(b.name)).map((b) => b.name);
 }
 
-/**
- * 这一轮想做什么。
- * - 没有标记 / 标记内容为空 = 还在想（undefined）
- * - **同轮多个动作标记 = undefined**（不再静默 last-wins：否则 instruct 会被后面的 verify 吃掉，worker 永不派发）
- */
-export function parseSignal(text: string): LoopAction | undefined {
-  const blocks = markerBlocks(text).filter((b) => LOOP_ACTIONS.has(b.name));
-  if (blocks.length !== 1) return undefined;
-  const b = blocks[0];
+/** 把一个标记块变成动作；内容不合法时返回 undefined（由调用方决定是纠错还是继续） */
+function actionOfBlock(b: Block): LoopAction | undefined {
   // review 允许空 focus；其余动作需要 body
   if (!b.body && b.name !== "review") return undefined;
   switch (b.name) {
@@ -368,7 +362,13 @@ export function parseSignal(text: string): LoopAction | undefined {
       for (const k of ["title", "log", "done", "stale", "every", "timeout", "cmd", "file", "note"] as const) if (kv[k]) watch[k] = kv[k];
       if (kv.wake_on) watch.wake_on = kv.wake_on.split(/[,，]/).map((x) => x.trim()).filter(Boolean);
       if (kv.metrics) watch.metrics = { path: kv.metrics };
-      return Object.keys(watch).length ? { action: "wait", watch, heartbeat: kv.heartbeat, reason: kv.reason } : undefined;
+      const hasTarget = ["pid", "log", "done", "file", "cmd", "metrics", "wake_on"].some((k) => k in watch);
+      // 只有 every= 的 waiting：没有监控目标，但可以定时叫醒，不再静默当“没有动作”
+      if (!hasTarget && kv.every) {
+        const timerS = parseDurationS(kv.every);
+        if (timerS) return { action: "wait", timerS, heartbeat: kv.heartbeat, reason: kv.reason || freeReason };
+      }
+      return Object.keys(watch).length && hasTarget ? { action: "wait", watch, heartbeat: kv.heartbeat, reason: kv.reason } : undefined;
     }
     case "ask": {
       const why = (/^why\s*[:=]\s*(irreversible|high_cost|goal_ambiguous)/im.exec(b.body)?.[1] ?? "high_cost") as AskWhy;
@@ -382,6 +382,67 @@ export function parseSignal(text: string): LoopAction | undefined {
     case "abort": return { action: "abort", reason: b.body };
   }
   return undefined;
+}
+
+function parseDurationS(v: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)\s*(s|m|h|d)?$/i.exec(v.trim());
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  const unit = (m[2] || "s").toLowerCase();
+  return Math.round(n * ({ s: 1, m: 60, h: 3600, d: 86400 } as Record<string, number>)[unit]);
+}
+
+/**
+ * 这一轮想做什么（严格版，保留给解析器单测 / 旧调用方）。
+ * - 没有标记 / 标记内容为空 = 还在想（undefined）
+ * - **同轮多个动作标记 = undefined**（不再静默 last-wins：否则 instruct 会被后面的 verify 吃掉，worker 永不派发）
+ */
+export function parseSignal(text: string): LoopAction | undefined {
+  const blocks = markerBlocks(text).filter((b) => LOOP_ACTIONS.has(b.name));
+  if (blocks.length !== 1) return undefined;
+  return actionOfBlock(blocks[0]);
+}
+
+/** 解析结果：动作 + 被忽略的标记 + 标记写坏了的原因（loop.ts 用它把问题说清楚，而不是静默重问） */
+export interface SignalParse {
+  action?: LoopAction;
+  /** 同一轮还写了这些动作标记；已执行 action，其余下一轮再单独写 */
+  ignored?: string[];
+  /** 有动作标记但无法执行时的原因；没有标记时为空 */
+  problem?: string;
+}
+
+/**
+ * 监督循环用的宽松解析：
+ * - 只有「一个 instruct + verify/wait/review」时先执行 instruct，其余标记记下来下一轮再写；
+ * - wait 缺 pid/log/done/file/cmd 且没有 every= 时给出明确原因，不再退化成“还在想”。
+ */
+export function parseSignalDetailed(text: string): SignalParse {
+  const blocks = markerBlocks(text).filter((b) => LOOP_ACTIONS.has(b.name));
+  if (!blocks.length) return {};
+  if (blocks.length > 1) {
+    const names = blocks.map((b) => b.name);
+    const instructs = blocks.filter((b) => b.name === "instruct");
+    const others = blocks.filter((b) => b.name !== "instruct");
+    if (instructs.length === 1 && others.every((b) => ["verify", "wait", "review"].includes(b.name))) {
+      const action = actionOfBlock(instructs[0]);
+      if (action) return { action, ignored: others.map((b) => b.name) };
+    }
+    return { problem: `同一轮写了 ${names.length} 个动作标记（${names.join("+")}）；协议只允许一个` };
+  }
+  const b = blocks[0];
+  const action = actionOfBlock(b);
+  if (action) return { action };
+  return { problem: signalProblem(b) };
+}
+
+function signalProblem(b: Block): string {
+  if (!b.body && b.name !== "review") return `[[${b.name}]] 没有内容`;
+  if (b.name === "wait") {
+    const hasEvery = /(^|\n)\s*every\s*[:=]\s*\S/i.test(b.body);
+    if (!hasEvery) return "[[wait]] 缺少监控目标：至少写 pid=、log=、done=、file=、cmd= 之一；只是等一会请写 every=10m";
+  }
+  return `[[${b.name}]] 的内容无法执行`;
 }
 
 /** 把监督者的增量安排落到账本上；返回给人看的变化行 */
