@@ -213,7 +213,7 @@ export function resolvePreset(
       const j = ids.indexOf(s.onFail);
       if (j < 0) errs.push(`stage "${s.id}": on_fail "${s.onFail}" is not an active stage`);
       else if (j > i) errs.push(`stage "${s.id}": on_fail must point backwards`);
-      // max_loops is optional: absent means the engine default (500)
+      // max_loops is optional: absent means DEFAULT_MAX_LOOPS (see core.ts)
       if (s.maxLoops != null && !(Number.isInteger(s.maxLoops) && s.maxLoops >= 1 && s.maxLoops <= MAX_LOOPS_CAP)) {
         errs.push(`stage "${s.id}": max_loops must be 1..${MAX_LOOPS_CAP}`);
       }

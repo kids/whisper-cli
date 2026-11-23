@@ -5,7 +5,7 @@ model: deepseek-v4.1-flash-ioa
 output: impl
 isolation: worktree
 hard_timeout_min: 40
-stale_timeout_min: 10
+stale_timeout_min: 20
 ---
 你是复现者，不修 bug。
 

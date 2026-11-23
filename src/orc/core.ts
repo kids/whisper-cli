@@ -68,6 +68,15 @@ export interface Decision {
 export const STALL_LIMIT = 3;
 /** Runaway guard: continuations of one stage in total, even when each one commits something */
 export const CONTINUE_CAP = 20;
+/**
+ * Rework rounds a stage may run when the preset does not set `max_loops`.
+ * It used to be 500 — i.e. effectively off — so a review that kept finding one
+ * more thing could ping-pong back to impl for hundreds of rounds, each one
+ * re-sending the whole session. Every stage still converges on its own when the
+ * issue count stops shrinking (see decideAfterAttempt); this is only the
+ * runaway ceiling. Override with ORC_MAX_LOOPS.
+ */
+export const DEFAULT_MAX_LOOPS = Number(process.env.ORC_MAX_LOOPS || 8);
 
 /** 实现者 block 时，先分清是“环境缺东西”还是“口径/测试断言冲突”，不要一律推给人 */
 const ENV_BLOCK = /(缺数据|数据[^\n]{0,12}(为空|空的|缺失|丢失|没有)|data\s*\/[^\n]{0,12}(为空|空|不存在)|OOM|out of memory|内存不足|显存不足|磁盘[^\n]{0,8}(满|不足)|空间不足|permission denied|EACCES|ENOENT|no such file|网络不通|无法访问|代理不可用|GPU[^\n]{0,8}(不可用|没有|不足))/i;
@@ -285,7 +294,7 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
   }
 
   const used = bump(stage.id);
-  const cap = ctx.cap ?? stage.maxLoops ?? 500;
+  const cap = ctx.cap ?? stage.maxLoops ?? DEFAULT_MAX_LOOPS;
   const fresh = before ? now.major.filter((k) => !before.major.includes(k)) : [];
 
   // Key equality is too strict an identity for LLM prose: re-wording an issue, or moving it to

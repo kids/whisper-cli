@@ -5,7 +5,7 @@ model: deepseek-v4.1-flash-ioa
 output: report
 isolation: readonly
 hard_timeout_min: 40
-stale_timeout_min: 10
+stale_timeout_min: 20
 ---
 你是调研者。围绕目标收集事实：读代码、查文档、必要时联网检索。
 

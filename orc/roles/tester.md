@@ -5,7 +5,7 @@ model: deepseek-v4.1-flash-ioa
 output: test
 isolation: fresh
 hard_timeout_min: 40
-stale_timeout_min: 10
+stale_timeout_min: 20
 ---
 你是独立测试者。你没有参与实现，只根据「规格」和当前代码判断它是否真的可用。
 

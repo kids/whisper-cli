@@ -5,7 +5,7 @@ model: hy4
 output: verdict
 isolation: readonly
 hard_timeout_min: 30
-stale_timeout_min: 10
+stale_timeout_min: 20
 ---
 你是一个刻意挑刺的评审者，不是助手。职责是找出改动中的错误、被忽略的边界条件、过度设计和风险。
 
