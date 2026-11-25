@@ -197,7 +197,12 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
       console.log(`[cursor] spawn chat=${chatId.slice(0, 8)} session=${sessionId?.slice(0, 8) || "(new)"}`);
 
       const child = spawn(bin, args, {
-        env: { ...process.env, CURSOR_API_KEY: config.apiKey },
+        env: {
+          ...process.env,
+          CURSOR_API_KEY: config.apiKey,
+          // Bypass macOS Keychain (locked SSH/headless sessions break agent)
+          AGENT_CLI_CREDENTIAL_STORE: "file",
+        },
         stdio: ["ignore", "pipe", "pipe"],
         // Own process group: jetsam/signals aimed at the bridge shouldn't
         // automatically tear down an in-flight agent (and vice versa).
@@ -291,9 +296,25 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
             }
           }
         }
-        if (ev.type === "result" && ev.result != null) resultText = ev.result;
-        if (ev.type === "result" && ev.subtype === "error" && ev.error) resultText = ev.error;
-        if (ev.type === "result" && ev.usage) usage = normalizeUsage(ev.usage) ?? usage;
+        if (ev.type === "result") {
+          if (ev.result != null) resultText = String(ev.result);
+          if (ev.subtype === "error" && ev.error) resultText = String(ev.error);
+          if (ev.usage) usage = normalizeUsage(ev.usage) ?? usage;
+
+          // Agent CLI sometimes keeps the process alive after emitting result
+          // (turnEnded but no exit). Finalize immediately so Feishu gets a reply.
+          const output = stripAnsi(lastSegment) || resultText || "(no output)";
+          finish({
+            text: output,
+            model: outModel,
+            sessionId: outSessionId,
+            usage,
+            images,
+            files,
+          });
+          setTimeout(() => { try { killChild("SIGTERM"); } catch {} }, 2000);
+          setTimeout(() => { try { killChild("SIGKILL"); } catch {} }, 8000);
+        }
 
         const genImg = extractGenerateImage(ev);
         if (genImg) pushImage(genImg);
