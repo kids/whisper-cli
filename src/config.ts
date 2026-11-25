@@ -229,8 +229,12 @@ function parseGroup(raw: RawGroup): AgentConfig | null {
   if (aiCli === "dsh") {
     // DeepSeek Harness reads DEEPSEEK_API_KEY; without one it falls back to
     // ~/.dsh/.credentials.yaml or ~/.dsh/.env, so the key is optional here.
+    // AGENT_<N>_DSH_BASE_URL / DSH_MODEL 可指向 TokenHub 等 Anthropic-Messages
+    // 兼容端点；不填则用 dsh 默认（api.deepseek.com）。
     config.dsh = {
       apiKey: e.DSH_API_KEY || e.DEEPSEEK_API_KEY || undefined,
+      baseUrl: e.DSH_BASE_URL || e.DEEPSEEK_BASE_URL || undefined,
+      model: e.DSH_MODEL || e.DEEPSEEK_MODEL || undefined,
       profile: e.DSH_PROFILE || undefined,
     };
   }

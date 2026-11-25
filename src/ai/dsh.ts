@@ -206,6 +206,10 @@ export function runDsh(opts: RunDshOptions): Promise<AiResult> {
 
     const env = { ...process.env };
     if (config.apiKey) env.DEEPSEEK_API_KEY = config.apiKey;
+    // 第三方 Anthropic-Messages 兼容端点（TokenHub 等）：dsh 的 llm-deepseek 读它
+    if (config.baseUrl) env.DEEPSEEK_BASE_URL = config.baseUrl;
+    // headless 无 --model，profile 补丁用 DSH_MODEL 覆盖 agentDefaultModel
+    if (config.model) env.DSH_MODEL = config.model;
 
     const result = await new Promise<AiResult | null>((resolve) => {
       const child = spawn(bin, args, {

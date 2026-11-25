@@ -147,6 +147,10 @@ export interface PiConfig {
 export interface DshConfig {
   /** Optional DeepSeek API key. If omitted, dsh uses ~/.dsh/.credentials.yaml / ~/.dsh/.env. */
   apiKey?: string;
+  /** Anthropic-Messages 兼容端点 (DEEPSEEK_BASE_URL)，如腾讯云 TokenHub /plan/anthropic。 */
+  baseUrl?: string;
+  /** 默认模型 id (DSH_MODEL)；headless 无 --model，由 profile 补丁读取该环境变量。 */
+  model?: string;
   /** dsh profile; defaults to "headless" (AGENT_<N>_DSH_PROFILE). */
   profile?: string;
 }
