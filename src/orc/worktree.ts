@@ -35,6 +35,53 @@ export function headSha(cwd: string, ref = "HEAD"): string {
 }
 
 /**
+ * Pipeline tasks run in the repo itself by default (`ORC_ISOLATION=workspace`):
+ * no branch, no merge. Set `ORC_ISOLATION=worktree` to get the old one-worktree-per-task.
+ * Loop tasks always keep a worktree — a round can run for hours with background jobs,
+ * and sharing the tree with the human's edits would corrupt both.
+ */
+export function workspaceMode(): boolean {
+  return !/^(worktree|branch)$/i.test(process.env.ORC_ISOLATION || "");
+}
+
+/** Current branch short name ("" when detached — callers must refuse to run then) */
+export function currentBranch(cwd: string): string {
+  return git(cwd, ["symbolic-ref", "--short", "HEAD"], { allowFail: true });
+}
+
+/** Dirty paths as `git status --porcelain` reports them (generated artifacts excluded) */
+export function dirtyPaths(cwd: string): Set<string> {
+  const out = statusPorcelain(cwd);
+  const set = new Set<string>();
+  for (const line of out.split("\n")) {
+    if (!line.trim()) continue;
+    for (const part of line.slice(3).split(" -> ")) {
+      const p = part.trim().replace(/^"|"$/g, "");
+      if (p) set.add(p);
+    }
+  }
+  return set;
+}
+
+/**
+ * Commit only what is *not* in `exclude` (the paths already dirty when the attempt started).
+ * In workspace mode the human may be editing the same repo; their WIP must never be swept
+ * into a task commit, and vice versa.
+ */
+export function commitAllExcept(cwd: string, exclude: Set<string>, message: string): string | undefined {
+  git(cwd, ["add", "-A", "--", ".", ...ARTIFACT_EXCLUDES]);
+  if (exclude.size) {
+    const list = [...exclude].map((p) => `:(literal)${p}`);
+    for (let i = 0; i < list.length; i += 100) {
+      git(cwd, ["reset", "-q", "--", ...list.slice(i, i + 100)], { allowFail: true });
+    }
+  }
+  if (!git(cwd, ["diff", "--cached", "--name-only"])) return undefined;
+  execFileSync("git", [...IDENT, "commit", "-q", "--no-verify", "-m", message], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+  return headSha(cwd);
+}
+
+/**
  * A task's handle is its title, not a number: branch and directory are derived from it
  * (`orc/分位数可行性-3f9a`). The 4-char tail is a hash of the internal id, so two tasks that
  * happen to share a title still get separate branches. Numbers only exist inside a task

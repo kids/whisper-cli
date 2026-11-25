@@ -2,6 +2,8 @@
 // core state machine, and scheduler end-to-end with a fake executor on a temp
 // git repo (worktrees, commits, resume, slots, read-only enforcement, split,
 // recovery).   npx tsx scripts/orc_check.ts
+// 这套用例针对 worktree 隔离引擎；workspace（默认）模式见 orc_ws_check.ts。
+process.env.ORC_ISOLATION ||= "worktree";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";

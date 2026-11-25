@@ -129,6 +129,8 @@ export interface DecideCtx {
   cap?: number;
   /** this attempt committed something new to the worktree */
   progressed?: boolean;
+  /** the task edits the repo in place (no per-task worktree): siblings would share one tree */
+  workspace?: boolean;
 }
 
 export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx = {}): Decision {
@@ -208,11 +210,17 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
 
   if (p.kind === "plan") {
     d.patch.spec = p.spec;
-    if ((p.subtasks?.length ?? 0) >= 2) {
-      d.patch = { ...d.patch, status: "waiting_children", loops, progress: `已拆成 ${p.subtasks!.length} 个子任务` };
-      d.children = serializeOverlapping(p.subtasks!);
+    const subs = p.subtasks ?? [];
+    // A page/single-module change is one task, not a team: ≤3 touched files never split.
+    // workspace mode cannot split at all — siblings would share one working tree.
+    const files = new Set(subs.flatMap((s) => s.files ?? []));
+    const tooSmall = files.size > 0 && files.size <= 3;
+    if (subs.length >= 2 && !ctx.workspace && !tooSmall) {
+      d.patch = { ...d.patch, status: "waiting_children", loops, progress: `已拆成 ${subs.length} 个子任务` };
+      d.children = serializeOverlapping(subs);
       return d;
     }
+    if (subs.length >= 2) d.patch.progress = "改动集中，按单个任务执行（不拆子任务）";
   }
 
   if (p.kind === "impl" && !p.pass) {

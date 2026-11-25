@@ -67,6 +67,8 @@ export class Orchestrator {
   private inflight = new Set<Promise<void>>();
   /** role → busy slot indices; reserved synchronously at launch so one tick can't over-commit */
   private busy = new Map<string, Set<number>>();
+  /** repo → the only task allowed to touch that working tree (workspace mode) */
+  private repoBusy = new Map<string, number>();
   /** role → launch effect ids parked because every slot was busy */
   private slotWaiters = new Map<string, Set<number>>();
   /** Supervisor ReAct loop for kind=loop tasks */
@@ -101,6 +103,7 @@ export class Orchestrator {
       // child that edits the repo freely (worktree preset, no review gate on the way); the
       // parent only exists to hold them and to decide which one the human should take.
       const ab = abPlan(input.preset);
+      if (ab && wt.workspaceMode()) throw new Error("workspace 模式不支持 explore（A/B 并行需要独立分支）；改用 dev，或设 ORC_ISOLATION=worktree。");
       const task = this.store.createTask({
         title: input.title || shortTitle(input.goal), goal: input.goal, repo: root, baseRef,
         preset: input.preset, chatId: input.chatId ?? null, kind, bar: input.bar ?? "", origin: input.origin,
@@ -157,7 +160,7 @@ export class Orchestrator {
     if (process.env.ORC_REAP === "0") return;
     const run = () => {
       const t = this.store.getTask(taskId);
-      if (!t?.worktree || !["ready", "failed", "dropped"].includes(t.status)) return; // resumed meanwhile
+      if (!t?.worktree || t.worktree === t.repo || !["ready", "failed", "dropped"].includes(t.status)) return; // resumed / workspace
       const strays = reapStrays(t.worktree);
       if (!strays.length) return;
       console.log(`[orc] #${taskId} ended: stopped ${strays.length} leftover process(es): ${strays.map((s) => s.pid).join(",")}`);
@@ -362,6 +365,30 @@ export class Orchestrator {
         return;
       }
     }
+    // workspace 模式没有 worktree：同仓库同时只能跑一个任务，且开工前工作区必须干净
+    const ws = this.isWorkspaceTask(task);
+    if (ws && task.worktree == null) {
+      const dirt = wt.statusPorcelain(task.repo);
+      if (dirt) {
+        this.store.tx(() => {
+          this.store.updateTask(task.id, { status: "blocked", progress: "工作区有未提交改动，未启动" });
+          this.store.markEffect(e.id, "done", { error: "dirty workspace" });
+          this.store.addEffect("notify", {
+            taskId: task.id, kind: "info",
+            text: `这个仓库的工作区有未提交改动，任务没有启动——否则会把你的改动混进任务的提交里。\n\n先 commit 或 stash，然后说「继续」。当前改动：\n${dirt.split("\n").slice(0, 8).join("\n")}${dirt.split("\n").length > 8 ? "\n…" : ""}`,
+          } satisfies NotifyPayload);
+        });
+        this.emitProgress(task.id);
+        return;
+      }
+    }
+    if (ws) {
+      const holder = this.repoBusy.get(task.repo);
+      if (holder && holder !== task.id) {
+        this.store.markEffect(e.id, "pending", { nextAt: Date.now() + 2000 });
+        return;
+      }
+    }
     const stage = task.preset.stages[p.stageIdx];
     const role = task.preset.roles[stage.role];
     const used = this.busy.get(role.name) ?? new Set<number>();
@@ -376,6 +403,7 @@ export class Orchestrator {
     used.add(slot);
     this.busy.set(role.name, used);
     this.slotWaiters.get(role.name)?.delete(e.id);
+    if (ws) this.repoBusy.set(task.repo, task.id);
 
     this.store.markEffect(e.id, "running");
     const pr = this.runAttempt(e, task, p, slot)
@@ -383,6 +411,7 @@ export class Orchestrator {
       .finally(() => {
         used.delete(slot);
         this.inflight.delete(pr);
+        if (ws && this.repoBusy.get(task.repo) === task.id) this.repoBusy.delete(task.repo);
         const waiting = this.slotWaiters.get(role.name);
         if (waiting?.size) { this.store.wakeEffects([...waiting]); waiting.clear(); }
       });
@@ -400,7 +429,7 @@ export class Orchestrator {
       const outcome: Outcome = merge
         ? { kind: "merge_conflict", branch: merge.branch, files: merge.files, detail: merge.detail }
         : { kind: "run_error", error: msg, timedOut: false };
-      this.applyDecision(fresh, decideAfterAttempt(fresh, outcome));
+      this.applyDecision(fresh, decideAfterAttempt(fresh, outcome, { workspace: this.isWorkspaceTask(fresh) }));
       this.store.markEffect(e.id, "done", { error: msg });
     });
     this.emitProgress(task.id);
@@ -439,7 +468,25 @@ export class Orchestrator {
    * launch and are idempotent: a retry after a human resolves the conflict must pick up the new commit
    * instead of short-circuiting on the existing directory.
    */
+  /**
+   * Pipeline tasks edit the repo in place by default (no branch, no merge): the tree must be
+   * clean at start, and the repo lock keeps tasks serial. Loop tasks and tasks already bound
+   * to a worktree keep the old path.
+   */
+  private isWorkspaceTask(t: Task): boolean {
+    if (t.kind === "loop") return false;
+    if (t.worktree) return t.worktree === t.repo;
+    return wt.workspaceMode();
+  }
+
   prepareWorktree(task: Task): Task {
+    if (this.isWorkspaceTask(task)) {
+      if (task.worktree) return task;
+      const branch = wt.currentBranch(task.repo);
+      if (!branch) throw new Error("仓库处于 detached HEAD；workspace 模式不跑任务，先切回一个分支。");
+      this.store.updateTask(task.id, { worktree: task.repo, branch, baseRef: wt.headSha(task.repo) });
+      return this.store.getTask(task.id)!;
+    }
     const existing = task.worktree && existsSync(task.worktree) ? task.worktree : undefined;
     const path = existing ?? wt.worktreePath(this.opts.orcHome, task.repo, task.title, task.id);
     const branch = task.branch || wt.branchName(task.title, task.id);
@@ -536,6 +583,9 @@ export class Orchestrator {
     };
 
     const beforeReadonly = role.isolation === "readonly" ? wt.statusPorcelain(task.worktree!) : "";
+    // workspace 模式：先记下开工前就存在的 WIP，只提交这次运行真正改出来的文件
+    const wsTree = task.worktree === task.repo;
+    const beforePaths = wsTree ? wt.dirtyPaths(task.worktree!) : undefined;
     let result;
     try {
       result = await this.exec.run({
@@ -556,10 +606,18 @@ export class Orchestrator {
     // Readonly: never resetHard (preserve WIP); soft-warn if the tree moved.
     let violation = "";
     let sha: string | undefined;
-    if (role.isolation === "readonly") {
+    if (role.isolation === "readonly" && wsTree && beforePaths) {
+      const changed = [...wt.dirtyPaths(task.worktree!)].filter((p) => !beforePaths.has(p));
+      if (changed.length) {
+        sha = wt.commitAllExcept(task.worktree!, beforePaths, `orc(#${task.id}) ${stage.id}: preserve WIP during ${role.name}`);
+        violation = `只读角色/命令期间工作区有未提交改动，已提交保留（不回滚）：\n${changed.join("\n")}`;
+      }
+    } else if (role.isolation === "readonly") {
       const en = wt.enforceReadonly(task.worktree!, beforeReadonly, `orc(#${task.id}) ${stage.id}: preserve WIP during ${role.name}`);
       if (en.note) violation = en.note; // informational — not a destructive rollback
       if (en.sha) sha = en.sha;
+    } else if (wsTree && beforePaths) {
+      sha = wt.commitAllExcept(task.worktree!, beforePaths, `orc(#${task.id}) ${stage.id}: ${role.name} attempt ${n}`);
     } else {
       sha = wt.commitAll(task.worktree!, `orc(#${task.id}) ${stage.id}: ${role.name} attempt ${n}`);
     }
@@ -607,7 +665,7 @@ export class Orchestrator {
             extendedMin = nextMin;
           }
         }
-        const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed, progressed: !!sha });
+        const d = decideAfterAttempt(fresh, outcome, { prev: prevParsed, progressed: !!sha, workspace: this.isWorkspaceTask(fresh) });
         if (extendedMin) {
           d.notifies.push({ taskId: task.id, kind: "info", text: `**${task.title}：这一轮超时，但已有新提交**\n已把 ${role.name} 的单轮上限从 ${role.hardTimeoutMin} 分钟放宽到 ${extendedMin} 分钟，接着做；长作业仍应 \`setsid nohup\` 放后台。` });
           if (d.launches[0]) d.launches[0].note = `上一轮到了时长上限被终止，但已有新提交；本轮上限已放宽到 ${extendedMin} 分钟。先看工作区和后台作业，已完成的不要重做；长作业先 setsid nohup 放后台并报 pid/日志，做完给 [[done]]。`;
