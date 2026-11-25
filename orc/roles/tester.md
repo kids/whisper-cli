@@ -3,7 +3,7 @@ description: 独立验证者：不继承实现者上下文，只看规格与产�
 cli: codebuddy
 model: deepseek-v4.1-flash-ioa
 output: test
-isolation: fresh
+isolation: write
 hard_timeout_min: 40
 stale_timeout_min: 20
 ---

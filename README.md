@@ -217,7 +217,7 @@ Wrong guesses recover on their own: the lead hands plain questions back to the s
 
 Other commands (`/mode`, `/task`, `/tasks`, `/orc`, `/watch`, `/记忆` …) still work; full list in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Team tasks need the workspace to be a git repo: each task works on its own worktree and branch, your main branch is untouched; irreversible actions (push, deploy …) only run after your explicit approval.
+Team tasks need the workspace to be a git repo: every task runs in place on the current branch (no worktree, no per-task branch), and the tree must be clean before launch; one task per repo at a time. Irreversible actions (push, deploy …) only run after your explicit approval.
 
 **Admin mode (`ADMIN_MODE=true`, on by default for Cursor):**
 

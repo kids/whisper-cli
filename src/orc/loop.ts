@@ -27,11 +27,11 @@ import { CONTRACT } from "./prompts";
 import type { Executor, RunResult } from "./runner";
 import type { OrcStore } from "./store";
 import type { CliName, Effect, LoopPayload, NotifyPayload, ResolvedRole, Task, TaskStatus, Verbosity } from "./types";
-import * as wt from "./worktree";
+import * as wt from "./gitops";
 
 export interface LoopOptions {
   orcHome: string;
-  ensureWorktree: (task: Task) => Task;
+  prepareWorkspace: (task: Task) => Task;
   instructionsFor?: (task: Task) => Promise<string | undefined>;
   onProgress?: (task: Task) => void;
   /** bot whose watch host serves this task's chat (undefined → wait unavailable) */
@@ -121,7 +121,7 @@ interface Outcome {
   stopped?: boolean;
 }
 
-/** Run a read-only check command in the worktree */
+/** Run a read-only check command in the workspace */
 function sh(cmd: string, cwd: string, timeoutMs: number): Promise<{ code: number | null; out: string; timedOut: boolean }> {
   return new Promise((res) => {
     const child = spawn("bash", ["-c", cmd], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
@@ -352,8 +352,8 @@ export class LoopEngine {
 
   private async round(task0: Task, p: LoopPayload): Promise<void> {
     const t0 = Date.now();
-    const task = this.opts.ensureWorktree(task0);
-    const wtp = task.worktree!;
+    const task = this.opts.prepareWorkspace(task0);
+    const wtp = task.workspace!;
     const loop = task.preset.loop!;
     const l = this.ledger(task.id)!;
     const n = l.step + 1;
@@ -405,7 +405,7 @@ export class LoopEngine {
     const supTurns = Number(process.env.ORC_LOOP_SUP_TURNS || 0) || l.limits.maxSteps;
     const fresh = !l.sup.sessionId || l.sup.turns >= supTurns;
     const prompt = L.buildSupervisorPrompt(l, {
-      taskId: task.id, title: task.title, worktree: wtp, branch: task.branch ?? "", diffStat: wt.diffSince(wtp, task.baseRef, 0).stat,
+      taskId: task.id, title: task.title, workspace: wtp, branch: task.branch ?? "", diffStat: wt.diffSince(wtp, task.baseRef, 0).stat,
       worker: roleName(worker), reviewer: reviewer ? roleName(reviewer) : undefined, reason: reasonText, waiting, canWait, fresh,
     });
     // Snapshot before supervisor: if WIP already exists (or appears from a concurrent
@@ -528,7 +528,7 @@ export class LoopEngine {
   // ---- actions ------------------------------------------------------------
 
   private async execute(task: Task, l: L.Ledger, a: L.LoopAction, n: number, r: { worker: ResolvedRole; reviewer?: ResolvedRole }): Promise<Outcome> {
-    const wtp = task.worktree!;
+    const wtp = task.workspace!;
     const id = task.id;
     switch (a.action) {
       case "instruct": {
@@ -847,7 +847,7 @@ export class LoopEngine {
     let res: RunResult;
     try {
       res = await this.exec.run({
-        cli: role.cli, model: role.model, prompt, sessionKey: o.key, resumeSessionId: o.resumeSessionId, cwd: task.worktree!,
+        cli: role.cli, model: role.model, prompt, sessionKey: o.key, resumeSessionId: o.resumeSessionId, cwd: task.workspace!,
         appendSystemPrompt: instructions, readOnly: o.readOnly, disallowedTools: role.disallowedTools,
         hardTimeoutMs: role.hardTimeoutMin * 60_000, staleTimeoutMs: role.staleTimeoutMin * 60_000,
         onProgress: progress,

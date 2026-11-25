@@ -6,7 +6,7 @@
 //   npm run orc -- run                 drive the scheduler until all work settles
 //   npm run orc -- status [id]
 //   npm run orc -- stop <id> | retry <id> [note] | attach <id> <text>
-// State: $ORC_HOME (default ~/.orc): orc.db, worktrees/, tasks/<id>/, notes/
+// State: $ORC_HOME (default ~/.orc): orc.db, tasks/<id>/, notes/
 // =============================================================================
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -95,7 +95,7 @@ async function main() {
       const t = store.getTask(Number(pos[0]));
       if (!t) throw new Error(`no task ${pos[0]}`);
       console.log(fmtTask(t));
-      console.log(`    ${presetSummary(t.preset)}\n    branch=${t.branch} worktree=${t.worktree}\n    loops=${JSON.stringify(t.loops)}`);
+      console.log(`    ${presetSummary(t.preset)}\n    branch=${t.branch} workspace=${t.workspace}\n    loops=${JSON.stringify(t.loops)}`);
       if (t.feedback) console.log(`    feedback:\n${t.feedback.replace(/^/gm, "      ")}`);
       for (const a of store.listAttempts(t.id)) {
         const dur = a.endedAt ? `${Math.round((a.endedAt - a.startedAt) / 1000)}s` : "running";

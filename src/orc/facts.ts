@@ -3,8 +3,8 @@
 // =============================================================================
 // Why this exists: the lead agent runs stateless, read-only and with Bash denied,
 // so anything not put in its prompt is invisible to it. The single agent has
-// tools, but its cwd is the project repo while the task's worktree and the
-// orchestration DB live elsewhere. Both used to get a single `progress` line,
+// tools, but its cwd is the project repo while the orchestration DB lives
+// elsewhere. Both used to get a single `progress` line,
 // which made "为什么没过" unanswerable ("我这边看不到评审的具体意见").
 //
 // So: collect once (taskFacts), then
@@ -65,7 +65,7 @@ export interface TaskFacts {
   progress: string;
   updatedAt: number;
   branch: string | null;
-  worktree: string | null;
+  workspace: string | null;
   /** Current pipeline stage (undefined for loop / finished tasks) */
   stage?: { id: string; label: string; role: string; index: number; total: number; acceptable: boolean };
   /** Loop task: the supervisor's open question */
@@ -167,7 +167,7 @@ function factsFromAttempt(src: FactsSource | undefined, task: Task): TaskFacts {
     progress: squash(task.status === "ready" ? task.progress.replace(/[，,]\s*等待验收$/, "") : task.progress, 400),
     updatedAt: task.updatedAt,
     branch: task.branch,
-    worktree: task.worktree,
+    workspace: task.workspace,
     stage: stage ? {
       id: stage.id,
       label: stageName(stage.id),
@@ -243,7 +243,7 @@ export function renderFactsMarkdown(f: TaskFacts, commits: string[] = []): strin
   if (f.stage) L.push(`- 阶段：${f.stage.label}（${f.stage.index + 1}/${f.stage.total}）${f.stage.role ? ` · 角色 ${f.stage.role}` : ""}`);
   if (f.loops.length) L.push(`- 退回：${f.loops.join("，")}`);
   if (f.branch) L.push(`- 分支：\`${f.branch}\``);
-  if (f.worktree) L.push(`- 工作树：\`${f.worktree}\``);
+  if (f.workspace) L.push(`- 工作区：\`${f.workspace}\``);
   L.push(`- 更新：${fmtAt(f.updatedAt)}`);
   if (f.progress) L.push(`- 进展：${f.progress}`);
   L.push("", "> 本文件由 whisper-cli 自动生成，只读；要推进任务请在群里说话。", "");
@@ -277,8 +277,8 @@ export function renderFactsMarkdown(f: TaskFacts, commits: string[] = []): strin
 /** Relative path as the agent sees it from the chat workspace */
 export const factsRelPath = (id: number): string => `${FACTS_DIR}/task-${id}.md`;
 
-// `git info/exclude` is local-only: no repo file changes, no dirty status, shared
-// by every worktree of the repo. `.gitignore` would be a business-repo edit.
+// `git info/exclude` is local-only: no repo file changes, no dirty status.
+// `.gitignore` would be a business-repo edit.
 const excluded = new Set<string>();
 function ensureExcluded(workspace: string): void {
   if (excluded.has(workspace)) return;
@@ -295,9 +295,9 @@ function ensureExcluded(workspace: string): void {
   } catch { /* not a git repo → nothing to exclude */ }
 }
 
-function recentCommits(worktree: string): string[] {
+function recentCommits(cwd: string): string[] {
   try {
-    return execFileSync("git", ["-C", worktree, "log", "--oneline", "-5"], { timeout: 2000, encoding: "utf8" })
+    return execFileSync("git", ["-C", cwd, "log", "--oneline", "-5"], { timeout: 2000, encoding: "utf8" })
       .split("\n").map((s) => s.trim()).filter(Boolean);
   } catch { return []; }
 }
@@ -316,7 +316,7 @@ export function writeTaskFacts(f: TaskFacts, workspace: string | undefined): str
     const dir = resolve(workspace, FACTS_DIR);
     mkdirSync(dir, { recursive: true });
     ensureExcluded(workspace);
-    const commits = f.worktree ? recentCommits(f.worktree) : [];
+    const commits = f.workspace ? recentCommits(f.workspace) : [];
     writeFileSync(resolve(dir, `task-${f.id}.md`), renderFactsMarkdown(f, commits), "utf8");
     wrote.set(key, f.updatedAt);
     return factsRelPath(f.id);

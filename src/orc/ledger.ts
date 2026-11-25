@@ -583,7 +583,7 @@ export function evidenceLine(e: Evidence, l: Ledger): string {
 export interface SupervisorCtx {
   taskId: number;
   title: string;
-  worktree: string;
+  workspace: string;
   branch: string;
   diffStat: string;
   worker: string;
@@ -623,7 +623,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
   }
   const obs = l.observations.slice(-8);
   const out: string[] = [];
-  out.push(`你是 orc 任务 #${c.taskId}「${c.title}」的监督者。你不亲自改代码：看现场、给 worker 下指令、自己跑只读命令取证、判断什么时候收尾。工作区 \`${c.worktree}\`（分支 \`${c.branch}\`），你可以用只读工具随便看。`);
+  out.push(`你是 orc 任务 #${c.taskId}「${c.title}」的监督者。你不亲自改代码：看现场、给 worker 下指令、自己跑只读命令取证、判断什么时候收尾。工作区 \`${c.workspace}\`（分支 \`${c.branch}\`），你可以用只读工具随便看。`);
   out.push(`## 目标\n${l.goal}`);
   out.push(`## 验收标准\n${criteriaBlock(l)}`);
   out.push(`## 约束（v${l.constraintsVersion}）\n${constraintsBlock(l)}\n群公告和群记忆在系统提示里，同样必须遵守。`);
@@ -643,7 +643,7 @@ export function buildSupervisorPrompt(l: Ledger, c: SupervisorCtx): string {
     "- 长作业（训练、批处理）让 worker 后台跑并报 pid 和日志，然后 `[[wait]]`；等的时候盯着，跑偏了就 `[[instruct]]` 让它停掉改。",
     "- 能自己定的事别问人；只有不可逆（推送、部署、删数据、对外发消息）、高成本或目标本身有歧义才 `[[ask]]`。",
     "- 收尾 `[[finish]]` + 一句话结论，第一行照实写 outcome=achieved / negative / mixed——否定结论（假设不成立、没达标）也是有效收尾，群里会如实标出来；放弃 `[[abort]]` + 原因和试过什么。",
-    "- 收尾 / 放弃前，先让 worker 停掉它起的后台作业（尤其远端机器上的：任务结束时 orc 只会停本机从工作区起的进程，管不到远端）；还要保留的作业在结论里写明。",
+    "- 收尾 / 放弃前，先让 worker 停掉它起的后台作业（尤其远端机器上的：任务结束时 orc 不会自动停后台进程，远端与本机都要自己收尾）；还要保留的作业在结论里写明。",
   ].join("\n"));
   return out.join("\n\n");
 }
@@ -660,7 +660,7 @@ export function buildWorkerPrompt(l: Ledger, text: string, o: { taskId: number; 
   out.push(`## 验收标准\n${criteriaBlock(l)}`);
   out.push(`## 约束（v${l.constraintsVersion}，必须遵守）\n${constraintsBlock(l)}`);
   out.push(`## 本轮指令\n${text}`);
-  out.push(`## 工作区\n当前目录是本任务专用的 git worktree（分支 \`${o.branch}\`）。只在这里工作；不要 git commit / push，orc 会在你结束后提交。`);
+  out.push(`## 工作区\n当前目录就是仓库主工作区（分支 \`${o.branch}\`）。不要 git commit / push，orc 会在你结束后提交。`);
   out.push(`## 角色说明\n${o.rolePrompt}`);
   out.push([
     "## 长时间作业",

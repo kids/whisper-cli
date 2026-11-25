@@ -12,7 +12,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   parent_id INTEGER, title TEXT NOT NULL, goal TEXT NOT NULL, spec TEXT NOT NULL DEFAULT '',
-  repo TEXT NOT NULL, base_ref TEXT NOT NULL, branch TEXT, worktree TEXT,
+  repo TEXT NOT NULL, base_ref TEXT NOT NULL, branch TEXT, workspace TEXT,
   preset TEXT NOT NULL, stage_idx INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
   loops TEXT NOT NULL DEFAULT '{}', deps TEXT NOT NULL DEFAULT '[]',
   feedback TEXT NOT NULL DEFAULT '', inbox TEXT NOT NULL DEFAULT '[]',
@@ -58,7 +58,7 @@ function rowToTask(r: any): Task {
   if (preset && !preset.kind) preset.kind = "pipeline"; // snapshots frozen before loop presets existed
   return {
     id: r.id, kind: r.kind === "loop" ? "loop" : "pipeline", parentId: r.parent_id ?? null, title: r.title, goal: r.goal, spec: r.spec, bar: r.bar ?? "",
-    repo: r.repo, baseRef: r.base_ref, branch: r.branch ?? null, worktree: r.worktree ?? null,
+    repo: r.repo, baseRef: r.base_ref, branch: r.branch ?? null, workspace: r.workspace ?? null,
     preset, stageIdx: r.stage_idx, status: r.status,
     loops: j(r.loops, {}), deps: j(r.deps, []), feedback: r.feedback, inbox: j(r.inbox, []),
     chatId: r.chat_id ?? null, progress: r.progress, origin: r.origin === "agent" ? "agent" : "human", replan: r.replan ?? "",
@@ -84,7 +84,7 @@ function rowToEffect(r: any): Effect {
 }
 
 const TASK_COLS: Record<string, string> = {
-  title: "title", spec: "spec", branch: "branch", worktree: "worktree", stageIdx: "stage_idx",
+  title: "title", spec: "spec", branch: "branch", workspace: "workspace", stageIdx: "stage_idx",
   status: "status", loops: "loops", deps: "deps", feedback: "feedback", inbox: "inbox",
   chatId: "chat_id", progress: "progress", baseRef: "base_ref", preset: "preset", replan: "replan",
   ab: "ab", candidate: "candidate", candidateIdx: "candidate_idx", candidateOf: "candidate_of",
@@ -103,6 +103,7 @@ export class OrcStore {
     this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
     this.db.exec(SCHEMA);
     const cols = this.db.prepare("PRAGMA table_info(tasks)").all().map((c: any) => c.name);
+    if (!cols.includes("workspace") && cols.includes("worktree")) this.db.exec("ALTER TABLE tasks RENAME COLUMN worktree TO workspace");
     if (!cols.includes("kind")) this.db.exec("ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'pipeline'");
     // 评审口径: how strictly this task should be reviewed (written by the lead per task nature)
     if (!cols.includes("bar")) this.db.exec("ALTER TABLE tasks ADD COLUMN bar TEXT NOT NULL DEFAULT ''");

@@ -3,7 +3,7 @@ description: 按规格实现，附带必要的测试；返工时续接自己的�
 cli: codebuddy
 model: deepseek-v4.1-flash-ioa
 output: impl
-isolation: worktree
+isolation: write
 resume: true
 hard_timeout_min: 90
 stale_timeout_min: 15

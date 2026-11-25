@@ -10,7 +10,6 @@ import { OrcStore } from "../src/orc/store";
 import type { Executor, RunRequest, RunResult } from "../src/orc/runner";
 import type { NotifyPayload } from "../src/orc/types";
 
-process.env.ORC_ISOLATION = "workspace";
 const presets = loadPresets();
 const roles = loadRoles();
 const devPreset = resolvePreset(presets.get("dev")!, roles);
@@ -64,11 +63,11 @@ const check = (name: string, good: boolean, detail?: unknown) => { if (!good) { 
   await orc.runUntilIdle(10);
   const done = store.getTask(t.id)!;
   check("ready", done.status === "ready", done.status);
-  check("bound to repo", done.worktree === repo, done.worktree);
+  check("bound to repo", done.workspace === repo, done.workspace);
   check("branch = current", done.branch === "main", done.branch);
   check("commits on main", /orc\(#/.test(git(repo, "log", "--oneline")), git(repo, "log", "--oneline"));
   check("no orc branch", !git(repo, "branch", "--list", "orc/*"), git(repo, "branch", "--list", "orc/*"));
-  check("no worktree dir", !existsSync(join(dir, "home", "worktrees")));
+  check("never creates a worktree dir", !existsSync(join(dir, "home", "worktrees")));
   check("exec ran in repo", exec.calls.every((c) => c.cwd === repo), exec.calls.map((c) => c.cwd));
   store.close(); rmSync(dir, { recursive: true, force: true });
 }

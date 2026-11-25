@@ -174,7 +174,7 @@ export class CliExecutor implements Executor {
         model: req.model, onStreamUpdate, onEvent, appendSystemPrompt: req.appendSystemPrompt,
         disallowedTools: req.readOnly ? [...WRITE_TOOLS, ...(req.disallowedTools ?? [])] : req.disallowedTools,
         hardTimeoutMs: req.hardTimeoutMs, staleTimeoutMs: req.staleTimeoutMs,
-        // each task worktree is a new cwd → Auto Memory would only scatter fragments
+        // tasks share one cwd → Auto Memory fragments would scatter anyway
         disableAutoMemory: true,
       });
       res.sessionId ||= getCodebuddySession(key);

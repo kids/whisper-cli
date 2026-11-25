@@ -27,7 +27,7 @@ import {
 import { MODE_LABEL, type ChatMode, type TaskOp } from "./route";
 import type { ExecutorBins } from "./runner";
 import type { CliName, Task, Verbosity } from "./types";
-import { repoRoot } from "./worktree";
+import { repoRoot } from "./gitops";
 
 export interface OrcChatHost {
   im: ImClient;
@@ -124,7 +124,7 @@ async function submit(
 ): Promise<string> {
   const o = orcOf(h);
   const repo = repoRoot(h.workspaceFor(chatId));
-  if (!repo) return `❌ 当前工作区 \`${h.workspaceFor(chatId)}\` 不是 git 仓库，团队任务要用 git worktree 隔离各人的改动。先用 \`/工作区 <路径或项目名>\` 切到一个 git 仓库（也可以说「把工作目录切到 …」）。`;
+  if (!repo) return `❌ 当前工作区 \`${h.workspaceFor(chatId)}\` 不是 git 仓库，团队任务会直接在这个工作区里跑。先用 \`/工作区 <路径或项目名>\` 切到一个 git 仓库（也可以说「把工作目录切到 …」）。`;
   const profile = getProfile(chatId);
   let preset;
   try {

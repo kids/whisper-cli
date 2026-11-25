@@ -121,7 +121,7 @@ AGENT_10_DEEPSEEK_API_KEY=sk-xxx
 
 > 每组 Bot 必须使用**独立的机器人凭证**（不同飞书 `APP_ID` / 企微 Bot ID / Telegram token），否则长连接会互相抢事件。`AI_CLI` 也接受别名：`codex-cli`、`claude-code` / `claude-code-cli`、`gemini-cli`、`deepseek` / `deepseek-harness` / `dsh-cli`。完整的可选项（白名单、工作目录、Pi 的 provider 等）见 `.env.example`。
 
-> **dsh 说明：** 适配 `dsh --profile headless --json`，prompt 走 stdin、事件走 NDJSON、`--session-id` 续接；单 agent 与 orc 编排都能用（只读角色走 `--permission-mode read-only`，其余 `danger-full-access` + `--approval-policy never`（worktree 的 git 元数据在主仓库，workspace-write 会拒绝写 `index.lock`））。两点限制来自 dsh 本身：headless 没有 `--model` 参数（模型在 dsh profile 的 `agent-default-model`（`~/.dsh/profiles/<profile>/cordis.patch.yml`），所以 `/model` 对 dsh 组不生效）；`--session-id` 只在同一 cwd 下有效（换工作区后首轮自动重开会话）。
+> **dsh 说明：** 适配 `dsh --profile headless --json`，prompt 走 stdin、事件走 NDJSON、`--session-id` 续接；单 agent 与 orc 编排都能用（只读角色走 `--permission-mode read-only`，其余 `danger-full-access` + `--approval-policy never`（git 写 `index.lock` 需要完整权限））。两点限制来自 dsh 本身：headless 没有 `--model` 参数（模型在 dsh profile 的 `agent-default-model`（`~/.dsh/profiles/<profile>/cordis.patch.yml`），所以 `/model` 对 dsh 组不生效）；`--session-id` 只在同一 cwd 下有效（换工作区后首轮自动重开会话）。
 
 > **Codex 认证说明：** Codex 使用的是 OAuth 持久化认证（`codex login`），与 OpenAI API Key（`sk-xxx`）**不是同一回事**：
 >
@@ -215,7 +215,7 @@ sudo systemctl enable --now whisper-feishu
 
 其他命令（`/mode`、`/task`、`/tasks`、`/orc`、`/watch`、`/记忆` 等）都还能用，完整列表见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-团队任务需要当前工作区是 git 仓库。默认**不开 worktree**：流水线任务直接在当前分支上提交，开工前工作区必须干净（有未提交改动会拒绝启动，commit 或 stash 后说「继续」），同一仓库同时只跑一个任务；不可逆操作（推送、部署等）必须你明确同意才会执行。设 `ORC_ISOLATION=worktree` 可回到「每个任务一个 worktree + 独立分支」的旧行为（loop 类任务始终用 worktree）。
+团队任务需要当前工作区是 git 仓库。**已完全停用 worktree**：所有任务（含 loop）都直接在当前分支上原地跑，不再建独立分支/worktree。开工前工作区必须干净（有未提交改动会拒绝启动，commit 或 stash 后说「继续」），同一仓库同时只跑一个任务；不可逆操作（推送、部署等）必须你明确同意才会执行。
 
 **管理台模式（`ADMIN_MODE=true`，Cursor 默认开启）：**
 

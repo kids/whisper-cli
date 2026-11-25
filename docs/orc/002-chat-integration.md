@@ -2,6 +2,8 @@
 
 > 日期：2026-11-06　状态：设计定稿，部分已实测　前置文档：[001](001-selection-and-architecture.md)
 >
+> **2026-11-25 更新**：worktree 已全部停用；文中 `isolation: worktree/fresh` 的示例为历史设计。
+>
 > 本文档覆盖并修订 001 的这几处：流水线不再写死在代码里（改为预制组合）；群级约束不落成文件（改为群公告注入）；`/team` 并入组合体系。（2026-11-09 修订：`/team` 已删除，从未上线；多视角调研用 `research`/`review` 组合，`discuss` 组合暂不做，确有需要再加。）
 >
 > **2026-11-10：本文之后新增了监督循环（`loop` 组合）、主 agent 的 answer / confirm / cancel / 对进行中任务的 config、卡片回复串、长任务监控和附件发送，这些不在本文里。当前实现以 [../ARCHITECTURE.md](../ARCHITECTURE.md) 为准。**
@@ -129,7 +131,7 @@ critic 待命 · tester 待命 · 退回 1/3
 实测本机 codebuddy 2.179.3：启动时会从 cwd 逐级向上加载 `CODEBUDDY.md` / `AGENTS.md`，同时支持 `--append-system-prompt` / `--system-prompt-file`。群级约束写成文件有三个问题：
 - **多个群互相干扰**：`projects.json` 会把多个群路由到同一个仓库，A 群的约束会影响 B 群，还会出现在 git 改动里；
 - **只对一家 CLI 有效**：codex 读 `AGENTS.md`，claude 读 `CLAUDE.md`，gemini 读 `GEMINI.md`，文件名各不相同；
-- orc 的每个 worktree 都要放一份，而且不能提交。
+- orc 的每个任务工作区都要放一份，而且不能提交。
 
 所以分成两层：
 - **仓库级规范**：继续用 `CODEBUDDY.md` / `AGENTS.md`，CLI 自动加载。
@@ -192,9 +194,9 @@ orc/presets/<name>.yaml   预制组合：用到的角色及各自的数量、阶
 name: dev
 roles:
   planner:     { count: 1 }
-  implementer: { count: 3, isolation: worktree }
+  implementer: { count: 3 }
   critic:      { count: 2, isolation: readonly, cli: codex }   # 刻意跟实现者用不同 CLI
-  tester:      { count: 1, isolation: fresh }
+  tester:      { count: 1 }
 stages:
   - { id: plan,   role: planner }
   - { id: impl,   role: implementer }

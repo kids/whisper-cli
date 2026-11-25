@@ -4,6 +4,8 @@
 >
 > 修订说明：群模式、进展同步、群公告约束、预制组合见 [002](002-chat-integration.md)。§4.1、§4.3、§4.4、§4.6、§4.7 中被 002 覆盖的地方已加标注。
 >
+> **2026-11-25 更新**：worktree 已全部停用（不建 worktree、不建任务分支、不合并）；文中按任务建 worktree 的描述均为历史设计。
+>
 > **2026-11-10：本文是选型阶段的历史记录。当前实现（含监督循环、监控、附件发送）以 [../ARCHITECTURE.md](../ARCHITECTURE.md) 为准。**
 
 ## 0. 目标
@@ -130,11 +132,11 @@ orc CLI submit     ┴─▶ Planner（LLM，只负责拆任务，输出 JSON）
 
 > 002 修订：改为 `orc/roles/*.md`（人工维护的角色库）+ `orc/presets/*.yaml`（预制组合）+ 群级调整。指令只能选择和调整，不能现场生成角色（`discuss` 除外）。下面的字段说明仍然适用于角色的 frontmatter。
 
-每个角色可配：`cli`、`model`、`count`（同时运行的数量）、`isolation`（`worktree` / `readonly` / `fresh`）、`tools`、`permission_mode`、`prompt`（追加的系统提示）、`max_turns`。
+每个角色可配：`cli`、`model`、`count`（同时运行的数量）、`isolation`（`write` / `readonly`）、`tools`、`permission_mode`、`prompt`（追加的系统提示）、`max_turns`。
 
 示例：
 
-- `implementer`：cb + 主力模型，3 个，每个任务一个 worktree；
+- `implementer`：cb + 主力模型，3 个，在主工作区写；
 - `critic`：2 个，只读，用**不同的 CLI 或模型**（比如 codex 或 claude）；
 - `tester`：1 个，每次都开全新会话，不继承实现者的对话，只看规格和产物；用例写入 `.orc/cases/`。
 
@@ -171,7 +173,7 @@ src/orc/
   effects.ts     持久化副作用队列 + 退避重试
   pool.ts        按 roles.yaml 分配角色名额
   runner.ts      role → src/ai/* 适配器；解析结构化输出
-  worktree.ts    每个任务一个 worktree，critic/tester 只读
+  gitops.ts      git 操作（共用主工作区，critic/tester 只读）
   prompts/       planner / implementer / critic / tester 模板
   cli.ts         orc submit / status / attach <task> / retry / stop（本地调试入口）
 src/agent-runner.ts  只加 /task 命令与卡片通知的接线（出入口）

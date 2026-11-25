@@ -17,7 +17,7 @@ export const ORC_CONFIG_DIR = resolve(import.meta.dirname, "../../orc");
 
 const CLIS: CliName[] = ["codebuddy", "codex", "claude", "gemini", "cursor", "pi"];
 const OUTPUTS: OutputKind[] = ["plan", "impl", "verdict", "test", "report", "action", "brief"];
-const ISOLATIONS: Isolation[] = ["worktree", "readonly", "fresh"];
+const ISOLATIONS: Isolation[] = ["write", "readonly"];
 export const MAX_ROLE_COUNT = 8;
 export const MAX_LOOPS_CAP = 500;
 
@@ -31,7 +31,7 @@ export function parseRoleMarkdown(name: string, src: string): RoleDef {
     cli: (fm.cli ?? "codebuddy") as CliName,
     model: fm.model ? String(fm.model) : undefined,
     output: fm.output as OutputKind,
-    isolation: (fm.isolation ?? "worktree") as Isolation,
+    isolation: (fm.isolation ?? "write") as Isolation,
     resume: Boolean(fm.resume ?? false),
     disallowedTools: Array.isArray(fm.disallowed_tools) ? fm.disallowed_tools.map(String) : undefined,
     hardTimeoutMin: Number(fm.hard_timeout_min ?? 30),

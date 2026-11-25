@@ -38,8 +38,6 @@ export type Outcome =
   | { kind: "parsed"; parsed: ParsedOutput }
   | { kind: "unparseable"; error: string }
   | { kind: "run_error"; error: string; timedOut: boolean }
-  /** dependency branch merge hit a content conflict: deterministic, never retried as a model fault */
-  | { kind: "merge_conflict"; branch: string; files: string[]; detail: string }
   | { kind: "cancelled" };
 
 export interface TaskPatch {
@@ -93,7 +91,7 @@ const pathOverlap = (a: string, b: string): boolean => {
 
 /**
  * Planner declares each subtask's files. If two siblings that could run in parallel touch the same
- * path, make the later one depend on the earlier one, so the worktree merge has nothing to resolve.
+ * path, make the later one depend on the earlier one, so changes do not overlap.
  * Deps only point backwards, so this cannot create a cycle.
  */
 export function serializeOverlapping(subtasks: PlanSubtask[]): PlanSubtask[] {
@@ -127,9 +125,9 @@ export interface DecideCtx {
   prev?: ParsedOutput;
   /** safety cap on rework rounds regardless of progress (a runaway guard, not the normal exit) */
   cap?: number;
-  /** this attempt committed something new to the worktree */
+  /** this attempt committed something new to the workspace */
   progressed?: boolean;
-  /** the task edits the repo in place (no per-task worktree): siblings would share one tree */
+  /** the task edits the repo in place: siblings would share one tree, so splitting is disabled */
   workspace?: boolean;
 }
 
@@ -151,15 +149,6 @@ export function decideAfterAttempt(task: Task, outcome: Outcome, ctx: DecideCtx 
     d.patch = { status: "dropped", progress: "已被用户终止" };
     d.notifies.push({ taskId: task.id, kind: "info", text: "任务已终止" });
     return d;
-  }
-
-  // A content conflict is a planning/dependency problem, not a transient failure. Retrying merges the
-  // same commits onto the same base and fails the same way, so stop at once and hand over the file list.
-  if (outcome.kind === "merge_conflict") {
-    const files = outcome.files.length
-      ? outcome.files.join("、")
-      : `（git 没有列出冲突文件：${outcome.detail.slice(0, 200) || "无输出"}）`;
-    return block(`依赖分支 \`${outcome.branch}\` 合并冲突：${files}。这是两边改了同一处的确定性冲突，不是模型或 whisper 故障；已停止自动重试。解掉冲突后说「重试」会从这里继续。`);
   }
 
   // "blocked" that only says "I got cut off, tell me to continue" is an unfinished run, not a decision

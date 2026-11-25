@@ -138,7 +138,7 @@ check("hasOrcState false on fresh ORC_HOME", hasOrcState() === false && !existsS
 // --- oversized prompts (spawn E2BIG, combinator 11-20): file fallback + compact diff stat ---
 {
   const { fitPromptArg, PROMPT_ARG_MAX } = await import("../src/orc/runner");
-  const { compactStat } = await import("../src/orc/worktree");
+  const { compactStat } = await import("../src/orc/gitops");
   const files = Array.from({ length: 1838 }, (_, i) => ` data/snapshots/rescan/item_${String(i).padStart(5, "0")}_${"x".repeat(40)}.json | 1 +`);
   const stat = [...files, " 1838 files changed, 1838 insertions(+)"].join("\n");
   const big = `# orc 任务\n\n## 本任务相对基线的改动\n${stat}\n\n## 输出约定（必须遵守）\n[[pass]] 一句话`;

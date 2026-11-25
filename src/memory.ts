@@ -2,7 +2,7 @@
 // Per-chat memory — long-lived facts/preferences scoped to one group
 // =============================================================================
 // Why not CodeBuddy's Auto Memory: it is keyed by cwd, so chats sharing a repo
-// leak into each other, orc worktrees fragment it, and other CLIs never see it.
+// leak into each other, orc tasks share one cwd, and other CLIs never see it.
 // This store is keyed by chatId, injected every turn next to the announcement,
 // and CLI-agnostic.
 //

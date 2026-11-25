@@ -8,9 +8,8 @@ export type CliName = "codebuddy" | "codex" | "claude" | "gemini" | "cursor" | "
 export type OutputKind = "plan" | "impl" | "verdict" | "test" | "report" | "action" | "brief";
 
 export type Isolation =
-  | "worktree"  // writes in the task worktree; changes are committed after the attempt
-  | "readonly"  // must not modify the worktree (tool denial; residual dirt is committed, never resetHard)
-  | "fresh";    // like worktree, but never resumes a previous session
+  | "write"     // 可在当前工作区写；本轮改动由 orc 提交
+  | "readonly"; // 只读（工具层拒绝；残留改动会提交保留，绝不 resetHard）
 
 export interface RoleDef {
   name: string;
@@ -139,7 +138,8 @@ export interface Task {
   repo: string;
   baseRef: string;
   branch: string | null;
-  worktree: string | null;
+  /** 任务所在的工作区（恒为 repo） */
+  workspace: string | null;
   preset: ResolvedPreset;
   stageIdx: number;
   status: TaskStatus;

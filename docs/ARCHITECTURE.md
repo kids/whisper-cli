@@ -40,7 +40,7 @@
           │
 编排层   orc（src/orc/*）：流水线引擎（core.ts）+ 监督循环引擎（loop.ts）+ 调度器（scheduler.ts）
           │
-持久层   state/*.json · ~/.orc/orc.db（SQLite）· ~/.orc/worktrees · ~/.orc/tasks/<id>/
+持久层   state/*.json · ~/.orc/orc.db（SQLite）· ~/.orc/tasks/<id>/
 ```
 
 ### 1.1 平台适配
@@ -135,9 +135,9 @@
 | 群公告（本群的长期指令） | 飞书群公告（docx） | 每轮注入所有 agent（单 agent、主 agent、orc 各角色） | 人直接改；主 agent 的 `announce` 动作需人确认后追加，带版本校验 |
 | 群记忆（事实、偏好） | `state/chat-memory/`（`CHAT_MEMORY_DIR`），每群 ≤60 条 | 每轮注入 | `/记住`、`/记忆 forget/clear`；单 agent 回复里的 `[[remember]]` / `[[forget]]`；主 agent 的 `remember` / `forget`。orc 的 worker 只读 |
 | 最近对话 | `state/recent-turns.json` | orc 主 agent（每条消息都是新会话，只靠它接上下文） | 单 agent 和主 agent 每轮自动记录 |
-| 任务事实（卡点、决策说明、最近运行、分支与 worktree） | `<群工作区>/.whisper/task-<id>.md`（写进本地 `git info/exclude`，不提交、不弄脏仓库） | 单 agent / 主 agent：每轮在任务行里注入一段摘要（卡点 + 建议 + 路径），全文按需读文件 | `src/orc/facts.ts`，在每次构造 prompt 时按任务重写 |
+| 任务事实（卡点、决策说明、最近运行、分支与工作区） | `<群工作区>/.whisper/task-<id>.md`（写进本地 `git info/exclude`，不提交、不弄脏仓库） | 单 agent / 主 agent：每轮在任务行里注入一段摘要（卡点 + 建议 + 路径），全文按需读文件 | `src/orc/facts.ts`，在每次构造 prompt 时按任务重写 |
 
-不用 CodeBuddy 自带的 Auto Memory：它按 cwd 区分，共用仓库的群会串，orc 的 worktree 会把它打散，其他 CLI 也看不到。
+不用 CodeBuddy 自带的 Auto Memory：它按 cwd 区分，共用仓库的群会串，orc 的任务又都共用同一个 cwd，其他 CLI 也看不到。
 
 ## 4. 长任务监控（`src/watch.ts`）
 
@@ -172,7 +172,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 ### 6.1 入口与主 agent
 
-- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，默认模型见 §6.2 角色表下方，可用 `ORC_LEAD_MODEL` 覆盖。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。任务行由 `src/orc/facts.ts` 生成：除状态和进展外，还带最近一次未过评审的结论、advisor 决策说明里的「建议 / 需要你定」，以及 `.whisper/task-<id>.md` 明细路径。所以「为什么没过」这类追问不必落到“我这边看不到”，lead 也不会再拿主仓库的干净工作区误判任务没产出（分支和 worktree 就在任务行里）。
+- 消息怎么到主 agent 见 §2.1。主 agent（lead）只读、短超时、每次新会话，默认模型见 §6.2 角色表下方，可用 `ORC_LEAD_MODEL` 覆盖。上下文是：本群模式和分派理由、最近对话、本群进行中的任务（含待回答的问题、当前角色）、可用的组合和角色、待确认的提议；在任务卡片回复串里说话时，还会标明是哪个任务。任务行由 `src/orc/facts.ts` 生成：除状态和进展外，还带最近一次未过评审的结论、advisor 决策说明里的「建议 / 需要你定」，以及 `.whisper/task-<id>.md` 明细路径。所以「为什么没过」这类追问不必落到“我这边看不到”，lead 也不会再拿主仓库的干净工作区误判任务没产出（分支和改动就在任务行里）。
 - **监督循环等人时**：任务行优先标「正在等人回答 → `answer`」；人说「继续…」「纠偏」「扩目标」一律 `answer`（解阻续跑）。`stop` 只认明确放弃用语（放弃 / 停掉 / 终止 / 算了等），不能把「继续团队任务」判成终止。流水线卡在评审 / 测试上的 `blocked`（无 pendingAsk）才用 retry / accept / stop。
 - **任务索引卡**（与监控卡同思路）：只显示 `#N 标题` + 当前 `progress` 原文（含 agent 的 `[[progress]]`），没有阶段 / 预算 / plan 等状态壳；卡主要当回复串锚点。问进展由主 agent `reply` 用人话答，代码不再复读整卡。
 - 兜底命令（用户一般不用）：`/mode auto|single|orc [组合]`、`/task <目标>`、`/task <id>`、`/task stop|retry|attach <id> …`、`/tasks`、`/orc`、`/orc preset <名> | reset | confirm | cancel`。bot 自己的提示文案只教自然语言（"回复「确认」""说「再试一次」"），不再教命令。
@@ -210,7 +210,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 |---|---|---|---|
 | planner | codebuddy / claude-sonnet-5.5 | plan | 只读 |
 | supervisor | codebuddy / claude-sonnet-5.5 | action | 只读 |
-| implementer / reproducer | codebuddy / deepseek-v4.1-flash-ioa | impl | worktree 可写（implementer 续接会话） |
+| implementer / reproducer | codebuddy / deepseek-v4.1-flash-ioa | impl | 主工作区可写（implementer 续接会话） |
 | tester | codebuddy / deepseek-v4.1-flash-ioa | test | 每次新开 |
 | researcher / synthesizer | codebuddy / deepseek-v4.1-flash-ioa | report | 只读 |
 | critic | codebuddy / gpt-6.1-sol | verdict | 只读 |
@@ -222,7 +222,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 
 任务在提交时快照角色。之后 bot 换了 CLI（旧 key 删掉、二进制卸载），`/task retry` 或「继续」/回答之前会把这些角色自动改绑到当前可用的 CLI（优先本群 bot 的 CLI），并丢掉旧 CLI 的会话（worker 重新开），不会因为旧适配器跑不起来而永远卡住。
 
-通用机制：每个任务一个 git worktree 和分支，写入角色每轮自动提交；只读角色越权写入会被回滚；角色并发名额限制；所有副作用（启动、通知、轮次）都是持久化 effect，崩溃恢复后重放。
+通用机制：所有任务共用主工作区和当前分支，写入角色每轮自动提交；只读角色越权写入会被提交保留并报告；同仓库任务串行；所有副作用（启动、通知、轮次）都是持久化 effect，崩溃恢复后重放。
 
 ### 6.3 流水线（`core.ts`）
 
@@ -257,7 +257,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | 标记 | 作用 | 代码做什么 |
 |---|---|---|
 | `[[instruct]] 指令` | 给 worker 下指令（续接会话，超 15 轮换新会话并附交接摘要） | 执行；文本里含不可逆操作（push、发到生产、删库等，前面有"不要"等否定词的不算）而没有人批准时，先停下问人一次，一次批准放行一次；只提到词不算（`部署目录`、`隔离部署后跑测试`），问话里引用命中的原句并写明怎么回（可以 / 不要 / 不是，继续），附上指令全文（超过 12000 字才截断）；回「不要」这类拒绝不算批准 |
-| `[[verify]] 命令` | 监督者要跑的只读命令，一行一条 | 在 worktree 里跑，结果作为证据记录；若改了文件则提交保留到任务分支（不 resetHard，以免误抹 worker WIP / 训练产物） |
+| `[[verify]] 命令` | 监督者要跑的只读命令，一行一条 | 在主工作区里跑，结果作为证据记录；若改了文件则提交保留到当前分支（不 resetHard，以免误抹 worker WIP / 训练产物） |
 | `[[review]] 重点` | 换一个模型审当前改动 | 跑审查角色，结论记录为证据 |
 | `[[wait]]` + `key=value` | 挂起等长作业（pid / log / done / file / every / timeout / heartbeat / keep=1） | 建监控后零 token 等待；巡检正常（keep=1）不占轮数；没有监控目标但写了 `every=10m` 时按定时重查挂起；两样都没有时这一轮明确报「缺监控目标」，不再静默当没动作 |
 | `[[ask]] 问题` | 需要人拍板的事 | 停下等人回一句话（没有选项菜单），回答前不推进 |
@@ -299,7 +299,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 ### 6.6 产物与恢复
 
 - `~/.orc/orc.db`（`ORC_HOME`）：`tasks` / `attempts` / `effects` / `ledgers` / `loop_steps`。
-- `~/.orc/worktrees/`：每个任务的工作区；`~/.orc/tasks/<id>/`：每轮的提示词和输出（监督循环为 `loop-<n>-<role>.prompt.md` / `.output.md`）。
+- `~/.orc/tasks/<id>/`：每轮的提示词和输出（监督循环为 `loop-<n>-<role>.prompt.md` / `.output.md`）。
 - 启动时把运行中的 effect 重置为待执行（标记 recover），未完成的任务接着推进。
 
 ## 7. 状态文件
@@ -311,7 +311,7 @@ agent 先把图片或报告存成本地文件，再在回复里单独占一行�
 | `state/recent-turns.json` | 最近对话 |
 | `state/watches.json` | 监控 |
 | `state/orc-chats.json` | 每群的模式、编排、待确认提议 |
-| `~/.orc/` | orc 数据库（`tasks` 里的 `bar` 是这单的评审口径）、worktree、每轮产物、卡片映射（`cards.json`、`agent-cards.json`） |
+| `~/.orc/` | orc 数据库（`tasks` 里的 `bar` 是这单的评审口径）、每轮产物、卡片映射（`cards.json`、`agent-cards.json`） |
 | `.tasks.json` | 管理群的工作组 ↔ 会话（沿用 feishu-cursor） |
 
 ## 8. 协议标记（`[[...]]`）

@@ -20,7 +20,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const T0 = Date.now();
 const task: any = {
   id: 7, kind: "pipeline", chatId: "oc_x",
-  preset: { roles: { researcher: { isolation: "worktree" }, critic: { isolation: "readonly" } }, stages: [] },
+  preset: { roles: { researcher: { isolation: "write" }, critic: { isolation: "readonly" } }, stages: [] },
 };
 const att = (o: any): any => ({
   id: 1, taskId: 7, stageId: "research", role: "researcher", slot: 0, cli: "codebuddy", model: "deepseek-v4.1-flash-ioa",

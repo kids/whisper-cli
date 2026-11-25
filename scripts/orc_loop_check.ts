@@ -14,7 +14,7 @@ const L = await import("../src/orc/ledger");
 const { loadPresets, loadRoles, resolvePreset } = await import("../src/orc/config");
 const { Orchestrator } = await import("../src/orc/scheduler");
 const { OrcStore } = await import("../src/orc/store");
-const wt = await import("../src/orc/worktree");
+const wt = await import("../src/orc/gitops");
 import { classifyResult, type Executor, type RunRequest, type RunResult } from "../src/orc/runner";
 import type { NotifyPayload } from "../src/orc/types";
 
@@ -112,7 +112,7 @@ const mk = (over: Partial<Parameters<typeof L.createLedger>[0]> = {}) =>
   check("readonly abort: 没有写权限", r("我没有写权限，放弃"));
   check("readonly abort: 正常放弃不算", !r("目标在当前数据上不可达：三种口径都跑过，test 全为负，继续迭代没有意义"));
   check("readonly abort: 只读取证不算", !r("只读取证后确认数据源已下线，无法继续"));
-  check("readonly abort: prompt 提醒", /不要用你 CLI 自带的子 agent/.test(L.buildSupervisorPrompt(mk(), { taskId: 1, title: "t", worktree: "/w", branch: "b", diffStat: "", worker: "w", reason: "start", canWait: false, fresh: true })));
+  check("readonly abort: prompt 提醒", /不要用你 CLI 自带的子 agent/.test(L.buildSupervisorPrompt(mk(), { taskId: 1, title: "t", workspace: "/w", branch: "b", diffStat: "", worker: "w", reason: "start", canWait: false, fresh: true })));
 }
 
 // ---- engine end-to-end (scripted CLIs) -----------------------------------------
@@ -435,7 +435,7 @@ async function e2e() {
       },
     ]);
     await drive(() => store.getTask(id)!.status === "ready");
-    const wtp = store.getTask(id)!.worktree!;
+    const wtp = store.getTask(id)!.workspace!;
     const body = readFileSync(join(wtp, "feat.py"), "utf8");
     const l = orc.loop.ledger(id)!;
     check("C3 e2e feat.py WIP kept", body.includes("worker-wip"), body);
@@ -608,7 +608,7 @@ async function e2e() {
     const { repo, store, exec, notes, orc, drive, done } = setup();
     const t = orc.submit({ goal: "补提交复现输入", repo, preset: loopPreset, criteria: ["提交完成"] });
     const id = t.id;
-    exec.worker.set(id, () => { writeFileSync(join(store.getTask(id)!.worktree!, "inputs.txt"), "pinned\n"); return "已提交 inputs.txt"; });
+    exec.worker.set(id, () => { writeFileSync(join(store.getTask(id)!.workspace!, "inputs.txt"), "pinned\n"); return "已提交 inputs.txt"; });
     const deny = "当前 supervisor 会话与 worker 子会话都是硬只读，所有写路径均被 sandbox 拒绝（Operation not permitted），请提供可写 session";
     exec.sup.set(id, [
       S({ action: "abort", reason: deny }),

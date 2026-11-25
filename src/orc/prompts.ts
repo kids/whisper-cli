@@ -119,10 +119,10 @@ export function buildStagePrompt(c: PromptContext): string {
   out.push(`## 目标\n${task.goal}`);
   if (task.parentId) out.push(`（这是父任务 #${task.parentId} 拆出的子任务：${task.title}）`);
   out.push(`## 规格\n${task.spec || "（尚无规格）"}`);
-  out.push(`## 工作区\n当前目录是本任务专用的 git worktree（分支 \`${task.branch}\`，基线 \`${task.baseRef.slice(0, 12)}\`）。代码改动只在这里工作。` +
-    `\n**产物落盘**：仓库忽略的 \`tmp/\` 已软链到主仓库 \`tmp/orc/${slug}/\`，数据、日志、中间结果直接写 \`tmp/...\` 就会落在主仓库；不要把大文件写进 git 跟踪目录，也不要留在 worktree 里。`);
+  out.push(`## 工作区\n当前目录就是仓库主工作区（分支 \`${task.branch}\`，基线 \`${task.baseRef.slice(0, 12)}\`）。代码改动直接落在这里。` +
+    `\n**产物落盘**：数据、日志、中间结果写到 \`tmp/\`（仓库忽略）；不要把大文件写进会被提交的目录。`);
   if (role.output === "impl") {
-    out.push(`## 依赖与共享文件\n- 依赖分支已由 orc 合并进当前分支；先 \`git log --oneline -8\` 确认，不要再自己 merge 一遍。\n- 改共享文档（README、*_REPORT.md、EXPERIMENT_LOG.md、CHANGELOG.md 等）只在自己的小节追加，不要重写别人段落。若发现依赖分支改过同一段、两边结论无法两全，用 [[blocked]] 写清文件和两边内容，不要自行删改对方结论。`);
+    out.push(`## 依赖与共享文件\n- 所有任务共用同一个分支；先 \`git log --oneline -8\` 确认现状，不要 merge 别的分支。\n- 改共享文档（README、*_REPORT.md、EXPERIMENT_LOG.md、CHANGELOG.md 等）只在自己的小节追加，不要重写别人段落。若发现依赖分支改过同一段、两边结论无法两全，用 [[blocked]] 写清文件和两边内容，不要自行删改对方结论。`);
   }
 
   if (c.history.length) {

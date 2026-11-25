@@ -72,7 +72,7 @@ import {
   RESET_ARGS, formatWorkspaceHint, getSavedWorkspace, parseSwitchWorkspaceIntent, resolveWorkspaceTarget, saveWorkspace,
   savedWorkspaces, workspaceCommandArg, type ChatWorkspace,
 } from "./workspace";
-import { repoRoot } from "./orc/worktree";
+import { repoRoot } from "./orc/gitops";
 import { handleOrcCommand, runLeadTurn, submitTaskOp, type OrcChatHost } from "./orc/commands";
 import { activeTaskSummary, getOrc, getProfile, hasOrcState, registerBot, routeContext, stopChatTasks, taskForCard } from "./orc/chat";
 import { extractTaskOps, formatTaskHint, routeMessage, timeoutHandoffOp } from "./orc/route";

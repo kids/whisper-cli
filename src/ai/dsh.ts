@@ -190,10 +190,9 @@ export function runDsh(opts: RunDshOptions): Promise<AiResult> {
     const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
     // No TTY: approval prompts could only stall, so the policy is always "never".
     // Read-only roles get the read-only preset. Write roles get danger-full-access:
-    // workspace-write only covers the cwd, and an orc worktree keeps its git
-    // metadata in the *main* repo (often another volume), so `git add` dies on
-    // .git/worktrees/.../index.lock. That is the same trust level as cursor's
-    // --force / codebuddy's bypassPermissions / claude's --dangerously-skip-permissions.
+    // they must run git add/commit and arbitrary build/test commands in the repo.
+    // That is the same trust level as cursor's --force / codebuddy's
+    // bypassPermissions / claude's --dangerously-skip-permissions.
     const args = [
       "--profile", profile, "--json",
       "--permission-mode", opts.readOnly ? "read-only" : "danger-full-access",
