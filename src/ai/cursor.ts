@@ -16,6 +16,9 @@ const DEFAULT_BIN = findBinary("agent", [
 ]);
 const STALL_TIMEOUT_MS = Number(process.env.AGENT_STALL_MS || 45 * 60 * 1000);
 const HARD_TIMEOUT_MS = Number(process.env.AGENT_MAX_MS || 0);
+// Cursor only accepts a bare UUID as a chat id; other backends (e.g. dsh) use
+// "session-<uuid>", which Cursor rejects.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ---------------------------------------------------------------------------
 // Session store (chat_id -> session_id)
@@ -173,7 +176,13 @@ export function runCursor(opts: RunCursorOptions): Promise<AiResult> {
   const model = opts.model && opts.model !== "default" ? opts.model : "auto";
   const stallMs = opts.staleTimeoutMs ?? STALL_TIMEOUT_MS;
   const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;
-  const sessionId = sessions.get(chatId);
+  let sessionId = sessions.get(chatId);
+  if (sessionId && !UUID_RE.test(sessionId)) {
+    // Left over from another AI backend — resuming it would fail the whole run.
+    console.warn(`[cursor] drop foreign session chat=${chatId.slice(0, 8)} sid=${sessionId.slice(0, 24)}`);
+    sessions.delete(chatId);
+    sessionId = undefined;
+  }
   const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
 
   const onStreamUpdate = opts.onStreamUpdate;
