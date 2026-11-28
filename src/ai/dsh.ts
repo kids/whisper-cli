@@ -186,7 +186,13 @@ export function runDsh(opts: RunDshOptions): Promise<AiResult> {
   const hardMs = opts.hardTimeoutMs ?? HARD_TIMEOUT_MS;
 
   async function attempt(resume: boolean): Promise<AiResult | null> {
-    const sid = resume ? sessions.get(chatId) : undefined;
+    let sid = resume ? sessions.get(chatId) : undefined;
+    // A bare UUID here is a Cursor/codebuddy-style id; dsh would exit 1 on it.
+    if (sid && !/^session-[0-9a-f-]{36}$/i.test(sid)) {
+      console.warn(`[dsh] drop foreign session chat=${chatId.slice(0, 8)} sid=${sid.slice(0, 24)}`);
+      sessions.delete(chatId);
+      sid = undefined;
+    }
     const addDirs = [...new Set((opts.addDirs || []).filter(Boolean))];
     // No TTY: approval prompts could only stall, so the policy is always "never".
     // Read-only roles get the read-only preset. Write roles get danger-full-access:
