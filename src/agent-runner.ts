@@ -175,6 +175,13 @@ function pushSessionToAi(aiCli: AgentConfig["aiCli"], chatId: string, sid: strin
   else if (aiCli === "dsh") setDshSession(chatId, sid);
 }
 
+/** Session ids are not portable between CLIs (cursor: UUID, dsh: "session-<uuid>"). */
+function sessionFitsBackend(aiCli: AgentConfig["aiCli"], sid: string): boolean {
+  if (aiCli === "cursor") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid);
+  if (aiCli === "dsh") return /^session-[0-9a-f-]{36}$/i.test(sid);
+  return true;
+}
+
 /**
  * Record sessionId in agent-runner's sessions Map (what writeStateNow persists)
  * and mirror it into the AI module Map (what the next run resumes from).
@@ -331,6 +338,11 @@ export class AgentRunner {
     // Load into agent-runner Maps, then hydrate AI module Maps (codex threads / cursor sessions / …)
     const loadedSessions = loadAgentState(this.statePath);
     for (const [chatId, sid] of Object.entries(loadedSessions)) {
+      if (!sessionFitsBackend(config.aiCli, sid)) {
+        sessions.delete(chatId); // left over from another backend; keep the file entry for that backend
+        console.warn(`[state] skip foreign session chat=${chatId.slice(0, 8)} sid=${sid.slice(0, 24)}`);
+        continue;
+      }
       pushSessionToAi(config.aiCli, chatId, sid);
     }
     currentStatePath = "";
@@ -340,7 +352,7 @@ export class AgentRunner {
     // Hydrate chatWorkspace from registered tasks; also backfill session if state file lacked it
     for (const t of listTasks(true)) {
       chatWorkspace.set(t.chatId, { workspace: t.workspace, label: t.projectLabel });
-      if (t.cursorSessionId) {
+      if (t.cursorSessionId && sessionFitsBackend(config.aiCli, t.cursorSessionId)) {
         rememberSession(config.aiCli, t.chatId, t.cursorSessionId, { persist: false });
       }
     }
@@ -372,6 +384,7 @@ export class AgentRunner {
     im.onMessage(this.handleMessage.bind(this));
     await im.start();
     console.log(`[${this.label}] ${PLATFORM_LABEL[platform]} started (adminMode=${!!this.config.adminMode})`);
+    await this.recoverInflight(im);
     {
       // orc: let cards/notifications reach chats after a restart, and resume left-over tasks
       // without waiting for someone to touch orc first
@@ -1125,6 +1138,52 @@ export class AgentRunner {
   }
 
   // -----------------------------------------------------------------------
+  // Interrupted-turn journal — a restart must not leave a card spinning
+  // "正在生成" / "审视中" forever.
+  // -----------------------------------------------------------------------
+
+  private inflightPath(): string {
+    return resolve(this.statePath, "..", `inflight_${this.config.index}.json`);
+  }
+
+  private journalInflight(chatId: string, cardId: string): void {
+    try {
+      const p = this.inflightPath();
+      let m: Record<string, string> = {};
+      if (existsSync(p)) m = JSON.parse(readFileSync(p, "utf8"));
+      m[chatId] = cardId;
+      writeFileSync(p, JSON.stringify(m));
+    } catch { /* best effort */ }
+  }
+
+  private settleInflight(chatId: string): void {
+    try {
+      const p = this.inflightPath();
+      if (!existsSync(p)) return;
+      const m: Record<string, string> = JSON.parse(readFileSync(p, "utf8"));
+      if (!(chatId in m)) return;
+      delete m[chatId];
+      writeFileSync(p, JSON.stringify(m));
+    } catch { /* best effort */ }
+  }
+
+  private async recoverInflight(im: ImClient): Promise<void> {
+    const p = this.inflightPath();
+    if (!existsSync(p)) return;
+    let m: Record<string, string> = {};
+    try { m = JSON.parse(readFileSync(p, "utf8")); } catch { return; }
+    const entries = Object.entries(m);
+    if (!entries.length) return;
+    for (const [chatId, cardId] of entries) {
+      const text = "⚠️ 服务已重启，上一轮对话被中断，请重新发送。";
+      const ok = cardId ? await im.updateCardMessage(cardId, text).catch(() => false) : false;
+      if (!ok) await im.sendToChat(chatId, text).catch(() => {});
+      console.log(`[recover] interrupted turn chat=${chatId.slice(0, 8)} via=${ok ? "card" : "message"}`);
+    }
+    try { writeFileSync(p, "{}"); } catch { /* ignore */ }
+  }
+
+  // -----------------------------------------------------------------------
   // Run AI with streaming card
   // -----------------------------------------------------------------------
 
@@ -1183,6 +1242,7 @@ export class AgentRunner {
         const init = isReview ? `🔍 审视中 [${label}]…` : `⚙️ 正在生成 [${label}]…`;
         cardId = await im.sendCardAndGetId(chatId, init, { replyTo: ev.messageId, placeholder: true });
       } catch { /* fallback */ }
+      if (cardId) this.journalInflight(chatId, cardId);
     }
 
     // Telegram rate-limits edits (≈20/min in groups); others take 2/s fine
@@ -1323,6 +1383,7 @@ export class AgentRunner {
       if (cardId) {
         await im.finalizeCard(cardId, silentWatchUpdates ? "👀 监控卡片已更新" : "✅ 完成").catch(() => false);
       }
+      this.settleInflight(chatId);
       return;
     }
 
@@ -1349,6 +1410,7 @@ export class AgentRunner {
       }
       await im.sendPostMarkdown(chatId, body);
     }
+    this.settleInflight(chatId);
 
     // one in-place progress card per new watch
     for (const w of newWatches) {
